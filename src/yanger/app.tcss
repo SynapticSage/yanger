@@ -1,0 +1,41 @@
+/* YouTube Ranger Theme */
+/* Created: 2025-08-03 */
+
+Screen {
+    background: $surface;
+}
+
+#main-container {
+    width: 100%;
+    height: 1fr;
+    background: $surface;
+}
+
+#loading-message {
+    width: 100%;
+    height: 100%;
+    content-align: center middle;
+    text-style: italic;
+    color: $text-muted;
+}
+
+#miller-view {
+    width: 100%;
+    height: 100%;
+}
+
+#status-bar {
+    height: 1;
+    dock: bottom;
+}
+
+/* Focus styles for columns */
+.focused {
+    border: solid $primary;
+}
+
+/* Loading indicator */
+LoadingIndicator {
+    content-align: center middle;
+    color: $primary;
+}

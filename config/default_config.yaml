@@ -1,0 +1,59 @@
+# Default configuration for YouTube Ranger
+# Created: 2025-08-03
+
+ui:
+  colorscheme: default
+  show_hidden: false  # Show private playlists
+  preview_lines: 10
+  column_ratios: [0.3, 0.4, 0.3]
+  show_icons: true
+  confirm_delete: true
+  auto_refresh: false
+  refresh_interval: 300  # seconds
+
+keybindings:
+  # General
+  quit: ['q', 'Q']
+  help: ['?']
+  command: [':']
+  search: ['/']
+  
+  # Navigation
+  up: ['k']
+  down: ['j']
+  left: ['h']
+  right: ['l']
+  top: ['g', 'g']
+  bottom: ['G']
+  
+  # Selection
+  mark: [' ']  # space
+  visual: ['v']
+  unselect_all: ['u', 'v']
+  invert_selection: ['V']
+  
+  # Operations
+  copy: ['y', 'y']
+  cut: ['d', 'd']
+  paste: ['p', 'p']
+  delete: ['d', 'D']
+  rename: ['c', 'w']
+  
+  # Playlist operations
+  new_playlist: ['g', 'n']
+  delete_playlist: ['g', 'd']
+  refresh: ['g', 'r']
+  refresh_all: ['g', 'R']
+
+cache:
+  enabled: true
+  directory: ".yanger_cache"
+  ttl: 3600  # 1 hour
+  max_size_mb: 100
+
+youtube:
+  client_secrets_file: "config/client_secret.json"
+  token_file: "token.json"
+  max_results_per_page: 50
+  quota_warning_threshold: 7500  # 75%
+  quota_critical_threshold: 9000  # 90%
