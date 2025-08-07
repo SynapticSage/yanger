@@ -187,7 +187,7 @@ class VideoColumn(ScrollableContainer):
         await self.remove_children()
         
         if not self.videos:
-            yield Static("No videos in playlist", classes="empty-message")
+            await self.mount(Static("No videos in playlist", classes="empty-message"))
             return
             
         for i, video in enumerate(self.videos):
@@ -417,6 +417,19 @@ class MillerView(Widget):
         elif key == 'l':  # Move right
             self.focused_column = min(2, self.focused_column + 1)
             
+        # Enter key - trigger selection
+        elif key == 'enter':
+            if self.focused_column == 0 and self.playlist_column:
+                # Trigger playlist selection
+                if 0 <= self.playlist_column.selected_index < len(self.playlist_column.playlists):
+                    playlist = self.playlist_column.playlists[self.playlist_column.selected_index]
+                    self.post_message(PlaylistSelected(playlist))
+            elif self.focused_column == 1 and self.video_column:
+                # Trigger video selection
+                if 0 <= self.video_column.selected_index < len(self.video_column.videos):
+                    video = self.video_column.videos[self.video_column.selected_index]
+                    self.post_message(VideoSelected(video))
+                    
         # Vertical navigation in focused column
         elif key in ['j', 'k', 'g', 'G']:
             if self.focused_column == 0 and self.playlist_column:

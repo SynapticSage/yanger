@@ -221,29 +221,29 @@ class YouTubeRangerApp(App):
         # TODO: Implement command mode
         self.notify("Command mode not implemented yet", severity="warning")
     
-    async def on_playlist_selected(self, playlist: Playlist) -> None:
-        """Handle playlist selection."""
-        await self.load_playlist_videos(playlist)
-    
-    async def on_video_selected(self, video: Video) -> None:
-        """Handle video selection."""
-        self.current_video = video
-        
-        # Update preview if miller view exists
-        if self.miller_view:
-            await self.miller_view.update_preview(video)
     
     async def on_key(self, event: events.Key) -> None:
         """Handle global key events."""
         # Let miller view handle navigation keys
-        if self.miller_view and event.key in ['h', 'j', 'k', 'l', 'g', 'G']:
+        if self.miller_view and event.key in ['h', 'j', 'k', 'l', 'g', 'G', 'enter']:
             await self.miller_view.handle_key(event.key)
             event.stop()
     
-    async def on_playlist_selected_message(self, message: PlaylistSelected) -> None:
+    def on_playlist_selected(self, message: PlaylistSelected) -> None:
         """Handle playlist selection message."""
-        await self.on_playlist_selected(message.playlist)
+        # Create task to handle async operation
+        self.call_later(self.handle_playlist_selection, message.playlist)
     
-    async def on_video_selected_message(self, message: VideoSelected) -> None:
+    def on_video_selected(self, message: VideoSelected) -> None:
         """Handle video selection message."""
-        await self.on_video_selected(message.video)
+        self.call_later(self.handle_video_selection, message.video)
+    
+    async def handle_playlist_selection(self, playlist: Playlist) -> None:
+        """Handle playlist selection."""
+        await self.load_playlist_videos(playlist)
+    
+    async def handle_video_selection(self, video: Video) -> None:
+        """Handle video selection."""
+        self.current_video = video
+        if self.miller_view:
+            await self.miller_view.update_preview(video)
