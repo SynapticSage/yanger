@@ -247,6 +247,16 @@ class VideoColumn(ScrollableContainer):
             video = self.videos[self.selected_index]
             video.is_marked = not video.is_marked
             asyncio.create_task(self.refresh_display())
+            
+    def get_marked_videos(self) -> List[Video]:
+        """Get all marked videos."""
+        return [v for v in self.videos if v.is_marked]
+    
+    def clear_marks(self) -> None:
+        """Clear all marks."""
+        for video in self.videos:
+            video.is_marked = False
+        asyncio.create_task(self.refresh_display())
 
 
 class PreviewPane(ScrollableContainer):
@@ -396,6 +406,12 @@ class MillerView(Widget):
         if self.preview_pane:
             await self.preview_pane.show_video(video)
             
+    def get_marked_count(self) -> int:
+        """Get count of marked videos in current column."""
+        if self.video_column:
+            return len(self.video_column.get_marked_videos())
+        return 0
+            
     def watch_focused_column(self, old_value: int, new_value: int) -> None:
         """Update focus styling when column focus changes."""
         columns = [self.playlist_column, self.video_column, self.preview_pane]
@@ -429,6 +445,24 @@ class MillerView(Widget):
                 if 0 <= self.video_column.selected_index < len(self.video_column.videos):
                     video = self.video_column.videos[self.video_column.selected_index]
                     self.post_message(VideoSelected(video))
+                    
+        # Space key - toggle mark on video
+        elif key == ' ' and self.focused_column == 1 and self.video_column:
+            self.video_column.toggle_mark()
+            self.video_column.move_selection(1)  # Move to next item like ranger
+            # Notify about mark change
+            self.post_message(MarksChanged(self.get_marked_count()))
+            
+        # Ranger-style commands
+        elif key == 'd' and self.focused_column == 1 and self.video_column:
+            # Handle dd (cut) - wait for second 'd'
+            self.post_message(RangerCommand('d'))
+        elif key == 'y' and self.focused_column == 1 and self.video_column:
+            # Handle yy (copy) - wait for second 'y'
+            self.post_message(RangerCommand('y'))
+        elif key == 'p' and self.focused_column == 1:
+            # Handle pp (paste) - wait for second 'p'
+            self.post_message(RangerCommand('p'))
                     
         # Vertical navigation in focused column
         elif key in ['j', 'k', 'g', 'G']:
@@ -466,3 +500,17 @@ class VideoSelected(events.Message):
     def __init__(self, video: Video):
         super().__init__()
         self.video = video
+
+
+class RangerCommand(events.Message):
+    """Message sent when a ranger-style command key is pressed."""
+    def __init__(self, command: str):
+        super().__init__()
+        self.command = command
+
+
+class MarksChanged(events.Message):
+    """Message sent when video marks change."""
+    def __init__(self, count: int):
+        super().__init__()
+        self.count = count

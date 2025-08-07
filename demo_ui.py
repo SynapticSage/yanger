@@ -135,7 +135,7 @@ class DemoApp(App):
     
     async def on_key(self, event) -> None:
         """Handle key events."""
-        if self.miller_view and event.key in ['h', 'j', 'k', 'l', 'g', 'G', ' ']:
+        if self.miller_view and event.key in ['h', 'j', 'k', 'l', 'g', 'G', ' ', 'enter']:
             await self.miller_view.handle_key(event.key)
             event.stop()
     
