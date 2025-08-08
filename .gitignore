@@ -78,3 +78,6 @@ site/
 # User configuration
 config/user_config.yaml
 config/keybindings_user.yaml
+
+# Project-specific documentation
+CLAUDE.md
