@@ -84,11 +84,22 @@ class StatusBar(Widget):
         """Initialize status bar with default values."""
         self.update_hints()
         
-    def update_context(self, context: str) -> None:
-        """Update the current context (left side)."""
+    def update_context(self, context: str, marked_count: int = 0) -> None:
+        """Update the current context (left side).
+        
+        Args:
+            context: Context string to display
+            marked_count: Number of marked items
+        """
         self.context = context
+        display_text = context
+        
+        # Add Mrk indicator if items are marked
+        if marked_count > 0:
+            display_text = f"[yellow]Mrk[/yellow] {marked_count} | {context}"
+            
         if self.left_widget:
-            self.left_widget.update(context)
+            self.left_widget.update(display_text)
             
     def update_status(self, status: str, quota: str = "") -> None:
         """Update status message and quota info."""
@@ -121,10 +132,17 @@ class StatusBar(Widget):
                     
             self.right_widget.update(f"Quota: {quota}")
             
-    def update_hints(self) -> None:
-        """Update keyboard hints based on current mode."""
-        # Default hints
-        hints = "q:quit ?:help /:search yy:copy dd:cut pp:paste"
+    def update_hints(self, custom_hints: Optional[str] = None) -> None:
+        """Update keyboard hints based on current mode.
+        
+        Args:
+            custom_hints: Custom hint text to display
+        """
+        if custom_hints:
+            hints = custom_hints
+        else:
+            # Default hints - corrected to match ranger behavior
+            hints = "q:quit /:search V:visual v:invert space:mark yy:copy dd:cut pp:paste"
         
         if self.center_widget:
             self.center_widget.update(hints)

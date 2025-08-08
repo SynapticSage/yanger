@@ -1,15 +1,19 @@
 """Caching system for YouTube Ranger.
 
-Caches playlist video lists to avoid redundant API calls during navigation.
+Provides persistent caching of playlist and video data using SQLite.
 """
-# Created: 2025-08-07
+# Modified: 2025-08-08
 
+import sqlite3
+import json
 import time
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timedelta
 import logging
 
-from .models import Video
+from .models import Video, Playlist, PrivacyStatus
 
 
 logger = logging.getLogger(__name__)
@@ -23,23 +27,175 @@ class CacheEntry:
     hits: int = 0
 
 
-class PlaylistCache:
-    """In-memory cache for playlist videos with TTL support."""
+class PersistentCache:
+    """SQLite-based persistent cache for playlists and videos."""
     
-    def __init__(self, ttl_seconds: int = 300, max_entries: int = 50):
-        """Initialize cache.
+    SCHEMA_VERSION = 1
+    
+    def __init__(self, cache_dir: Optional[Path] = None, 
+                 ttl_days: int = 7,
+                 auto_cleanup: bool = True):
+        """Initialize persistent cache.
         
         Args:
-            ttl_seconds: Time-to-live in seconds (default: 5 minutes)
-            max_entries: Maximum cache entries before LRU eviction
+            cache_dir: Directory for cache database (default: ~/.cache/yanger)
+            ttl_days: Time-to-live in days (default: 7)
+            auto_cleanup: Automatically clean expired entries (default: True)
         """
-        self.ttl_seconds = ttl_seconds
-        self.max_entries = max_entries
-        self._cache: Dict[str, CacheEntry] = {}
-        self._access_order: List[str] = []  # For LRU tracking
+        self.ttl_days = ttl_days
+        self.auto_cleanup = auto_cleanup
         
-    def get(self, playlist_id: str) -> Optional[List[Video]]:
-        """Get videos from cache if fresh.
+        # Setup cache directory
+        if cache_dir is None:
+            cache_dir = Path.home() / ".cache" / "yanger"
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Database path
+        self.db_path = self.cache_dir / "cache.db"
+        
+        # Initialize database
+        self._init_database()
+        
+        # Cleanup expired entries on startup
+        if auto_cleanup:
+            self.cleanup_expired()
+            
+        logger.info(f"Initialized persistent cache at {self.db_path}")
+        
+    def _init_database(self) -> None:
+        """Initialize SQLite database with schema."""
+        with sqlite3.connect(self.db_path) as conn:
+            # Enable foreign keys
+            conn.execute("PRAGMA foreign_keys = ON")
+            
+            # Create tables
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cache_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS playlists (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    item_count INTEGER,
+                    privacy_status TEXT,
+                    channel_id TEXT,
+                    channel_title TEXT,
+                    etag TEXT,
+                    cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    accessed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    hit_count INTEGER DEFAULT 0
+                )
+            """)
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS videos (
+                    id TEXT,
+                    playlist_id TEXT,
+                    playlist_item_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    channel_title TEXT,
+                    description TEXT,
+                    position INTEGER,
+                    duration TEXT,
+                    view_count INTEGER,
+                    added_at TIMESTAMP,
+                    published_at TIMESTAMP,
+                    cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Create indices for performance
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_playlist ON videos(playlist_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_playlists_cached ON playlists(cached_at)")
+            
+            # Check and update schema version
+            cursor = conn.execute("SELECT value FROM cache_metadata WHERE key = 'schema_version'")
+            row = cursor.fetchone()
+            
+            if row is None:
+                conn.execute(
+                    "INSERT INTO cache_metadata (key, value) VALUES ('schema_version', ?)",
+                    (str(self.SCHEMA_VERSION),)
+                )
+            elif int(row[0]) < self.SCHEMA_VERSION:
+                # Handle schema migrations here in the future
+                logger.info(f"Migrating cache schema from version {row[0]} to {self.SCHEMA_VERSION}")
+                conn.execute(
+                    "UPDATE cache_metadata SET value = ? WHERE key = 'schema_version'",
+                    (str(self.SCHEMA_VERSION),)
+                )
+            
+            conn.commit()
+    
+    def get_playlists(self) -> Optional[List[Playlist]]:
+        """Get all cached playlists.
+        
+        Returns:
+            List of playlists if cached, None if cache is empty
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM playlists 
+                ORDER BY title
+            """)
+            
+            rows = cursor.fetchall()
+            if not rows:
+                return None
+                
+            playlists = []
+            for row in rows:
+                playlist = Playlist(
+                    id=row['id'],
+                    title=row['title'],
+                    description=row['description'] or '',
+                    item_count=row['item_count'] or 0,
+                    privacy_status=PrivacyStatus(row['privacy_status']) if row['privacy_status'] else PrivacyStatus.PRIVATE,
+                    channel_id=row['channel_id'],
+                    channel_title=row['channel_title']
+                )
+                playlists.append(playlist)
+                
+            logger.debug(f"Loaded {len(playlists)} playlists from cache")
+            return playlists
+    
+    def set_playlists(self, playlists: List[Playlist]) -> None:
+        """Cache a list of playlists.
+        
+        Args:
+            playlists: List of playlists to cache
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            # Use REPLACE to update existing or insert new
+            for playlist in playlists:
+                conn.execute("""
+                    INSERT OR REPLACE INTO playlists 
+                    (id, title, description, item_count, privacy_status, channel_id, channel_title, cached_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    playlist.id,
+                    playlist.title,
+                    playlist.description,
+                    playlist.item_count,
+                    playlist.privacy_status.value,
+                    playlist.channel_id,
+                    playlist.channel_title
+                ))
+            
+            conn.commit()
+            logger.debug(f"Cached {len(playlists)} playlists")
+    
+    def get_videos(self, playlist_id: str) -> Optional[List[Video]]:
+        """Get videos for a playlist from cache.
         
         Args:
             playlist_id: ID of the playlist
@@ -47,107 +203,238 @@ class PlaylistCache:
         Returns:
             List of videos if cached and fresh, None otherwise
         """
-        if playlist_id not in self._cache:
-            return None
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
             
-        entry = self._cache[playlist_id]
-        current_time = time.time()
-        
-        # Check if expired
-        if current_time - entry.timestamp > self.ttl_seconds:
-            logger.debug(f"Cache expired for playlist {playlist_id}")
-            del self._cache[playlist_id]
-            self._access_order.remove(playlist_id)
-            return None
+            # Check if playlist exists and is not expired
+            cursor = conn.execute("""
+                SELECT cached_at FROM playlists WHERE id = ?
+            """, (playlist_id,))
             
-        # Update access tracking
-        entry.hits += 1
-        self._update_access_order(playlist_id)
+            row = cursor.fetchone()
+            if row is None:
+                return None
+                
+            # Check if expired
+            cached_at = datetime.fromisoformat(row['cached_at'])
+            if datetime.now() - cached_at > timedelta(days=self.ttl_days):
+                logger.debug(f"Cache expired for playlist {playlist_id}")
+                return None
+            
+            # Get videos
+            cursor = conn.execute("""
+                SELECT * FROM videos 
+                WHERE playlist_id = ?
+                ORDER BY position
+            """, (playlist_id,))
+            
+            rows = cursor.fetchall()
+            if not rows:
+                return None
+                
+            # Update access stats
+            conn.execute("""
+                UPDATE playlists 
+                SET accessed_at = CURRENT_TIMESTAMP, hit_count = hit_count + 1
+                WHERE id = ?
+            """, (playlist_id,))
+            conn.commit()
+            
+            videos = []
+            for row in rows:
+                video = Video(
+                    id=row['id'],
+                    playlist_item_id=row['playlist_item_id'],
+                    title=row['title'],
+                    channel_title=row['channel_title'] or '',
+                    description=row['description'] or '',
+                    position=row['position'] or 0,
+                    duration=row['duration'],
+                    view_count=row['view_count'],
+                    added_at=datetime.fromisoformat(row['added_at']) if row['added_at'] else None,
+                    published_at=datetime.fromisoformat(row['published_at']) if row['published_at'] else None
+                )
+                videos.append(video)
+                
+            logger.debug(f"Cache hit: loaded {len(videos)} videos for playlist {playlist_id}")
+            return videos
         
-        logger.debug(
-            f"Cache hit for playlist {playlist_id} "
-            f"(hits: {entry.hits}, age: {current_time - entry.timestamp:.1f}s)"
-        )
-        return entry.videos.copy()  # Return copy to prevent modification
-        
-    def set(self, playlist_id: str, videos: List[Video]) -> None:
-        """Store videos in cache.
+    def set_videos(self, playlist_id: str, videos: List[Video]) -> None:
+        """Cache videos for a playlist.
         
         Args:
             playlist_id: ID of the playlist
             videos: List of videos to cache
         """
-        # Check if we need to evict
-        if len(self._cache) >= self.max_entries and playlist_id not in self._cache:
-            self._evict_lru()
+        with sqlite3.connect(self.db_path) as conn:
+            # Delete existing videos for this playlist
+            conn.execute("DELETE FROM videos WHERE playlist_id = ?", (playlist_id,))
             
-        # Store the entry
-        self._cache[playlist_id] = CacheEntry(
-            videos=videos.copy(),  # Store copy
-            timestamp=time.time()
-        )
-        self._update_access_order(playlist_id)
+            # Insert new videos
+            for video in videos:
+                conn.execute("""
+                    INSERT INTO videos 
+                    (id, playlist_id, playlist_item_id, title, channel_title, description,
+                     position, duration, view_count, added_at, published_at, cached_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    video.id,
+                    playlist_id,
+                    video.playlist_item_id,
+                    video.title,
+                    video.channel_title,
+                    video.description,
+                    video.position,
+                    video.duration,
+                    video.view_count,
+                    video.added_at.isoformat() if video.added_at else None,
+                    video.published_at.isoformat() if video.published_at else None
+                ))
+            
+            # Update playlist cache time
+            conn.execute("""
+                UPDATE playlists 
+                SET cached_at = CURRENT_TIMESTAMP 
+                WHERE id = ?
+            """, (playlist_id,))
+            
+            conn.commit()
+            logger.debug(f"Cached {len(videos)} videos for playlist {playlist_id}")
         
-        logger.debug(f"Cached {len(videos)} videos for playlist {playlist_id}")
-        
-    def invalidate(self, playlist_id: str) -> None:
-        """Invalidate cache entry for a playlist.
+    def invalidate_playlist(self, playlist_id: str) -> None:
+        """Invalidate cache for a specific playlist.
         
         Args:
             playlist_id: ID of the playlist to invalidate
         """
-        if playlist_id in self._cache:
-            del self._cache[playlist_id]
-            self._access_order.remove(playlist_id)
+        with sqlite3.connect(self.db_path) as conn:
+            # Delete videos first (cascade should handle this, but be explicit)
+            conn.execute("DELETE FROM videos WHERE playlist_id = ?", (playlist_id,))
+            # Delete playlist
+            conn.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
+            conn.commit()
             logger.debug(f"Invalidated cache for playlist {playlist_id}")
             
-    def invalidate_all(self) -> None:
+    def clear(self) -> None:
         """Clear entire cache."""
-        self._cache.clear()
-        self._access_order.clear()
-        logger.debug("Cleared entire cache")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM videos")
+            conn.execute("DELETE FROM playlists")
+            conn.commit()
+            logger.info("Cleared entire cache")
         
-    def get_stats(self) -> Dict[str, any]:
+    def cleanup_expired(self) -> int:
+        """Remove expired cache entries.
+        
+        Returns:
+            Number of entries removed
+        """
+        cutoff_date = datetime.now() - timedelta(days=self.ttl_days)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            # Get count before deletion
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM playlists WHERE cached_at < ?",
+                (cutoff_date.isoformat(),)
+            )
+            count = cursor.fetchone()[0]
+            
+            # Delete expired playlists (videos cascade)
+            conn.execute(
+                "DELETE FROM playlists WHERE cached_at < ?",
+                (cutoff_date.isoformat(),)
+            )
+            conn.commit()
+            
+            if count > 0:
+                logger.info(f"Cleaned up {count} expired cache entries")
+            
+            return count
+    
+    def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics.
         
         Returns:
             Dictionary with cache stats
         """
-        total_hits = sum(entry.hits for entry in self._cache.values())
-        total_videos = sum(len(entry.videos) for entry in self._cache.values())
+        with sqlite3.connect(self.db_path) as conn:
+            stats = {}
+            
+            # Count playlists
+            cursor = conn.execute("SELECT COUNT(*) FROM playlists")
+            stats['playlist_count'] = cursor.fetchone()[0]
+            
+            # Count videos
+            cursor = conn.execute("SELECT COUNT(*) FROM videos")
+            stats['video_count'] = cursor.fetchone()[0]
+            
+            # Total hits
+            cursor = conn.execute("SELECT SUM(hit_count) FROM playlists")
+            stats['total_hits'] = cursor.fetchone()[0] or 0
+            
+            # Cache size
+            stats['cache_size_mb'] = self.db_path.stat().st_size / (1024 * 1024)
+            
+            # Oldest and newest entries
+            cursor = conn.execute("SELECT MIN(cached_at), MAX(cached_at) FROM playlists")
+            row = cursor.fetchone()
+            if row[0]:
+                stats['oldest_entry'] = row[0]
+                stats['newest_entry'] = row[1]
+            
+            stats['ttl_days'] = self.ttl_days
+            stats['cache_path'] = str(self.db_path)
+            
+            return stats
         
-        return {
-            "entries": len(self._cache),
-            "total_hits": total_hits,
-            "total_videos_cached": total_videos,
-            "ttl_seconds": self.ttl_seconds,
-            "max_entries": self.max_entries
-        }
-        
-    def _update_access_order(self, playlist_id: str) -> None:
-        """Update LRU access order."""
-        if playlist_id in self._access_order:
-            self._access_order.remove(playlist_id)
-        self._access_order.append(playlist_id)
-        
-    def _evict_lru(self) -> None:
-        """Evict least recently used entry."""
-        if self._access_order:
-            lru_id = self._access_order[0]
-            del self._cache[lru_id]
-            self._access_order.pop(0)
-            logger.debug(f"Evicted LRU cache entry: {lru_id}")
-
-
-class OfflineCache:
-    """Persistent cache for offline browsing (future enhancement)."""
-    
-    def __init__(self, cache_dir: str):
-        """Initialize offline cache.
+    def has_playlist(self, playlist_id: str) -> bool:
+        """Check if a playlist is in cache.
         
         Args:
-            cache_dir: Directory for cache storage
+            playlist_id: ID of the playlist
+            
+        Returns:
+            True if playlist is cached and not expired
         """
-        # TODO: Implement SQLite-based offline cache
-        self.cache_dir = cache_dir
-        logger.info("Offline cache not yet implemented")
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT cached_at FROM playlists WHERE id = ?
+            """, (playlist_id,))
+            
+            row = cursor.fetchone()
+            if row is None:
+                return False
+                
+            # Check if expired
+            cached_at = datetime.fromisoformat(row[0])
+            if datetime.now() - cached_at > timedelta(days=self.ttl_days):
+                return False
+                
+            return True
+
+
+# Keep the old PlaylistCache for backwards compatibility during migration
+class PlaylistCache(PersistentCache):
+    """Backwards compatibility wrapper for PersistentCache."""
+    
+    def __init__(self, ttl_seconds: int = 300, max_entries: int = 50):
+        # Convert seconds to days for persistent cache
+        ttl_days = max(1, ttl_seconds // 86400)  # At least 1 day
+        super().__init__(ttl_days=ttl_days)
+        logger.info("Using PersistentCache with backwards compatibility mode")
+    
+    def get(self, playlist_id: str) -> Optional[List[Video]]:
+        """Compatibility wrapper for get_videos."""
+        return self.get_videos(playlist_id)
+    
+    def set(self, playlist_id: str, videos: List[Video]) -> None:
+        """Compatibility wrapper for set_videos."""
+        self.set_videos(playlist_id, videos)
+    
+    def invalidate(self, playlist_id: str) -> None:
+        """Compatibility wrapper for invalidate_playlist."""
+        self.invalidate_playlist(playlist_id)
+    
+    def invalidate_all(self) -> None:
+        """Compatibility wrapper for clear."""
+        self.clear()

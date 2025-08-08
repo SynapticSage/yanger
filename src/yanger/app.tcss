@@ -29,6 +29,11 @@ Screen {
     dock: bottom;
 }
 
+#command-input {
+    dock: bottom;
+    height: 3;
+}
+
 /* Focus styles for columns */
 .focused {
     border: solid $primary;

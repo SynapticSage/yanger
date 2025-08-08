@@ -81,3 +81,6 @@ config/keybindings_user.yaml
 
 # Project-specific documentation
 CLAUDE.md
+PLAN.md
+TESTING_*.md
+outputs
