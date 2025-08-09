@@ -1,10 +1,16 @@
-# YouTube Ranger (yanger)
-
-A terminal-based file manager for YouTube playlists, inspired by the ranger file manager. Navigate and manage your YouTube playlists with vim-like keybindings, persistent caching, and powerful playlist operations.
-
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Status](https://img.shields.io/badge/status-active%20development-yellow)
+<div align="center">
+  <img src="assets/logo.png" alt="YouTube Ranger Logo" width="200">
+  
+  # YouTube Ranger (yanger)
+  
+  **A terminal-based file manager for YouTube playlists**
+  
+  Navigate and manage your YouTube playlists with vim-like keybindings, persistent caching, and powerful playlist operations.
+  
+  ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+  ![License](https://img.shields.io/badge/license-MIT-green)
+  ![Status](https://img.shields.io/badge/status-active%20development-yellow)
+</div>
 
 ## Features
 
