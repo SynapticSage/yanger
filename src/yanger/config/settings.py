@@ -64,8 +64,10 @@ class KeybindingSettings:
 class CacheSettings:
     """Cache-related settings."""
     enabled: bool = True
-    directory: str = ".yanger_cache"
-    ttl: int = 3600  # seconds
+    persistent: bool = True  # Use persistent SQLite cache
+    directory: str = ".cache/yanger"  # Relative to home directory
+    ttl_days: int = 7  # Time-to-live in days
+    auto_cleanup: bool = True  # Automatically clean expired entries
     max_size_mb: int = 100
 
 

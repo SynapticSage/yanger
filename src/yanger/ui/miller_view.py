@@ -6,15 +6,17 @@ Three-column layout inspired by macOS Finder's column view.
 
 from typing import List, Optional
 import asyncio
+import re
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, ScrollableContainer
+from textual.containers import Horizontal, ScrollableContainer, Container
 from textual.widgets import Static, ListView, ListItem, Label, LoadingIndicator
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual import events
 
 from ..models import Playlist, Video
+from .search_input import SearchInput, SearchHighlighter
 
 
 class PlaylistColumn(ScrollableContainer):
@@ -156,6 +158,14 @@ class VideoColumn(ScrollableContainer):
         text-style: bold;
     }
     
+    VideoColumn > .video-item.search-match {
+        background: $warning-darken-2;
+    }
+    
+    VideoColumn > .video-item.selected.search-match {
+        background: $warning;
+    }
+    
     VideoColumn > .empty-message {
         width: 100%;
         height: 100%;
@@ -171,6 +181,12 @@ class VideoColumn(ScrollableContainer):
         super().__init__(*args, **kwargs)
         self.videos: List[Video] = []
         self.can_focus = True
+        self.search_query = ""
+        self.search_matches: List[int] = []
+        self.current_match_index = -1
+        self.visual_mode = False
+        self.visual_start_index = -1
+        self.visual_unmark_mode = False  # For uV command
         
     def compose(self) -> ComposeResult:
         """Initial composition."""
@@ -190,16 +206,37 @@ class VideoColumn(ScrollableContainer):
             await self.mount(Static("No videos in playlist", classes="empty-message"))
             return
             
+        # Calculate visual range if in visual mode
+        visual_range = set()
+        if self.visual_mode and self.visual_start_index >= 0:
+            start = min(self.visual_start_index, self.selected_index)
+            end = max(self.visual_start_index, self.selected_index)
+            visual_range = set(range(start, end + 1))
+            
         for i, video in enumerate(self.videos):
             classes = ["video-item"]
             if i == self.selected_index:
                 classes.append("selected")
-            if video.is_marked:
+            if video.is_marked or i in visual_range:
                 classes.append("marked")
+            if i in self.search_matches:
+                classes.append("search-match")
                 
             # Format display text
-            marker = "◆ " if video.is_marked else "  "
-            text = f"{marker}{video.title}"
+            # In visual unmark mode, show different indicator
+            if self.visual_unmark_mode and i in visual_range:
+                marker = "✗ "  # X mark for items to be unmarked
+            elif video.is_marked or i in visual_range:
+                marker = "◆ "  # Diamond for marked/to-be-marked
+            else:
+                marker = "  "
+            title = video.title
+            
+            # Highlight search matches
+            if self.search_query and i in self.search_matches:
+                title = SearchHighlighter.highlight(title, self.search_query)
+                
+            text = f"{marker}{title}"
             
             item = Static(text, classes=" ".join(classes))
             item.video = video  # Attach video data
@@ -256,6 +293,122 @@ class VideoColumn(ScrollableContainer):
         """Clear all marks."""
         for video in self.videos:
             video.is_marked = False
+        asyncio.create_task(self.refresh_display())
+        
+    def search(self, query: str) -> int:
+        """Search for videos matching query.
+        
+        Args:
+            query: Search query
+            
+        Returns:
+            Number of matches found
+        """
+        self.search_query = query
+        self.search_matches = []
+        self.current_match_index = -1
+        
+        if not query:
+            asyncio.create_task(self.refresh_display())
+            return 0
+            
+        # Case-insensitive search in title and channel
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+        
+        for i, video in enumerate(self.videos):
+            if pattern.search(video.title) or (video.channel_title and pattern.search(video.channel_title)):
+                self.search_matches.append(i)
+                
+        # Jump to first match
+        if self.search_matches:
+            self.current_match_index = 0
+            self.selected_index = self.search_matches[0]
+            
+        asyncio.create_task(self.refresh_display())
+        return len(self.search_matches)
+        
+    def next_match(self) -> bool:
+        """Jump to next search match.
+        
+        Returns:
+            True if moved to next match, False if no matches
+        """
+        if not self.search_matches:
+            return False
+            
+        self.current_match_index = (self.current_match_index + 1) % len(self.search_matches)
+        self.selected_index = self.search_matches[self.current_match_index]
+        asyncio.create_task(self.refresh_display())
+        return True
+        
+    def prev_match(self) -> bool:
+        """Jump to previous search match.
+        
+        Returns:
+            True if moved to previous match, False if no matches
+        """
+        if not self.search_matches:
+            return False
+            
+        self.current_match_index = (self.current_match_index - 1) % len(self.search_matches)
+        self.selected_index = self.search_matches[self.current_match_index]
+        asyncio.create_task(self.refresh_display())
+        return True
+        
+    def clear_search(self) -> None:
+        """Clear search highlighting."""
+        self.search_query = ""
+        self.search_matches = []
+        self.current_match_index = -1
+        asyncio.create_task(self.refresh_display())
+        
+    def enter_visual_mode(self, unmark_mode: bool = False) -> None:
+        """Enter visual mode for range selection.
+        
+        Args:
+            unmark_mode: If True, visual mode will unmark instead of mark (uV command)
+        """
+        self.visual_mode = True
+        self.visual_start_index = self.selected_index
+        self.visual_unmark_mode = unmark_mode
+        asyncio.create_task(self.refresh_display())
+        
+    def exit_visual_mode(self, mark_selection: bool = True) -> None:
+        """Exit visual mode and optionally mark/unmark the selection.
+        
+        Args:
+            mark_selection: Whether to apply marks/unmarks to the selected range
+        """
+        if self.visual_mode and mark_selection and self.visual_start_index >= 0:
+            # Mark or unmark all videos in the visual range
+            start = min(self.visual_start_index, self.selected_index)
+            end = max(self.visual_start_index, self.selected_index)
+            for i in range(start, end + 1):
+                if i < len(self.videos):
+                    # Set mark based on mode (mark for V, unmark for uV)
+                    self.videos[i].is_marked = not self.visual_unmark_mode
+                    
+        self.visual_mode = False
+        self.visual_start_index = -1
+        self.visual_unmark_mode = False
+        asyncio.create_task(self.refresh_display())
+        
+    def select_all(self) -> None:
+        """Mark all videos (V command)."""
+        for video in self.videos:
+            video.is_marked = True
+        asyncio.create_task(self.refresh_display())
+        
+    def unselect_all(self) -> None:
+        """Unmark all videos (uv command)."""
+        for video in self.videos:
+            video.is_marked = False
+        asyncio.create_task(self.refresh_display())
+        
+    def invert_selection(self) -> None:
+        """Invert selection - marked become unmarked, unmarked become marked."""
+        for video in self.videos:
+            video.is_marked = not video.is_marked
         asyncio.create_task(self.refresh_display())
 
 
@@ -366,16 +519,28 @@ class MillerView(Widget):
         self.playlist_column: Optional[PlaylistColumn] = None
         self.video_column: Optional[VideoColumn] = None
         self.preview_pane: Optional[PreviewPane] = None
+        self.search_input: Optional[SearchInput] = None
+        self.search_active = False
+        self.pending_u_command = False  # For 'uv' command
         
     def compose(self) -> ComposeResult:
         """Create the three columns."""
         self.playlist_column = PlaylistColumn(id="playlist-column")
         self.video_column = VideoColumn(id="video-column")
         self.preview_pane = PreviewPane(id="preview-pane")
+        self.search_input = SearchInput(
+            on_search=self.on_search_submit,
+            on_cancel=self.on_search_cancel
+        )
         
-        yield self.playlist_column
-        yield self.video_column
-        yield self.preview_pane
+        # Search input overlay
+        yield self.search_input
+        
+        # Three columns
+        with Horizontal():
+            yield self.playlist_column
+            yield self.video_column
+            yield self.preview_pane
         
     async def show_loading_playlists(self) -> None:
         """Show loading state in playlist column."""
@@ -411,6 +576,22 @@ class MillerView(Widget):
         if self.video_column:
             return len(self.video_column.get_marked_videos())
         return 0
+        
+    def on_search_submit(self, query: str) -> None:
+        """Handle search submission."""
+        if self.video_column:
+            match_count = self.video_column.search(query)
+            if match_count > 0:
+                self.post_message(SearchStatusUpdate(1, match_count))
+            else:
+                self.post_message(SearchStatusUpdate(0, 0))
+                
+    def on_search_cancel(self) -> None:
+        """Handle search cancellation."""
+        self.search_active = False
+        if self.video_column:
+            self.video_column.clear_search()
+        self.post_message(SearchStatusUpdate(0, 0))
             
     def watch_focused_column(self, old_value: int, new_value: int) -> None:
         """Update focus styling when column focus changes."""
@@ -427,6 +608,64 @@ class MillerView(Widget):
             
     async def handle_key(self, key: str) -> None:
         """Handle vim-style navigation keys."""
+        # Handle 'u' prefix for 'uv' and 'uV' commands
+        if key == 'u' and self.focused_column == 1:
+            self.pending_u_command = True
+            return
+        elif self.pending_u_command:
+            if key == 'v' and self.video_column:
+                # Unselect all (uv) - clear all marks
+                self.video_column.unselect_all()
+                self.post_message(MarksChanged(0))
+            elif key == 'V' and self.video_column:
+                # Visual unmark mode (uV) - enter visual mode but for unmarking
+                if not self.video_column.visual_mode:
+                    self.video_column.enter_visual_mode(unmark_mode=True)
+            self.pending_u_command = False
+            return
+            
+        # Visual mode (uppercase V like ranger)
+        if key == 'V' and self.focused_column == 1 and self.video_column:
+            if self.video_column.visual_mode:
+                # Exit visual mode and apply marks/unmarks
+                self.video_column.exit_visual_mode(mark_selection=True)
+                self.post_message(MarksChanged(self.get_marked_count()))
+            else:
+                # Enter visual mode for marking
+                self.video_column.enter_visual_mode(unmark_mode=False)
+            return
+        elif key == 'v' and self.focused_column == 1 and self.video_column:
+            # lowercase v - invert selection (mark unmarked, unmark marked)
+            self.video_column.invert_selection()
+            self.post_message(MarksChanged(self.get_marked_count()))
+            return
+        elif key == 'escape' and self.video_column and self.video_column.visual_mode:
+            # Cancel visual mode without marking
+            self.video_column.exit_visual_mode(mark_selection=False)
+            return
+            
+        # Search mode
+        if key == '/' and self.focused_column == 1:
+            self.search_input.show()
+            self.search_active = True
+            return
+        elif key == 'n' and self.search_active and self.video_column:
+            # Next search match
+            if self.video_column.next_match():
+                self.post_message(SearchStatusUpdate(
+                    self.video_column.current_match_index + 1,
+                    len(self.video_column.search_matches)
+                ))
+            return
+        elif key == 'N' and self.search_active and self.video_column:
+            # Previous search match
+            if self.video_column.prev_match():
+                self.post_message(SearchStatusUpdate(
+                    self.video_column.current_match_index + 1,
+                    len(self.video_column.search_matches)
+                ))
+            return
+            
         # Column navigation
         if key == 'h':  # Move left
             self.focused_column = max(0, self.focused_column - 1)
@@ -446,10 +685,10 @@ class MillerView(Widget):
                     video = self.video_column.videos[self.video_column.selected_index]
                     self.post_message(VideoSelected(video))
                     
-        # Space key - toggle mark on video
-        elif key == ' ' and self.focused_column == 1 and self.video_column:
+        # Space key - toggle mark on video (NO auto-advance like real ranger)
+        elif key == 'space' and self.focused_column == 1 and self.video_column:
             self.video_column.toggle_mark()
-            self.video_column.move_selection(1)  # Move to next item like ranger
+            # Don't move cursor - ranger doesn't auto-advance on spacebar
             # Notify about mark change
             self.post_message(MarksChanged(self.get_marked_count()))
             
@@ -463,6 +702,9 @@ class MillerView(Widget):
         elif key == 'p' and self.focused_column == 1:
             # Handle pp (paste) - wait for second 'p'
             self.post_message(RangerCommand('p'))
+        elif key == 'o' and self.focused_column == 1 and self.video_column:
+            # Handle sort menu
+            self.post_message(SortMenuRequest())
                     
         # Vertical navigation in focused column
         elif key in ['j', 'k', 'g', 'G']:
@@ -477,6 +719,7 @@ class MillerView(Widget):
                     self.playlist_column.select_last()
                     
             elif self.focused_column == 1 and self.video_column:
+                # In visual mode, just update selection to expand range
                 if key == 'j':
                     self.video_column.move_selection(1)
                 elif key == 'k':
@@ -485,6 +728,9 @@ class MillerView(Widget):
                     self.video_column.select_first()
                 elif key == 'G':
                     self.video_column.select_last()
+                # Refresh to show visual range updates
+                if self.video_column.visual_mode:
+                    asyncio.create_task(self.video_column.refresh_display())
 
 
 # Custom messages
@@ -514,3 +760,16 @@ class MarksChanged(events.Message):
     def __init__(self, count: int):
         super().__init__()
         self.count = count
+
+
+class SearchStatusUpdate(events.Message):
+    """Message sent when search status changes."""
+    def __init__(self, current: int, total: int):
+        super().__init__()
+        self.current = current
+        self.total = total
+
+
+class SortMenuRequest(events.Message):
+    """Message sent when sort menu is requested."""
+    pass
