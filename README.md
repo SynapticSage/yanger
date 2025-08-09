@@ -10,6 +10,12 @@
   ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
   ![Status](https://img.shields.io/badge/status-active%20development-yellow)
+  
+  ---
+  
+  > ⚠️ **Note**: This project is under active development. Core features are working but expect frequent updates and potential breaking changes.
+  
+  ---
 </div>
 
 ## Features
