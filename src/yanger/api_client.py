@@ -12,7 +12,7 @@ import logging
 from googleapiclient.errors import HttpError
 from googleapiclient.discovery import Resource
 
-from .models import Playlist, Video
+from .models import Playlist, Video, PrivacyStatus
 from .auth import YouTubeAuth
 
 
@@ -87,13 +87,15 @@ class YouTubeAPIClient:
     def get_playlists(self, 
                       mine: bool = True,
                       channel_id: Optional[str] = None,
-                      max_results: int = 50) -> List[Playlist]:
+                      max_results: int = 50,
+                      include_special: bool = True) -> List[Playlist]:
         """Get playlists for the authenticated user or a channel.
         
         Args:
             mine: If True, get authenticated user's playlists
             channel_id: Channel ID to get playlists for (if mine=False)
             max_results: Maximum results per page (max 50)
+            include_special: If True, append special playlists (Watch Later, History)
             
         Returns:
             List of Playlist objects
@@ -134,6 +136,9 @@ class YouTubeAPIClient:
             if e.resp.status == 403 and 'quotaExceeded' in str(e):
                 raise QuotaExceededError("YouTube API quota exceeded")
             raise
+        
+        # Note: Special playlists (WL, HL) are now handled in the app layer
+        # due to API restrictions since 2016
             
         return playlists
     
@@ -143,13 +148,24 @@ class YouTubeAPIClient:
         """Get all videos in a playlist.
         
         Args:
-            playlist_id: ID of the playlist
+            playlist_id: ID of the playlist (including special playlists like 'WL', 'HL')
             max_results: Maximum results per page (max 50)
             
         Returns:
             List of Video objects
         """
         videos = []
+        
+        # Handle special playlists with API limitations
+        if playlist_id == "HL":
+            # History playlist is no longer available via API
+            logger.info("History playlist (HL) is not available via YouTube API v3. Use Google Takeout instead.")
+            return []  # Not accessible via API
+        
+        if playlist_id == "WL":
+            # Watch Later playlist returns empty since 2016 due to API restrictions
+            logger.info("Watch Later playlist (WL) access is restricted by YouTube API since 2016. Will return empty.")
+            # Continue with normal API call but it will return empty
         
         try:
             request = self.youtube.playlistItems().list(

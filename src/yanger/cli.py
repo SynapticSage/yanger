@@ -16,6 +16,9 @@ from rich.logging import RichHandler
 from . import __version__
 from .auth import YouTubeAuth
 from .api_client import YouTubeAPIClient
+from .cache import PersistentCache
+from .takeout import TakeoutParser
+from .export import PlaylistExporter
 
 
 console = Console()
@@ -217,6 +220,186 @@ def main():
         console.print(f"\n[red]Unexpected error:[/red] {e}")
         console.print_exception()
         sys.exit(1)
+
+
+@cli.command()
+@click.argument('paths', nargs=-1, required=True, type=click.Path(exists=True))
+@click.option('--merge/--replace', default=True, help='Merge with existing virtual playlists')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def takeout(paths, merge, verbose):
+    """Import YouTube data from Google Takeout.
+    
+    Accepts multiple paths (zip files or directories).
+    Creates virtual playlists for Watch Later and History.
+    
+    Examples:
+        yanger takeout ~/Downloads/takeout.zip
+        yanger takeout Takeout-1/ Takeout-2/ --merge
+    """
+    if verbose:
+        setup_logging(verbose=True)
+    
+    console.print("[bold cyan]YouTube Takeout Importer[/bold cyan]")
+    console.print(f"Processing {len(paths)} takeout file(s)...\n")
+    
+    # Initialize parser and cache
+    parser = TakeoutParser()
+    cache = PersistentCache()
+    
+    # Process all takeout paths
+    all_playlists = parser.process_multiple(list(paths))
+    
+    if not all_playlists:
+        console.print("[red]No YouTube data found in the provided takeout files.[/red]")
+        sys.exit(1)
+    
+    # Import into database
+    imported_count = 0
+    total_videos = 0
+    
+    with console.status("[bold green]Importing playlists...") as status:
+        for name, playlist in all_playlists.items():
+            # Prepare video data
+            videos = [
+                {
+                    'video_id': v.video_id,
+                    'title': v.title,
+                    'channel': v.channel,
+                    'added_at': v.added_at.isoformat() if v.added_at else None
+                }
+                for v in playlist.videos
+            ]
+            
+            # Determine description based on source
+            if playlist.source == 'watch_later':
+                description = f"Watch Later playlist imported from Google Takeout ({len(videos)} videos)"
+            elif playlist.source == 'history':
+                description = f"Watch History imported from Google Takeout ({len(videos)} videos)"
+            else:
+                description = f"Playlist imported from Google Takeout ({len(videos)} videos)"
+            
+            # Import to database
+            try:
+                playlist_id = cache.import_virtual_playlist(
+                    name=name,
+                    videos=videos,
+                    source='takeout',
+                    description=description
+                )
+                imported_count += 1
+                total_videos += len(videos)
+                
+                status.update(f"Imported {imported_count} playlists, {total_videos} videos...")
+                
+                if verbose:
+                    console.print(f"  ✓ {name}: {len(videos)} videos")
+                    
+            except Exception as e:
+                console.print(f"  [red]✗ Failed to import {name}: {e}[/red]")
+    
+    # Show summary
+    console.print("\n[bold green]Import Complete![/bold green]")
+    console.print(f"  Imported playlists: {imported_count}")
+    console.print(f"  Total videos: {total_videos}")
+    
+    # Special playlist highlights
+    if 'Watch Later (Imported)' in all_playlists:
+        wl_count = len(all_playlists['Watch Later (Imported)'].videos)
+        console.print(f"  📌 Watch Later: {wl_count} videos")
+    
+    if 'History (Imported)' in all_playlists:
+        hist_count = len(all_playlists['History (Imported)'].videos)
+        console.print(f"  📜 History: {hist_count} videos")
+    
+    console.print("\n[dim]Virtual playlists are now available in yanger.[/dim]")
+    console.print("[dim]You can copy videos from these to your YouTube playlists.[/dim]")
+
+
+@cli.command()
+@click.option('--format', '-f', type=click.Choice(['json', 'csv', 'yaml']), 
+              default='json', help='Export format')
+@click.option('--output', '-o', type=click.Path(), help='Output file path')
+@click.option('--include-virtual/--no-virtual', default=True, 
+              help='Include virtual playlists')
+@click.option('--include-real/--no-real', default=True, 
+              help='Include real YouTube playlists')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
+def export(format, output, include_virtual, include_real, verbose):
+    """Export all playlists (real and virtual) to file.
+    
+    Examples:
+        yanger export -o backup.json
+        yanger export --format csv -o playlists/
+        yanger export --no-real --format yaml
+    """
+    from datetime import datetime
+    
+    if verbose:
+        setup_logging(verbose=True)
+    
+    console.print("[bold cyan]YouTube Playlist Exporter[/bold cyan]\n")
+    
+    # Determine output path
+    if output:
+        output_path = Path(output)
+    else:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        if format == 'csv':
+            output_path = Path(f'yanger_export_{timestamp}')
+        else:
+            output_path = Path(f'yanger_export_{timestamp}.{format}')
+    
+    # Initialize components
+    cache = PersistentCache()
+    api_client = None
+    
+    # Setup API client if exporting real playlists
+    if include_real:
+        try:
+            auth = YouTubeAuth()
+            auth.authenticate()
+            api_client = YouTubeAPIClient(auth)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not authenticate YouTube API: {e}[/yellow]")
+            console.print("[yellow]Skipping real playlists...[/yellow]\n")
+            include_real = False
+    
+    # Initialize exporter
+    exporter = PlaylistExporter(api_client=api_client, cache=cache)
+    
+    # Export with progress
+    with console.status("[bold green]Exporting playlists...") as status:
+        try:
+            stats = exporter.export_all(
+                output_path=output_path,
+                format=format,
+                include_virtual=include_virtual,
+                include_real=include_real
+            )
+            
+            # Show results
+            console.print("\n[bold green]Export Complete![/bold green]")
+            console.print(f"  Output: {output_path}")
+            
+            if include_real:
+                console.print(f"  Real playlists: {stats['real_playlist_count']}")
+                console.print(f"  Real videos: {stats['total_real_videos']}")
+            
+            if include_virtual:
+                console.print(f"  Virtual playlists: {stats['virtual_playlist_count']}")
+                console.print(f"  Virtual videos: {stats['total_virtual_videos']}")
+            
+            # Show file size
+            if output_path.exists():
+                if output_path.is_file():
+                    size_kb = output_path.stat().st_size / 1024
+                    console.print(f"\n  File size: {size_kb:.1f} KB")
+            
+        except Exception as e:
+            console.print(f"\n[red]Export failed: {e}[/red]")
+            if verbose:
+                console.print_exception()
+            sys.exit(1)
 
 
 if __name__ == '__main__':

@@ -19,13 +19,14 @@ from textual import events
 
 from .auth import YouTubeAuth
 from .api_client import YouTubeAPIClient
-from .models import Playlist, Video, Clipboard
+from .models import Playlist, Video, Clipboard, PrivacyStatus
 from .ui.miller_view import MillerView, PlaylistSelected, VideoSelected, RangerCommand, MarksChanged, SearchStatusUpdate, SortMenuRequest
 from .ui.status_bar import StatusBar
 from .ui.help_overlay import HelpOverlay
 from .ui.command_input import CommandInput, parse_command
 from .cache import PersistentCache
 from .keybindings import registry
+from .config.settings import load_settings
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,10 @@ class YouTubeRangerApp(App):
         self.current_videos: List[Video] = []
         self.current_video: Optional[Video] = None
         self.unfiltered_videos: List[Video] = []  # Original videos before filtering
+        self.playlists_loaded: bool = False  # Track if playlists have been loaded
+        
+        # Settings
+        self.settings = load_settings()
         
         # Ranger command state
         self._pending_command: Optional[str] = None
@@ -130,13 +135,82 @@ class YouTubeRangerApp(App):
             # Get status bar reference
             self.status_bar = self.query_one("#status-bar", StatusBar)
             
-            # Load initial data
-            await self.load_playlists()
+            # Check if we should load playlists on startup
+            if self.settings.cache.load_on_startup:
+                await self.load_playlists()
+            else:
+                # Show empty state with instructions
+                if self.status_bar:
+                    self.status_bar.update_status(
+                        "Press Ctrl+R to load playlists",
+                        f"{self.api_client.get_quota_remaining() if self.api_client else 10000}/10000"
+                    )
+                self.notify("Press Ctrl+R to load playlists", timeout=5)
             
         except Exception as e:
             logger.error(f"Error during initialization: {e}")
             self.notify(f"Initialization error: {e}", severity="error")
             self.exit(1)
+    
+    def _append_virtual_playlists(self) -> None:
+        """Load and append virtual playlists from database."""
+        try:
+            virtual_playlists = self._cache.get_virtual_playlists()
+            
+            for vp in virtual_playlists:
+                playlist = Playlist(
+                    id=f"virtual_{vp['id']}",
+                    title=f"💾 {vp['title']}",
+                    description=f"{vp['description']} (Virtual playlist from {vp['source']})",
+                    item_count=vp['video_count'],
+                    is_virtual=True,
+                    is_special=True,  # Prevent YouTube sync operations
+                    source=vp['source'],
+                    imported_at=vp.get('imported_at'),
+                    privacy_status=PrivacyStatus.PRIVATE
+                )
+                self.playlists.append(playlist)
+            
+            if virtual_playlists:
+                logger.debug(f"Added {len(virtual_playlists)} virtual playlists")
+        except Exception as e:
+            logger.warning(f"Could not load virtual playlists: {e}")
+    
+    def _append_special_playlists(self) -> None:
+        """Append special playlists (Watch Later, History) to the playlist list.
+        
+        Note: As of 2024, YouTube API v3 no longer provides access to Watch Later (WL)
+        or History (HL) playlist contents. These are shown for awareness but will
+        appear empty when accessed.
+        """
+        # Define special playlists with notes about limitations
+        special_playlists = [
+            Playlist(
+                id="WL",
+                title="📌 Watch Later (API Limited)",
+                description="Watch Later playlist - API access restricted by YouTube since 2016",
+                channel_title="YouTube",
+                is_special=True,
+                privacy_status=PrivacyStatus.PRIVATE,
+                item_count=0  # Will always be 0 due to API restrictions
+            ),
+            Playlist(
+                id="HL",
+                title="📜 History (Not Available)",
+                description="Watch History - No longer available via API. Use Google Takeout instead",
+                channel_title="YouTube",
+                is_special=True,
+                privacy_status=PrivacyStatus.PRIVATE,
+                item_count=0  # Not accessible via API
+            ),
+        ]
+        
+        # Remove any existing special playlists to avoid duplicates
+        self.playlists = [p for p in self.playlists if not p.is_special]
+        
+        # Add special playlists at the end
+        self.playlists.extend(special_playlists)
+        logger.debug(f"Added {len(special_playlists)} special playlists (with API limitations)")
     
     async def setup_authentication(self) -> None:
         """Setup YouTube API authentication."""
@@ -163,6 +237,9 @@ class YouTubeRangerApp(App):
         """
         if not self.api_client:
             return
+        
+        # Mark that we've loaded playlists at least once
+        self.playlists_loaded = True
             
         try:
             # Try to load from cache first
@@ -170,6 +247,12 @@ class YouTubeRangerApp(App):
                 cached_playlists = self._cache.get_playlists()
                 if cached_playlists:
                     self.playlists = cached_playlists
+                    
+                    # Append special playlists
+                    self._append_special_playlists()
+                    
+                    # Append virtual playlists
+                    self._append_virtual_playlists()
                     
                     # Update UI immediately with cached data
                     if self.miller_view:
@@ -189,13 +272,20 @@ class YouTubeRangerApp(App):
             if self.miller_view:
                 await self.miller_view.show_loading_playlists()
             
-            # Load playlists from API
+            # Load playlists from API (without special playlists to avoid caching them)
             self.playlists = await asyncio.to_thread(
-                self.api_client.get_playlists
+                self.api_client.get_playlists,
+                include_special=False  # Don't include special playlists from API
             )
             
-            # Cache the playlists
+            # Cache the regular playlists (not special ones)
             self._cache.set_playlists(self.playlists)
+            
+            # Now append special playlists after caching
+            self._append_special_playlists()
+            
+            # Append virtual playlists
+            self._append_virtual_playlists()
             
             # Update UI
             if self.miller_view:
@@ -224,6 +314,63 @@ class YouTubeRangerApp(App):
             return
             
         try:
+            # Check if this is a virtual playlist
+            if playlist.is_virtual:
+                # Load videos from virtual playlist database
+                if playlist.id.startswith("virtual_"):
+                    virtual_id = playlist.id.replace("virtual_", "")
+                    videos_data = self._cache.get_virtual_videos(virtual_id)
+                    
+                    # Convert to Video objects
+                    self.current_videos = []
+                    for v in videos_data:
+                        video = Video(
+                            id=v['video_id'],
+                            playlist_item_id=f"virtual_{v['video_id']}",
+                            title=v.get('title', v['video_id']),
+                            channel_title=v.get('channel_title', 'Unknown'),
+                            position=v.get('position', 0)
+                        )
+                        self.current_videos.append(video)
+                    
+                    self.unfiltered_videos = self.current_videos.copy()
+                    
+                    # Update UI
+                    if self.miller_view:
+                        await self.miller_view.set_videos(self.current_videos)
+                    
+                    # Update status
+                    if self.status_bar:
+                        self.status_bar.update_status(
+                            f"Loaded {len(self.current_videos)} videos from virtual playlist",
+                            "Virtual"
+                        )
+                    
+                    self.notify(f"Loaded {len(self.current_videos)} videos from {playlist.title}", timeout=2)
+                    return
+            
+            # Check if this is a restricted special playlist
+            elif playlist.id == "WL":
+                self.notify(
+                    "Watch Later playlist is restricted by YouTube API since 2016. Cannot retrieve videos.",
+                    severity="warning",
+                    timeout=5
+                )
+                self.current_videos = []
+                if self.miller_view:
+                    await self.miller_view.set_videos([])
+                return
+            elif playlist.id == "HL":
+                self.notify(
+                    "History playlist is not available via API. Use Google Takeout to export your watch history.",
+                    severity="warning",
+                    timeout=5
+                )
+                self.current_videos = []
+                if self.miller_view:
+                    await self.miller_view.set_videos([])
+                return
+            
             # Update current playlist
             self.current_playlist = playlist
             
@@ -288,7 +435,11 @@ class YouTubeRangerApp(App):
     
     async def action_refresh(self) -> None:
         """Refresh current view (Ctrl+R)."""
-        if self.current_playlist:
+        if not self.playlists_loaded:
+            # First time loading playlists - use cache if available
+            await self.load_playlists(force_refresh=False)
+            self.notify("Loaded playlists", timeout=2)
+        elif self.current_playlist:
             # Force refresh current playlist from API
             await self.load_playlist_videos(self.current_playlist, force_refresh=True)
             self.notify(f"Refreshed {self.current_playlist.title}", timeout=2)

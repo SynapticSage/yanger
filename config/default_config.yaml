@@ -50,6 +50,7 @@ cache:
   directory: ".yanger_cache"
   ttl: 3600  # 1 hour
   max_size_mb: 100
+  load_on_startup: false  # Set to true to load playlists automatically
 
 youtube:
   client_secrets_file: "config/client_secret.json"

@@ -71,8 +71,14 @@ class CommandInput(Container):
         width: 100%;
         height: 1;
         margin-top: 1;
+        color: $text;  /* Explicit text color */
         background: $background;
         border: tall $accent;
+    }
+    
+    CommandInput > Input:focus {
+        border: tall $primary;
+        color: $text;  /* Ensure text is visible when focused */
     }
     
     CommandInput .command-hint {

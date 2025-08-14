@@ -116,6 +116,37 @@ class PersistentCache:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_playlist ON videos(playlist_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_playlists_cached ON playlists(cached_at)")
             
+            # Virtual playlists tables
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS virtual_playlists (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    source TEXT,  -- 'takeout', 'manual'
+                    imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    video_count INTEGER DEFAULT 0,
+                    is_active BOOLEAN DEFAULT 1
+                )
+            """)
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS virtual_videos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    playlist_id TEXT NOT NULL,
+                    video_id TEXT NOT NULL,
+                    title TEXT,
+                    channel_title TEXT,
+                    added_at TIMESTAMP,
+                    position INTEGER,
+                    FOREIGN KEY (playlist_id) REFERENCES virtual_playlists(id) ON DELETE CASCADE,
+                    UNIQUE(playlist_id, video_id)
+                )
+            """)
+            
+            # Create indices for virtual tables
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_virtual_videos_playlist ON virtual_videos(playlist_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_virtual_videos_video ON virtual_videos(video_id)")
+            
             # Check and update schema version
             cursor = conn.execute("SELECT value FROM cache_metadata WHERE key = 'schema_version'")
             row = cursor.fetchone()
@@ -386,6 +417,130 @@ class PersistentCache:
             stats['cache_path'] = str(self.db_path)
             
             return stats
+    
+    # Virtual Playlist Methods
+    
+    def import_virtual_playlist(self, name: str, videos: List[Dict], 
+                              source: str = 'takeout', 
+                              description: str = '') -> str:
+        """Import a virtual playlist from takeout or other source.
+        
+        Args:
+            name: Playlist name
+            videos: List of video dictionaries with 'video_id' and optional metadata
+            source: Source of the playlist ('takeout', 'manual', etc.)
+            description: Playlist description
+            
+        Returns:
+            Playlist ID
+        """
+        import uuid
+        playlist_id = str(uuid.uuid4())
+        
+        with sqlite3.connect(self.db_path) as conn:
+            # Insert playlist
+            conn.execute("""
+                INSERT INTO virtual_playlists (id, title, description, source, video_count)
+                VALUES (?, ?, ?, ?, ?)
+            """, (playlist_id, name, description, source, len(videos)))
+            
+            # Insert videos
+            for position, video in enumerate(videos):
+                conn.execute("""
+                    INSERT OR IGNORE INTO virtual_videos 
+                    (playlist_id, video_id, title, channel_title, added_at, position)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    playlist_id,
+                    video['video_id'],
+                    video.get('title', ''),
+                    video.get('channel', ''),
+                    video.get('added_at'),
+                    position
+                ))
+            
+            conn.commit()
+            logger.info(f"Imported virtual playlist '{name}' with {len(videos)} videos")
+            
+        return playlist_id
+    
+    def get_virtual_playlists(self) -> List[Dict]:
+        """Get all virtual playlists.
+        
+        Returns:
+            List of playlist dictionaries
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM virtual_playlists 
+                WHERE is_active = 1
+                ORDER BY imported_at DESC
+            """)
+            
+            playlists = []
+            for row in cursor:
+                playlists.append({
+                    'id': row['id'],
+                    'title': row['title'],
+                    'description': row['description'],
+                    'source': row['source'],
+                    'imported_at': row['imported_at'],
+                    'video_count': row['video_count']
+                })
+            
+            return playlists
+    
+    def get_virtual_videos(self, playlist_id: str) -> List[Dict]:
+        """Get videos from a virtual playlist.
+        
+        Args:
+            playlist_id: Virtual playlist ID
+            
+        Returns:
+            List of video dictionaries
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM virtual_videos
+                WHERE playlist_id = ?
+                ORDER BY position
+            """, (playlist_id,))
+            
+            videos = []
+            for row in cursor:
+                videos.append({
+                    'video_id': row['video_id'],
+                    'title': row['title'],
+                    'channel_title': row['channel_title'],
+                    'added_at': row['added_at'],
+                    'position': row['position']
+                })
+            
+            return videos
+    
+    def delete_virtual_playlist(self, playlist_id: str) -> bool:
+        """Delete a virtual playlist.
+        
+        Args:
+            playlist_id: Virtual playlist ID
+            
+        Returns:
+            True if deleted
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            # Videos will be deleted automatically due to CASCADE
+            result = conn.execute(
+                "DELETE FROM virtual_playlists WHERE id = ?",
+                (playlist_id,)
+            )
+            conn.commit()
+            
+            if result.rowcount > 0:
+                logger.info(f"Deleted virtual playlist {playlist_id}")
+                return True
+            return False
         
     def has_playlist(self, playlist_id: str) -> bool:
         """Check if a playlist is in cache.

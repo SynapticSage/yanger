@@ -69,6 +69,7 @@ class CacheSettings:
     ttl_days: int = 7  # Time-to-live in days
     auto_cleanup: bool = True  # Automatically clean expired entries
     max_size_mb: int = 100
+    load_on_startup: bool = False  # Load playlists automatically on startup
 
 
 @dataclass

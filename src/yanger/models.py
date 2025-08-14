@@ -30,6 +30,14 @@ class Playlist:
     channel_id: Optional[str] = None
     channel_title: Optional[str] = None
     
+    # Special playlist flag (Watch Later, History, etc.)
+    is_special: bool = False
+    
+    # Virtual playlist flag (local only, not synced to YouTube)
+    is_virtual: bool = False
+    source: Optional[str] = None  # 'takeout', 'manual', etc.
+    imported_at: Optional[datetime] = None  # When imported from takeout
+    
     # UI state
     is_selected: bool = False
     is_focused: bool = False
