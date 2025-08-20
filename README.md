@@ -31,6 +31,10 @@
 - 💬 **Command Mode**: Tab-completed commands for advanced operations
 - 📊 **Quota Management**: Built-in tracking to stay within YouTube API limits
 - 🔢 **Sort Videos**: By title, date, views, duration, position
+- 📥 **Google Takeout Import**: Import Watch Later and History from Google Takeout
+- 🌐 **Open in Browser**: Open videos/playlists directly in your browser
+- 🔄 **Auto Metadata Fetching**: Automatically fetch missing video titles
+- 📋 **Virtual Playlists**: Local playlists from imported data
 
 ## Quick Start
 
@@ -89,6 +93,8 @@ yanger
 | `yy` | Copy selected/marked videos |
 | `pp` | Paste videos from clipboard |
 | `o` | Open sort menu |
+| `r` | Open video(s)/playlist in browser |
+| `M` | Fetch metadata for virtual playlist videos |
 
 ### Search
 | Key | Action |
@@ -123,6 +129,68 @@ Press `:` to enter command mode with tab completion:
 :stats                   # Show playlist statistics
 :help [command]          # Get help for command
 ```
+
+## Google Takeout Import
+
+Import your Watch Later and History playlists from Google Takeout:
+
+### Export from Google Takeout
+1. Go to [Google Takeout](https://takeout.google.com/)
+2. Select "YouTube and YouTube Music"
+3. Choose format: JSON
+4. Download and extract the archive
+
+### Import into Yanger
+
+```bash
+# Import from extracted folder
+yanger takeout ~/Downloads/Takeout/
+
+# Import from multiple archives
+yanger takeout Takeout-1/ Takeout-2/ --merge
+
+# Import from zip file
+yanger takeout ~/Downloads/takeout-20240320.zip
+```
+
+### Fetch Video Metadata
+
+Google Takeout only provides video IDs. Fetch titles and metadata:
+
+```bash
+# Fetch metadata for all videos without titles
+yanger fetch-metadata
+
+# Fetch for specific playlist
+yanger fetch-metadata --playlist "Watch Later (Imported)"
+
+# Fetch only recent videos
+yanger fetch-metadata --days-ago 30
+
+# Limit number of videos
+yanger fetch-metadata --limit 100
+```
+
+### Managing Virtual Playlists
+
+```bash
+# Remove duplicate playlists
+yanger dedupe-virtual
+
+# Export all playlists (real and virtual)
+yanger export -o backup.json
+
+# Export only virtual playlists
+yanger export --no-real -o virtual-playlists.json
+```
+
+### Features
+- ✅ Import Watch Later (unavailable via API since 2016)
+- ✅ Import full History (API only provides partial access)
+- ✅ Automatic deduplication
+- ✅ Merge with existing imports
+- ✅ Auto-fetch metadata on playlist view
+- ✅ Pagination for large playlists (7000+ videos)
 
 ## Persistent Cache
 
@@ -161,6 +229,9 @@ cache:
   ttl_days: 7
   auto_cleanup: true
   max_size_mb: 100
+  show_all_virtual_playlists: false  # Show only Watch Later/History by default
+  auto_fetch_metadata: true          # Auto-fetch missing titles
+  auto_fetch_batch_size: 20          # Videos to fetch per batch
 ```
 
 ## Tips & Tricks
@@ -170,6 +241,8 @@ cache:
 - 🎯 Mark multiple videos with `Space`, then use `dd`/`yy` for bulk operations
 - 📐 Use `V` (visual mode) to quickly select a range of videos
 - 🔄 Press `v` to invert selection - useful for "select all except"
+- 🌐 Press `r` to open videos in browser - works with marked videos or current selection
+- 📥 Import your Watch Later and History from Google Takeout for full access
 
 ### API Quota Management
 - 📊 Check quota with `:quota` command
@@ -211,6 +284,13 @@ With the default quota, you can:
 - Sort videos by multiple criteria
 - Smart refresh logic
 - Cut/copy/paste operations
+- Google Takeout import (Watch Later & History)
+- Virtual playlists for imported data
+- Open videos/playlists in browser
+- Auto-fetch metadata for imported videos
+- Deduplication of imported playlists
+- Pagination for large playlists (7000+ videos)
+- Date-based filtering for metadata fetching
 
 ### 🚧 Planned Features
 - [ ] Playlist creation/deletion (gn/gd commands)
