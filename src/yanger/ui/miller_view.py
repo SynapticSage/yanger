@@ -173,6 +173,16 @@ class VideoColumn(ScrollableContainer):
         color: $text-muted;
         text-style: italic;
     }
+    
+    VideoColumn > .page-info {
+        width: 100%;
+        height: 1;
+        background: $panel;
+        color: $text-muted;
+        text-align: center;
+        border-bottom: tall $accent;
+        padding: 0 1;
+    }
     """
     
     selected_index = reactive(0)
@@ -188,6 +198,11 @@ class VideoColumn(ScrollableContainer):
         self.visual_start_index = -1
         self.visual_unmark_mode = False  # For uV command
         
+        # Pagination settings
+        self.page_size = 100  # Number of videos per page
+        self.current_page = 0
+        self.total_pages = 1
+        
     def compose(self) -> ComposeResult:
         """Initial composition."""
         yield Static("Select a playlist", classes="empty-message")
@@ -196,6 +211,11 @@ class VideoColumn(ScrollableContainer):
         """Set the videos to display."""
         self.videos = videos
         self.selected_index = 0 if videos else -1
+        
+        # Calculate pagination
+        self.total_pages = max(1, (len(videos) + self.page_size - 1) // self.page_size)
+        self.current_page = 0
+        
         await self.refresh_display()
         
     async def refresh_display(self) -> None:
@@ -205,6 +225,15 @@ class VideoColumn(ScrollableContainer):
         if not self.videos:
             await self.mount(Static("No videos in playlist", classes="empty-message"))
             return
+        
+        # Calculate page boundaries
+        start_idx = self.current_page * self.page_size
+        end_idx = min(start_idx + self.page_size, len(self.videos))
+        
+        # Show page info if we have multiple pages
+        if self.total_pages > 1:
+            page_info = f"Page {self.current_page + 1}/{self.total_pages} (Videos {start_idx + 1}-{end_idx} of {len(self.videos)})"
+            await self.mount(Static(page_info, classes="page-info"))
             
         # Calculate visual range if in visual mode
         visual_range = set()
@@ -213,7 +242,9 @@ class VideoColumn(ScrollableContainer):
             end = max(self.visual_start_index, self.selected_index)
             visual_range = set(range(start, end + 1))
             
-        for i, video in enumerate(self.videos):
+        # Only display videos on current page
+        for i in range(start_idx, end_idx):
+            video = self.videos[i]
             classes = ["video-item"]
             if i == self.selected_index:
                 classes.append("selected")
@@ -263,20 +294,53 @@ class VideoColumn(ScrollableContainer):
             
         new_index = self.selected_index + delta
         new_index = max(0, min(new_index, len(self.videos) - 1))
+        
+        # Check if we need to change page
+        old_page = self.selected_index // self.page_size
+        new_page = new_index // self.page_size
+        
         self.selected_index = new_index
         
-        self.scroll_to_widget(self.query(".video-item")[new_index])
+        # Change page if needed
+        if new_page != old_page:
+            self.current_page = new_page
+            self.call_later(self.refresh_display)
+        else:
+            # Find the item index on current page
+            page_start = self.current_page * self.page_size
+            item_index = new_index - page_start
+            items = self.query(".video-item")
+            if 0 <= item_index < len(items):
+                self.scroll_to_widget(items[item_index])
         
     def select_first(self) -> None:
         """Select first video (gg)."""
         self.selected_index = 0
-        self.scroll_home()
+        self.current_page = 0
+        self.call_later(self.refresh_display)
         
     def select_last(self) -> None:
         """Select last video (G)."""
         if self.videos:
             self.selected_index = len(self.videos) - 1
-            self.scroll_end()
+            self.current_page = self.total_pages - 1
+            self.call_later(self.refresh_display)
+    
+    def next_page(self) -> None:
+        """Go to next page (Page Down)."""
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            # Move selection to first item on new page
+            self.selected_index = self.current_page * self.page_size
+            self.call_later(self.refresh_display)
+    
+    def prev_page(self) -> None:
+        """Go to previous page (Page Up)."""
+        if self.current_page > 0:
+            self.current_page -= 1
+            # Move selection to first item on new page
+            self.selected_index = self.current_page * self.page_size
+            self.call_later(self.refresh_display)
     
     def toggle_mark(self) -> None:
         """Toggle mark on current video (Space)."""
@@ -731,6 +795,13 @@ class MillerView(Widget):
                 # Refresh to show visual range updates
                 if self.video_column.visual_mode:
                     asyncio.create_task(self.video_column.refresh_display())
+        
+        # Page navigation for video column
+        elif key in ['pageup', 'pagedown'] and self.focused_column == 1 and self.video_column:
+            if key == 'pagedown':
+                self.video_column.next_page()
+            elif key == 'pageup':
+                self.video_column.prev_page()
 
 
 # Custom messages

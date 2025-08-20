@@ -62,6 +62,10 @@ class PersistentCache:
             self.cleanup_expired()
             
         logger.info(f"Initialized persistent cache at {self.db_path}")
+    
+    def db_connection(self):
+        """Get a database connection context manager."""
+        return sqlite3.connect(self.db_path)
         
     def _init_database(self) -> None:
         """Initialize SQLite database with schema."""
@@ -464,6 +468,110 @@ class PersistentCache:
             
         return playlist_id
     
+    def update_or_create_virtual_playlist(self, name: str, videos: List[Dict],
+                                         source: str = 'takeout',
+                                         description: str = '',
+                                         merge: bool = True) -> str:
+        """Update existing virtual playlist or create new one.
+        
+        Args:
+            name: Playlist name
+            videos: List of video dictionaries with 'video_id' and optional metadata
+            source: Source of the playlist ('takeout', 'manual', etc.)
+            description: Playlist description
+            merge: If True, merge with existing videos. If False, replace all videos.
+            
+        Returns:
+            Playlist ID
+        """
+        existing = self.get_virtual_playlist_by_name(name)
+        
+        if existing:
+            playlist_id = existing['id']
+            
+            with sqlite3.connect(self.db_path) as conn:
+                if merge:
+                    # Get existing video IDs to avoid duplicates
+                    cursor = conn.execute("""
+                        SELECT video_id FROM virtual_videos
+                        WHERE playlist_id = ?
+                    """, (playlist_id,))
+                    existing_video_ids = {row[0] for row in cursor.fetchall()}
+                    
+                    # Get max position for appending
+                    cursor = conn.execute("""
+                        SELECT MAX(position) FROM virtual_videos
+                        WHERE playlist_id = ?
+                    """, (playlist_id,))
+                    max_position = cursor.fetchone()[0] or -1
+                    
+                    # Add only new videos
+                    new_videos_count = 0
+                    for video in videos:
+                        if video['video_id'] not in existing_video_ids:
+                            max_position += 1
+                            conn.execute("""
+                                INSERT OR IGNORE INTO virtual_videos
+                                (playlist_id, video_id, title, channel_title, added_at, position)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                            """, (
+                                playlist_id,
+                                video['video_id'],
+                                video.get('title', ''),
+                                video.get('channel', ''),
+                                video.get('added_at'),
+                                max_position
+                            ))
+                            new_videos_count += 1
+                    
+                    # Update video count
+                    conn.execute("""
+                        UPDATE virtual_playlists
+                        SET video_count = (
+                            SELECT COUNT(*) FROM virtual_videos
+                            WHERE playlist_id = ?
+                        ),
+                        description = ?
+                        WHERE id = ?
+                    """, (playlist_id, description, playlist_id))
+                    
+                    conn.commit()
+                    logger.info(f"Merged {new_videos_count} new videos into playlist '{name}'")
+                    
+                else:
+                    # Replace mode: delete existing videos and add new ones
+                    conn.execute("DELETE FROM virtual_videos WHERE playlist_id = ?", (playlist_id,))
+                    
+                    # Insert new videos
+                    for position, video in enumerate(videos):
+                        conn.execute("""
+                            INSERT OR IGNORE INTO virtual_videos
+                            (playlist_id, video_id, title, channel_title, added_at, position)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (
+                            playlist_id,
+                            video['video_id'],
+                            video.get('title', ''),
+                            video.get('channel', ''),
+                            video.get('added_at'),
+                            position
+                        ))
+                    
+                    # Update playlist info
+                    conn.execute("""
+                        UPDATE virtual_playlists
+                        SET video_count = ?, description = ?
+                        WHERE id = ?
+                    """, (len(videos), description, playlist_id))
+                    
+                    conn.commit()
+                    logger.info(f"Replaced playlist '{name}' with {len(videos)} videos")
+            
+            return playlist_id
+        else:
+            # Create new playlist
+            return self.import_virtual_playlist(name, videos, source, description)
+    
     def get_virtual_playlists(self) -> List[Dict]:
         """Get all virtual playlists.
         
@@ -491,6 +599,35 @@ class PersistentCache:
             
             return playlists
     
+    def get_virtual_playlist_by_name(self, name: str) -> Optional[Dict]:
+        """Get a virtual playlist by name.
+        
+        Args:
+            name: Playlist name
+            
+        Returns:
+            Playlist dictionary or None
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM virtual_playlists
+                WHERE title = ? AND is_active = 1
+                LIMIT 1
+            """, (name,))
+            
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'id': row['id'],
+                    'title': row['title'],
+                    'description': row['description'],
+                    'source': row['source'],
+                    'video_count': row['video_count'],
+                    'imported_at': row['imported_at']
+                }
+            return None
+    
     def get_virtual_videos(self, playlist_id: str) -> List[Dict]:
         """Get videos from a virtual playlist.
         
@@ -512,8 +649,8 @@ class PersistentCache:
             for row in cursor:
                 videos.append({
                     'video_id': row['video_id'],
-                    'title': row['title'],
-                    'channel_title': row['channel_title'],
+                    'title': row['title'] or '',
+                    'channel_title': row['channel_title'] or '',
                     'added_at': row['added_at'],
                     'position': row['position']
                 })
@@ -541,6 +678,171 @@ class PersistentCache:
                 logger.info(f"Deleted virtual playlist {playlist_id}")
                 return True
             return False
+    
+    def update_virtual_video_metadata(self, video_id: str, metadata: Dict[str, Any]) -> bool:
+        """Update metadata for a virtual video.
+        
+        Args:
+            video_id: YouTube video ID
+            metadata: Dictionary with title, channel_title, description, etc.
+            
+        Returns:
+            True if updated
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            # First check if we need to add columns for new metadata
+            cursor = conn.execute("PRAGMA table_info(virtual_videos)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            # Add metadata columns if they don't exist
+            if 'description' not in columns:
+                conn.execute("ALTER TABLE virtual_videos ADD COLUMN description TEXT")
+            if 'thumbnail_url' not in columns:
+                conn.execute("ALTER TABLE virtual_videos ADD COLUMN thumbnail_url TEXT")
+            if 'duration' not in columns:
+                conn.execute("ALTER TABLE virtual_videos ADD COLUMN duration TEXT")
+            if 'metadata_fetched_at' not in columns:
+                conn.execute("ALTER TABLE virtual_videos ADD COLUMN metadata_fetched_at TIMESTAMP")
+            
+            # Update the video metadata
+            result = conn.execute("""
+                UPDATE virtual_videos
+                SET title = ?,
+                    channel_title = ?,
+                    description = ?,
+                    thumbnail_url = ?,
+                    duration = ?,
+                    metadata_fetched_at = CURRENT_TIMESTAMP
+                WHERE video_id = ?
+            """, (
+                metadata.get('title', ''),
+                metadata.get('channel_title', ''),
+                metadata.get('description', ''),
+                metadata.get('thumbnail_url', ''),
+                metadata.get('duration', ''),
+                video_id
+            ))
+            
+            conn.commit()
+            return result.rowcount > 0
+    
+    def get_virtual_videos_without_metadata(self, playlist_id: Optional[str] = None, 
+                                           limit: Optional[int] = None,
+                                           since_date: Optional[datetime] = None) -> List[str]:
+        """Get video IDs that don't have metadata yet.
+        
+        Args:
+            playlist_id: Optional playlist ID to filter by
+            limit: Optional limit on number of IDs to return
+            since_date: Optional date filter - only return videos added after this date
+            
+        Returns:
+            List of video IDs that need metadata
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            query = """
+                SELECT DISTINCT video_id 
+                FROM virtual_videos 
+                WHERE (title IS NULL OR title = '')
+            """
+            params = []
+            
+            if playlist_id:
+                query += " AND playlist_id = ?"
+                params.append(playlist_id)
+            
+            if since_date:
+                query += " AND added_at >= ?"
+                params.append(since_date.isoformat())
+            
+            # Sort by added_at to prioritize newer videos
+            query += " ORDER BY added_at DESC"
+            
+            if limit:
+                query += f" LIMIT {limit}"
+            
+            cursor = conn.execute(query, params)
+            return [row[0] for row in cursor.fetchall()]
+    
+    def deduplicate_virtual_playlists(self) -> int:
+        """Remove duplicate virtual playlists, keeping the oldest.
+        
+        Returns:
+            Number of duplicates removed
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            # Find duplicates (same title)
+            cursor = conn.execute("""
+                SELECT title, COUNT(*) as count, MIN(imported_at) as oldest
+                FROM virtual_playlists
+                WHERE is_active = 1
+                GROUP BY title
+                HAVING count > 1
+            """)
+            
+            duplicates_removed = 0
+            
+            for row in cursor.fetchall():
+                title = row[0]
+                
+                # Get all playlists with this title
+                dup_cursor = conn.execute("""
+                    SELECT id FROM virtual_playlists
+                    WHERE title = ? AND is_active = 1
+                    ORDER BY imported_at ASC
+                """, (title,))
+                
+                playlist_ids = [r[0] for r in dup_cursor.fetchall()]
+                
+                if len(playlist_ids) > 1:
+                    # Keep the first (oldest), mark others as inactive
+                    keep_id = playlist_ids[0]
+                    remove_ids = playlist_ids[1:]
+                    
+                    # Merge videos from duplicates into the keeper
+                    for remove_id in remove_ids:
+                        # Get videos from duplicate
+                        videos = conn.execute("""
+                            SELECT video_id, title, channel_title, added_at, position
+                            FROM virtual_videos
+                            WHERE playlist_id = ?
+                        """, (remove_id,)).fetchall()
+                        
+                        # Add unique videos to keeper playlist
+                        for video in videos:
+                            conn.execute("""
+                                INSERT OR IGNORE INTO virtual_videos
+                                (playlist_id, video_id, title, channel_title, added_at, position)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                            """, (keep_id, video[0], video[1], video[2], video[3], video[4]))
+                        
+                        # Mark duplicate playlist as inactive
+                        conn.execute("""
+                            UPDATE virtual_playlists
+                            SET is_active = 0
+                            WHERE id = ?
+                        """, (remove_id,))
+                        
+                        duplicates_removed += 1
+                        logger.info(f"Merged and removed duplicate playlist: {title} (id: {remove_id})")
+                    
+                    # Update video count for keeper
+                    conn.execute("""
+                        UPDATE virtual_playlists
+                        SET video_count = (
+                            SELECT COUNT(DISTINCT video_id)
+                            FROM virtual_videos
+                            WHERE playlist_id = ?
+                        )
+                        WHERE id = ?
+                    """, (keep_id, keep_id))
+            
+            conn.commit()
+            
+            if duplicates_removed > 0:
+                logger.info(f"Removed {duplicates_removed} duplicate playlists")
+            
+            return duplicates_removed
         
     def has_playlist(self, playlist_id: str) -> bool:
         """Check if a playlist is in cache.

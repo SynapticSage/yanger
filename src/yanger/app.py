@@ -72,6 +72,7 @@ class YouTubeRangerApp(App):
         self.api_client: Optional[YouTubeAPIClient] = None
         self._clipboard = Clipboard()
         self._cache = PersistentCache()  # Persistent SQLite cache
+        self.offline_mode = False  # Track if running in offline mode
         
         # Data
         self.playlists: List[Playlist] = []
@@ -135,8 +136,19 @@ class YouTubeRangerApp(App):
             # Get status bar reference
             self.status_bar = self.query_one("#status-bar", StatusBar)
             
+            # Handle offline mode
+            if self.offline_mode:
+                # Load only virtual playlists in offline mode
+                self._append_virtual_playlists()
+                if self.miller_view and self.playlists:
+                    await self.miller_view.set_playlists(self.playlists)
+                if self.status_bar:
+                    self.status_bar.update_status(
+                        f"Offline Mode - {len(self.playlists)} virtual playlists",
+                        "OFFLINE"
+                    )
             # Check if we should load playlists on startup
-            if self.settings.cache.load_on_startup:
+            elif self.settings.cache.load_on_startup:
                 await self.load_playlists()
             else:
                 # Show empty state with instructions
@@ -157,7 +169,15 @@ class YouTubeRangerApp(App):
         try:
             virtual_playlists = self._cache.get_virtual_playlists()
             
+            # Filter to only show Watch Later and History by default
+            # Unless show_all_virtual_playlists is enabled
+            show_all = getattr(self.settings.cache, 'show_all_virtual_playlists', False)
+            
             for vp in virtual_playlists:
+                # Only show Watch Later and History unless show_all is True
+                if not show_all and vp['title'] not in ['Watch Later (Imported)', 'History (Imported)']:
+                    continue
+                    
                 playlist = Playlist(
                     id=f"virtual_{vp['id']}",
                     title=f"💾 {vp['title']}",
@@ -172,7 +192,9 @@ class YouTubeRangerApp(App):
                 self.playlists.append(playlist)
             
             if virtual_playlists:
-                logger.debug(f"Added {len(virtual_playlists)} virtual playlists")
+                shown = len([vp for vp in virtual_playlists 
+                           if show_all or vp['title'] in ['Watch Later (Imported)', 'History (Imported)']])
+                logger.debug(f"Added {shown} virtual playlists (total: {len(virtual_playlists)})")
         except Exception as e:
             logger.warning(f"Could not load virtual playlists: {e}")
     
@@ -218,16 +240,27 @@ class YouTubeRangerApp(App):
             self.auth = YouTubeAuth()
             self.auth.authenticate()
             self.api_client = YouTubeAPIClient(self.auth)
+            self.offline_mode = False
             
         except FileNotFoundError:
             self.notify(
-                "OAuth2 credentials not found. Run 'yanger auth' to setup.",
-                severity="error"
+                "OAuth2 credentials not found. Running in offline mode (virtual playlists only).\n"
+                "Run 'yanger auth' to setup YouTube access.",
+                severity="warning",
+                timeout=10
             )
-            self.exit(1)
+            self.offline_mode = True
+            self.api_client = None
         except Exception as e:
-            self.notify(f"Authentication error: {e}", severity="error")
-            self.exit(1)
+            self.notify(
+                f"Authentication error: {e}\n"
+                "Running in offline mode (virtual playlists only).\n"
+                "Run 'yanger auth' to re-authenticate.",
+                severity="warning",
+                timeout=10
+            )
+            self.offline_mode = True
+            self.api_client = None
     
     async def load_playlists(self, force_refresh: bool = False) -> None:
         """Load user's playlists.
@@ -236,6 +269,16 @@ class YouTubeRangerApp(App):
             force_refresh: Force refresh from API even if cached
         """
         if not self.api_client:
+            # In offline mode, just load virtual playlists
+            if self.offline_mode:
+                self._append_virtual_playlists()
+                if self.miller_view:
+                    await self.miller_view.set_playlists(self.playlists)
+                if self.status_bar:
+                    self.status_bar.update_status(
+                        f"Offline Mode - {len(self.playlists)} virtual playlists",
+                        "OFFLINE"
+                    )
             return
         
         # Mark that we've loaded playlists at least once
@@ -321,14 +364,27 @@ class YouTubeRangerApp(App):
                     virtual_id = playlist.id.replace("virtual_", "")
                     videos_data = self._cache.get_virtual_videos(virtual_id)
                     
+                    # Track videos without metadata for auto-fetch
+                    videos_without_metadata = []
+                    
                     # Convert to Video objects
                     self.current_videos = []
                     for v in videos_data:
+                        # Use video ID as fallback if title is empty
+                        title = (v.get('title') or '').strip()
+                        if not title:
+                            videos_without_metadata.append(v['video_id'])
+                            title = f"[Video: {v['video_id']}]"
+                        
+                        channel = (v.get('channel_title') or '').strip()
+                        if not channel:
+                            channel = 'Unknown Channel'
+                        
                         video = Video(
                             id=v['video_id'],
                             playlist_item_id=f"virtual_{v['video_id']}",
-                            title=v.get('title', v['video_id']),
-                            channel_title=v.get('channel_title', 'Unknown'),
+                            title=title,
+                            channel_title=channel,
                             position=v.get('position', 0)
                         )
                         self.current_videos.append(video)
@@ -345,6 +401,20 @@ class YouTubeRangerApp(App):
                             f"Loaded {len(self.current_videos)} videos from virtual playlist",
                             "Virtual"
                         )
+                    
+                    # Auto-fetch metadata if enabled and there are videos without metadata
+                    if videos_without_metadata and self.settings.cache.auto_fetch_metadata:
+                        # Limit to first batch to avoid high quota usage
+                        batch_size = min(len(videos_without_metadata), self.settings.cache.auto_fetch_batch_size)
+                        if batch_size > 0:
+                            self.notify(
+                                f"Auto-fetching metadata for {batch_size} videos (press 'M' to fetch all)...",
+                                timeout=3
+                            )
+                            # Run metadata fetch in background
+                            self.call_later(self._auto_fetch_metadata_batch, 
+                                          videos_without_metadata[:batch_size], 
+                                          virtual_id)
                     
                     self.notify(f"Loaded {len(self.current_videos)} videos from {playlist.title}", timeout=2)
                     return
@@ -435,6 +505,11 @@ class YouTubeRangerApp(App):
     
     async def action_refresh(self) -> None:
         """Refresh current view (Ctrl+R)."""
+        if self.offline_mode:
+            self.notify("Cannot refresh in offline mode. Run 'yanger auth' to re-authenticate.", 
+                       severity="warning", timeout=5)
+            return
+            
         if not self.playlists_loaded:
             # First time loading playlists - use cache if available
             await self.load_playlists(force_refresh=False)
@@ -450,6 +525,11 @@ class YouTubeRangerApp(App):
     
     async def action_refresh_all(self) -> None:
         """Refresh all playlists (Ctrl+Shift+R)."""
+        if self.offline_mode:
+            self.notify("Cannot refresh in offline mode. Run 'yanger auth' to re-authenticate.", 
+                       severity="warning", timeout=5)
+            return
+            
         # Clear entire cache
         self._cache.clear()
         
@@ -493,7 +573,8 @@ class YouTubeRangerApp(App):
             event.stop()
         # THEN: Let miller view handle navigation keys, ranger commands, search, and visual mode
         # V = visual mode, v = invert selection, space = toggle mark (no auto-advance)
-        elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'g', 'G', 'enter', 'space', 'd', 'y', 'p', '/', 'n', 'N', 'v', 'V', 'u', 'escape', 'o']:
+        # pageup/pagedown for pagination
+        elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'g', 'G', 'enter', 'space', 'd', 'y', 'p', '/', 'n', 'N', 'v', 'V', 'u', 'escape', 'o', 'pageup', 'pagedown']:
             await self.miller_view.handle_key(event.key)
             event.stop()
     
@@ -515,6 +596,96 @@ class YouTubeRangerApp(App):
         self.current_video = video
         if self.miller_view:
             await self.miller_view.update_preview(video)
+    
+    async def fetch_metadata_for_current_playlist(self) -> None:
+        """Fetch metadata for videos in current virtual playlist."""
+        if not self.current_playlist or not self.current_playlist.is_virtual:
+            return
+        
+        # Get virtual playlist ID
+        virtual_id = self.current_playlist.id.replace("virtual_", "")
+        
+        # Get videos without metadata (limit to current page for performance)
+        video_ids = self._cache.get_virtual_videos_without_metadata(
+            playlist_id=virtual_id,
+            limit=100  # Fetch metadata for up to 100 videos at a time
+        )
+        
+        if not video_ids:
+            self.notify("All videos already have metadata!", severity="success")
+            return
+        
+        # Calculate quota cost
+        num_batches = (len(video_ids) + 49) // 50  # 50 videos per batch
+        quota_cost = num_batches
+        
+        # Show confirmation
+        self.notify(
+            f"Fetching metadata for {len(video_ids)} videos ({quota_cost} quota units)...",
+            timeout=5
+        )
+        
+        try:
+            if not self.api_client:
+                self.notify("API client not initialized. Please restart the app.", severity="error")
+                return
+            
+            # Fetch metadata
+            updated_count = 0
+            videos_data = self.api_client.get_videos_by_ids(video_ids)
+            
+            # Update database
+            for video_data in videos_data:
+                if self._cache.update_virtual_video_metadata(video_data['video_id'], video_data):
+                    updated_count += 1
+            
+            # Reload current playlist to show updated titles
+            await self.load_playlist_videos(self.current_playlist, force_refresh=False)
+            
+            self.notify(
+                f"Successfully updated {updated_count} videos! Quota remaining: {self.api_client.get_quota_remaining()}/10000",
+                severity="success",
+                timeout=5
+            )
+            
+        except Exception as e:
+            self.notify(f"Error fetching metadata: {e}", severity="error")
+            logger.error(f"Error fetching metadata: {e}")
+    
+    async def _auto_fetch_metadata_batch(self, video_ids: List[str], virtual_id: str) -> None:
+        """Background task to fetch metadata for a batch of videos.
+        
+        Args:
+            video_ids: List of video IDs to fetch metadata for
+            virtual_id: Virtual playlist ID
+        """
+        try:
+            if not self.api_client:
+                return
+            
+            # Fetch metadata
+            updated_count = 0
+            videos_data = self.api_client.get_videos_by_ids(video_ids)
+            
+            # Update database
+            for video_data in videos_data:
+                if self._cache.update_virtual_video_metadata(video_data['video_id'], video_data):
+                    updated_count += 1
+            
+            # Reload current playlist to show updated titles if still viewing same playlist
+            if (self.current_playlist and 
+                self.current_playlist.id == f"virtual_{virtual_id}"):
+                await self.load_playlist_videos(self.current_playlist, force_refresh=False)
+                
+                self.notify(
+                    f"Auto-fetched metadata for {updated_count} videos",
+                    severity="success",
+                    timeout=2
+                )
+            
+        except Exception as e:
+            logger.error(f"Error auto-fetching metadata: {e}")
+            # Don't notify on auto-fetch errors to avoid annoying the user
     
     def on_ranger_command(self, message: RangerCommand) -> None:
         """Handle ranger-style command initiation."""
@@ -853,6 +1024,13 @@ class YouTubeRangerApp(App):
                         self.notify(f"Filtered: {len(filtered_videos)} matches", timeout=2)
                     else:
                         self.notify("No matches found", severity="warning")
+            
+        elif cmd_name == "fetch-metadata":
+            # Fetch metadata for current virtual playlist
+            if self.current_playlist and self.current_playlist.is_virtual:
+                self.call_later(self.fetch_metadata_for_current_playlist)
+            else:
+                self.notify("This command only works for virtual playlists", severity="warning")
             
         elif cmd_name == "export":
             # TODO: Implement export

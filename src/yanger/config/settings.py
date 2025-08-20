@@ -70,6 +70,9 @@ class CacheSettings:
     auto_cleanup: bool = True  # Automatically clean expired entries
     max_size_mb: int = 100
     load_on_startup: bool = False  # Load playlists automatically on startup
+    show_all_virtual_playlists: bool = False  # Show all virtual playlists (not just Watch Later/History)
+    auto_fetch_metadata: bool = True  # Auto-fetch metadata for videos without titles
+    auto_fetch_batch_size: int = 20  # Number of videos to auto-fetch at once (max 50)
 
 
 @dataclass

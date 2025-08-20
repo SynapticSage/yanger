@@ -397,3 +397,51 @@ class YouTubeAPIClient:
             if e.resp.status == 403 and 'quotaExceeded' in str(e):
                 raise QuotaExceededError("YouTube API quota exceeded")
             raise
+    
+    def get_videos_by_ids(self, video_ids: List[str]) -> List[Dict[str, Any]]:
+        """Fetch video metadata for a list of video IDs.
+        
+        Args:
+            video_ids: List of YouTube video IDs (max 50 per call)
+            
+        Returns:
+            List of video metadata dictionaries
+        """
+        if not video_ids:
+            return []
+        
+        # YouTube API allows max 50 IDs per request
+        batch_size = 50
+        all_videos = []
+        
+        for i in range(0, len(video_ids), batch_size):
+            batch = video_ids[i:i + batch_size]
+            
+            try:
+                self._track_quota('videos.list')
+                
+                response = self.youtube.videos().list(
+                    part='snippet,contentDetails',
+                    id=','.join(batch)
+                ).execute()
+                
+                for item in response.get('items', []):
+                    video_data = {
+                        'video_id': item['id'],
+                        'title': item['snippet'].get('title', ''),
+                        'channel_title': item['snippet'].get('channelTitle', ''),
+                        'description': item['snippet'].get('description', ''),
+                        'published_at': item['snippet'].get('publishedAt', ''),
+                        'duration': item['contentDetails'].get('duration', ''),
+                        'thumbnail_url': item['snippet'].get('thumbnails', {}).get('default', {}).get('url', '')
+                    }
+                    all_videos.append(video_data)
+                    
+            except HttpError as e:
+                logger.error(f"Error fetching video metadata: {e}")
+                if e.resp.status == 403 and 'quotaExceeded' in str(e):
+                    raise QuotaExceededError("YouTube API quota exceeded")
+                # Continue with next batch even if one fails
+                continue
+        
+        return all_videos

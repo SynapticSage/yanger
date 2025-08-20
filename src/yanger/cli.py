@@ -241,6 +241,7 @@ def takeout(paths, merge, verbose):
     
     console.print("[bold cyan]YouTube Takeout Importer[/bold cyan]")
     console.print(f"Processing {len(paths)} takeout file(s)...\n")
+    console.print(f"Mode: {'Merge with existing' if merge else 'Replace existing'}")
     
     # Initialize parser and cache
     parser = TakeoutParser()
@@ -255,6 +256,7 @@ def takeout(paths, merge, verbose):
     
     # Import into database
     imported_count = 0
+    updated_count = 0
     total_videos = 0
     
     with console.status("[bold green]Importing playlists...") as status:
@@ -278,29 +280,69 @@ def takeout(paths, merge, verbose):
             else:
                 description = f"Playlist imported from Google Takeout ({len(videos)} videos)"
             
-            # Import to database
+            # Check if playlist already exists
+            existing = cache.get_virtual_playlist_by_name(name)
+            
+            # Import or update database
             try:
-                playlist_id = cache.import_virtual_playlist(
-                    name=name,
-                    videos=videos,
-                    source='takeout',
-                    description=description
-                )
-                imported_count += 1
-                total_videos += len(videos)
-                
-                status.update(f"Imported {imported_count} playlists, {total_videos} videos...")
-                
-                if verbose:
-                    console.print(f"  ✓ {name}: {len(videos)} videos")
+                if existing and merge:
+                    # Merge mode: update existing playlist with new videos
+                    playlist_id = cache.update_or_create_virtual_playlist(
+                        name=name,
+                        videos=videos,
+                        source='takeout',
+                        description=description,
+                        merge=True
+                    )
+                    updated_count += 1
+                    total_videos += len(videos)
+                    status.update(f"Updated {updated_count} playlists, imported {imported_count} new...")
+                    
+                    if verbose:
+                        console.print(f"  ⟳ {name}: merged {len(videos)} videos")
+                        
+                elif existing and not merge:
+                    # Replace mode: delete old and create new
+                    cache.delete_virtual_playlist(existing['id'])
+                    playlist_id = cache.import_virtual_playlist(
+                        name=name,
+                        videos=videos,
+                        source='takeout',
+                        description=description
+                    )
+                    updated_count += 1
+                    total_videos += len(videos)
+                    status.update(f"Replaced {updated_count} playlists, imported {imported_count} new...")
+                    
+                    if verbose:
+                        console.print(f"  ↻ {name}: replaced with {len(videos)} videos")
+                        
+                else:
+                    # New playlist
+                    playlist_id = cache.import_virtual_playlist(
+                        name=name,
+                        videos=videos,
+                        source='takeout',
+                        description=description
+                    )
+                    imported_count += 1
+                    total_videos += len(videos)
+                    
+                    status.update(f"Imported {imported_count} playlists, {total_videos} videos...")
+                    
+                    if verbose:
+                        console.print(f"  ✓ {name}: {len(videos)} videos")
                     
             except Exception as e:
                 console.print(f"  [red]✗ Failed to import {name}: {e}[/red]")
     
     # Show summary
     console.print("\n[bold green]Import Complete![/bold green]")
-    console.print(f"  Imported playlists: {imported_count}")
-    console.print(f"  Total videos: {total_videos}")
+    if imported_count > 0:
+        console.print(f"  New playlists imported: {imported_count}")
+    if updated_count > 0:
+        console.print(f"  Existing playlists {'merged' if merge else 'replaced'}: {updated_count}")
+    console.print(f"  Total videos processed: {total_videos}")
     
     # Special playlist highlights
     if 'Watch Later (Imported)' in all_playlists:
@@ -313,6 +355,10 @@ def takeout(paths, merge, verbose):
     
     console.print("\n[dim]Virtual playlists are now available in yanger.[/dim]")
     console.print("[dim]You can copy videos from these to your YouTube playlists.[/dim]")
+    
+    # Suggest running deduplication if needed
+    if not merge:
+        console.print("\n[dim]Tip: Run 'yanger dedupe-virtual' to remove any duplicate playlists.[/dim]")
 
 
 @cli.command()
@@ -400,6 +446,254 @@ def export(format, output, include_virtual, include_real, verbose):
             if verbose:
                 console.print_exception()
             sys.exit(1)
+
+
+@cli.command(name='dedupe-virtual')
+@click.option('--dry-run', is_flag=True, help='Show what would be removed without making changes')
+@click.option('--verbose', '-v', is_flag=True, help='Show detailed progress')
+def dedupe_virtual(dry_run, verbose):
+    """Remove duplicate virtual playlists from database.
+    
+    Keeps the oldest version of each playlist and merges videos.
+    """
+    from rich.console import Console
+    console = Console()
+    
+    console.print("\n[bold cyan]Virtual Playlist Deduplicator[/bold cyan]")
+    
+    try:
+        from .cache import PersistentCache
+        cache = PersistentCache()
+        
+        # Check for duplicates
+        with cache.db_connection() as conn:
+            cursor = conn.execute("""
+                SELECT title, COUNT(*) as count
+                FROM virtual_playlists
+                WHERE is_active = 1
+                GROUP BY title
+                HAVING count > 1
+            """)
+            
+            duplicates = cursor.fetchall()
+            
+            if not duplicates:
+                console.print("[green]No duplicate playlists found![/green]")
+                return
+            
+            # Show what will be removed
+            console.print(f"\nFound [bold]{len(duplicates)}[/bold] playlists with duplicates:")
+            total_duplicates = 0
+            for title, count in duplicates:
+                console.print(f"  - {title}: {count} copies ({count-1} will be removed)")
+                total_duplicates += (count - 1)
+            
+            if dry_run:
+                console.print(f"\n[yellow]Dry run - would remove {total_duplicates} duplicate playlists[/yellow]")
+                return
+            
+            # Confirm
+            if not click.confirm(f"\nRemove {total_duplicates} duplicate playlists?"):
+                console.print("[yellow]Cancelled[/yellow]")
+                return
+            
+            # Perform deduplication
+            console.print("\n[bold]Deduplicating...[/bold]")
+            removed = cache.deduplicate_virtual_playlists()
+            
+            console.print(f"\n[bold green]Success![/bold green]")
+            console.print(f"Removed {removed} duplicate playlists")
+            console.print("Videos have been merged into the remaining playlists")
+            
+            # Show final stats
+            with cache.db_connection() as conn:
+                cursor = conn.execute("""
+                    SELECT COUNT(*) FROM virtual_playlists WHERE is_active = 1
+                """)
+                final_count = cursor.fetchone()[0]
+                console.print(f"\nTotal virtual playlists now: {final_count}")
+                
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        if verbose:
+            console.print_exception()
+        sys.exit(1)
+
+
+@cli.command(name='fetch-metadata')
+@click.option('--playlist', '-p', help='Virtual playlist name to fetch metadata for')
+@click.option('--batch-size', '-b', default=50, help='Number of videos per API call (max 50)')
+@click.option('--limit', '-l', type=int, help='Maximum number of videos to process')
+@click.option('--since', '-s', help='Only fetch metadata for videos added after this date (YYYY-MM-DD)')
+@click.option('--days-ago', '-d', type=int, help='Only fetch metadata for videos added in the last N days')
+@click.option('--dry-run', is_flag=True, help='Show what would be fetched without making API calls')
+@click.option('--verbose', '-v', is_flag=True, help='Show detailed progress')
+def fetch_metadata(playlist, batch_size, limit, since, days_ago, dry_run, verbose):
+    """Fetch video metadata from YouTube API for virtual playlists.
+    
+    Examples:
+        yanger fetch-metadata --playlist "Watch Later (Imported)"
+        yanger fetch-metadata --limit 100 --dry-run
+        yanger fetch-metadata --since 2024-01-01
+        yanger fetch-metadata --days-ago 30
+    """
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+    from datetime import datetime, timedelta
+    console = Console()
+    
+    console.print("\n[bold cyan]YouTube Video Metadata Fetcher[/bold cyan]")
+    
+    # Validate date options
+    if since and days_ago:
+        console.print("[red]Error: Cannot use both --since and --days-ago options[/red]")
+        return
+    
+    # Parse date filters
+    since_date = None
+    if since:
+        try:
+            since_date = datetime.strptime(since, "%Y-%m-%d")
+        except ValueError:
+            console.print(f"[red]Invalid date format: {since}. Use YYYY-MM-DD[/red]")
+            return
+    elif days_ago:
+        since_date = datetime.now() - timedelta(days=days_ago)
+    
+    try:
+        # Initialize cache
+        from .cache import PersistentCache
+        cache = PersistentCache()
+        
+        # Get virtual playlists
+        virtual_playlists = cache.get_virtual_playlists()
+        
+        if not virtual_playlists:
+            console.print("[yellow]No virtual playlists found. Import data using 'yanger takeout' first.[/yellow]")
+            return
+        
+        # Filter by playlist name if specified
+        target_playlist_id = None
+        if playlist:
+            for vp in virtual_playlists:
+                if vp['title'] == playlist:
+                    target_playlist_id = vp['id']
+                    break
+            if not target_playlist_id:
+                console.print(f"[red]Playlist '{playlist}' not found.[/red]")
+                console.print("\nAvailable virtual playlists:")
+                for vp in virtual_playlists:
+                    console.print(f"  - {vp['title']} ({vp['video_count']} videos)")
+                return
+        
+        # Get videos without metadata, with date filtering
+        video_ids = cache.get_virtual_videos_without_metadata(
+            playlist_id=target_playlist_id,
+            limit=limit,
+            since_date=since_date
+        )
+        
+        if not video_ids:
+            console.print("[green]All videos already have metadata![/green]")
+            return
+        
+        # Calculate quota cost
+        batch_size = min(batch_size, 50)  # YouTube API max
+        num_batches = (len(video_ids) + batch_size - 1) // batch_size
+        quota_cost = num_batches  # 1 quota unit per batch
+        
+        console.print(f"\nFound [bold]{len(video_ids)}[/bold] videos without metadata")
+        if since_date:
+            if since:
+                console.print(f"Filtering videos added after: [bold]{since}[/bold]")
+            else:
+                console.print(f"Filtering videos added in the last [bold]{days_ago}[/bold] days")
+        console.print(f"Will make [bold]{num_batches}[/bold] API calls (batches of {batch_size})")
+        console.print(f"Estimated quota usage: [bold]{quota_cost}[/bold] units")
+        
+        if dry_run:
+            console.print("\n[yellow]Dry run mode - no API calls will be made[/yellow]")
+            if verbose:
+                console.print("\nSample video IDs that would be processed:")
+                for vid in video_ids[:10]:
+                    console.print(f"  - {vid}")
+                if len(video_ids) > 10:
+                    console.print(f"  ... and {len(video_ids) - 10} more")
+            return
+        
+        # Confirm with user
+        if not click.confirm(f"\nProceed with fetching metadata? This will use {quota_cost} quota units"):
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+        
+        # Initialize API client
+        from .auth import YouTubeAuth
+        from .api_client import YouTubeAPIClient
+        
+        console.print("\nAuthenticating...")
+        auth = YouTubeAuth()
+        auth.authenticate()
+        api_client = YouTubeAPIClient(auth)
+        
+        # Fetch metadata with progress bar
+        updated_count = 0
+        failed_ids = []
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task("Fetching metadata...", total=len(video_ids))
+            
+            for i in range(0, len(video_ids), batch_size):
+                batch = video_ids[i:i + batch_size]
+                
+                try:
+                    # Fetch metadata from YouTube
+                    videos_data = api_client.get_videos_by_ids(batch)
+                    
+                    # Update database
+                    for video_data in videos_data:
+                        if cache.update_virtual_video_metadata(video_data['video_id'], video_data):
+                            updated_count += 1
+                            if verbose:
+                                console.print(f"  ✓ {video_data['title'][:60]}...")
+                    
+                    # Track videos that weren't found
+                    found_ids = {v['video_id'] for v in videos_data}
+                    for vid in batch:
+                        if vid not in found_ids:
+                            failed_ids.append(vid)
+                            if verbose:
+                                console.print(f"  ✗ {vid} - Video not found or private")
+                    
+                except Exception as e:
+                    console.print(f"[red]Error fetching batch: {e}[/red]")
+                    failed_ids.extend(batch)
+                
+                progress.update(task, advance=len(batch))
+        
+        # Summary
+        console.print(f"\n[bold green]Metadata fetching complete![/bold green]")
+        console.print(f"  Successfully updated: {updated_count} videos")
+        if failed_ids:
+            console.print(f"  Failed/not found: {len(failed_ids)} videos")
+            if verbose and len(failed_ids) <= 20:
+                console.print("\n  Failed video IDs:")
+                for vid in failed_ids:
+                    console.print(f"    - {vid}")
+        
+        console.print(f"\nQuota used: {quota_cost} units")
+        console.print(f"Remaining quota: {api_client.get_quota_remaining()}/10000")
+        
+    except Exception as e:
+        console.print(f"\n[red]Error: {e}[/red]")
+        if verbose:
+            console.print_exception()
+        sys.exit(1)
 
 
 if __name__ == '__main__':

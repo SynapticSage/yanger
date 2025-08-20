@@ -53,10 +53,24 @@ class YouTubeAuth:
         # Check if credentials are valid
         if not self.creds or not self.creds.valid:
             if self.creds and self.creds.expired and self.creds.refresh_token:
-                # Refresh the token
-                print("Refreshing authentication token...")
-                self.creds.refresh(Request())
-            else:
+                # Try to refresh the token
+                try:
+                    print("Refreshing authentication token...")
+                    self.creds.refresh(Request())
+                except Exception as e:
+                    # Token refresh failed - likely revoked or expired
+                    print(f"Token refresh failed: {e}")
+                    print("Removing invalid token and starting new authentication...")
+                    
+                    # Delete the invalid token file
+                    if os.path.exists(self.token_file):
+                        os.remove(self.token_file)
+                    
+                    # Clear credentials to trigger new OAuth flow
+                    self.creds = None
+            
+            # If still no valid credentials, start OAuth flow
+            if not self.creds or not self.creds.valid:
                 # Perform OAuth2 flow
                 if not os.path.exists(self.client_secrets_file):
                     raise FileNotFoundError(
