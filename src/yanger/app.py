@@ -44,6 +44,7 @@ class YouTubeRangerApp(App):
         Binding("q", "quit", "Quit", priority=True),
         Binding("?", "help", "Help"),
         Binding(":", "command_mode", "Command"),
+        Binding("r", "open_in_browser", "Open in Browser"),
         Binding("ctrl+r", "refresh", "Refresh"),
         Binding("ctrl+shift+r", "refresh_all", "Refresh All"),
         Binding("ctrl+q", "force_quit", "Force Quit", show=False),
@@ -546,6 +547,83 @@ class YouTubeRangerApp(App):
         """Show help overlay."""
         if self.help_overlay:
             self.help_overlay.show()
+    
+    def action_open_in_browser(self) -> None:
+        """Open selected video(s) or playlist in browser."""
+        import webbrowser
+        
+        if not self.miller_view:
+            return
+        
+        urls_to_open = []
+        
+        # Check if we have marked videos
+        if self.miller_view.video_column:
+            marked_videos = self.miller_view.video_column.get_marked_videos()
+            
+            if marked_videos:
+                # Open marked videos (limit to 10 to prevent browser overwhelm)
+                if len(marked_videos) > 10:
+                    self.notify(
+                        f"Opening first 10 of {len(marked_videos)} marked videos (browser tab limit)",
+                        severity="warning",
+                        timeout=3
+                    )
+                    marked_videos = marked_videos[:10]
+                
+                for video in marked_videos:
+                    urls_to_open.append(f"https://www.youtube.com/watch?v={video.id}")
+                
+                # Open URLs
+                for url in urls_to_open:
+                    webbrowser.open(url)
+                
+                self.notify(f"Opened {len(urls_to_open)} videos in browser", timeout=2)
+                return
+            
+            # No marked videos - open current video
+            if (self.miller_view.video_column.selected_index >= 0 and 
+                self.miller_view.video_column.selected_index < len(self.miller_view.video_column.videos)):
+                
+                video = self.miller_view.video_column.videos[self.miller_view.video_column.selected_index]
+                url = f"https://www.youtube.com/watch?v={video.id}"
+                webbrowser.open(url)
+                self.notify(f"Opened video in browser: {video.title}", timeout=2)
+                return
+        
+        # Check if we're in playlist column
+        if self.miller_view.playlist_column and self.current_playlist:
+            # Check if it's a virtual playlist
+            if self.current_playlist.is_virtual:
+                self.notify(
+                    "Virtual playlists cannot be opened on YouTube (local only)",
+                    severity="warning",
+                    timeout=3
+                )
+                return
+            
+            # Check for special playlists with restrictions
+            if self.current_playlist.id in ["WL", "HL"]:
+                if self.current_playlist.id == "WL":
+                    # Watch Later has a special URL
+                    url = "https://www.youtube.com/playlist?list=WL"
+                else:
+                    self.notify(
+                        "History playlist cannot be opened directly on YouTube",
+                        severity="warning",
+                        timeout=3
+                    )
+                    return
+            else:
+                # Regular playlist
+                url = f"https://www.youtube.com/playlist?list={self.current_playlist.id}"
+            
+            webbrowser.open(url)
+            self.notify(f"Opened playlist in browser: {self.current_playlist.title}", timeout=2)
+            return
+        
+        # No selection
+        self.notify("No video or playlist selected", severity="warning", timeout=2)
     
     def action_command_mode(self) -> None:
         """Enter command mode."""
