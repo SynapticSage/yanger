@@ -81,17 +81,22 @@ class KeybindingRegistry:
         self.register("yy", "Copy selected/marked videos", KeyContext.VIDEO, "Operations")
         self.register("pp", "Paste videos from clipboard", KeyContext.VIDEO, "Operations")
         
+        # Undo/Redo
+        self.register("u", "Undo last operation", KeyContext.GLOBAL, "Operations")
+        self.register("U", "Redo last undone operation", KeyContext.GLOBAL, "Operations")
+        
         # Search
         self.register("/", "Search in current list", KeyContext.VIDEO, "Search")
         self.register("n", "Next search result", KeyContext.SEARCH, "Search")
         self.register("N", "Previous search result", KeyContext.SEARCH, "Search")
         self.register("escape", "Cancel search/visual mode", KeyContext.SEARCH, "Search")
         
-        # Playlist operations (future)
-        self.register("gn", "Create new playlist", KeyContext.PLAYLIST, "Playlist", hidden=False)
-        self.register("gd", "Delete empty playlist", KeyContext.PLAYLIST, "Playlist", hidden=False)
-        self.register("cw", "Rename playlist/video", KeyContext.GLOBAL, "Operations", hidden=False)
-        self.register("o", "Open sort menu", KeyContext.VIDEO, "Operations", hidden=False)
+        # Playlist operations
+        self.register("gn", "Create new playlist", KeyContext.GLOBAL, "Playlist")
+        self.register("gd", "Delete empty playlist", KeyContext.PLAYLIST, "Playlist", hidden=True)
+        self.register("cw", "Rename playlist/video", KeyContext.GLOBAL, "Operations")
+        self.register("o", "Open sort menu", KeyContext.VIDEO, "Operations")
+        self.register("r", "Open in browser", KeyContext.GLOBAL, "Operations")
         
     def _initialize_default_commands(self):
         """Initialize default commands."""

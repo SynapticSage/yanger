@@ -24,9 +24,13 @@ from .ui.miller_view import MillerView, PlaylistSelected, VideoSelected, RangerC
 from .ui.status_bar import StatusBar
 from .ui.help_overlay import HelpOverlay
 from .ui.command_input import CommandInput, parse_command
+from .ui.playlist_creation_modal import PlaylistCreationModal, PlaylistCreated
+from .ui.rename_modal import RenameModal, ItemRenamed
 from .cache import PersistentCache
 from .keybindings import registry
 from .config.settings import load_settings
+from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation
+from .command_logger import CommandLogger
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +49,8 @@ class YouTubeRangerApp(App):
         Binding("?", "help", "Help"),
         Binding(":", "command_mode", "Command"),
         Binding("r", "open_in_browser", "Open in Browser"),
+        Binding("u", "undo", "Undo"),
+        Binding("U", "redo", "Redo"),
         Binding("ctrl+r", "refresh", "Refresh"),
         Binding("ctrl+shift+r", "refresh_all", "Refresh All"),
         Binding("ctrl+q", "force_quit", "Force Quit", show=False),
@@ -56,22 +62,36 @@ class YouTubeRangerApp(App):
     
     def __init__(self, 
                  config_dir: Optional[Path] = None,
-                 use_cache: bool = True):
+                 use_cache: bool = True,
+                 log_file: Optional[str] = None,
+                 log_level: str = "INFO"):
         """Initialize the application.
         
         Args:
             config_dir: Configuration directory path
             use_cache: Whether to use offline cache
+            log_file: Optional path to log file for command logging
+            log_level: Log level for command logging
         """
         super().__init__()
         
         self.config_dir = config_dir or Path.home() / ".config" / "yanger"
         self.use_cache = use_cache
         
+        # Initialize command logger if log file specified
+        self.command_logger: Optional[CommandLogger] = None
+        if log_file:
+            try:
+                self.command_logger = CommandLogger(log_file, log_level)
+                logger.info(f"Command logging enabled to {log_file}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize command logger: {e}")
+        
         # Core components (initialized in on_mount)
         self.auth: Optional[YouTubeAuth] = None
         self.api_client: Optional[YouTubeAPIClient] = None
         self._clipboard = Clipboard()
+        self._operation_stack = OperationStack()
         self._cache = PersistentCache()  # Persistent SQLite cache
         self.offline_mode = False  # Track if running in offline mode
         
@@ -346,6 +366,18 @@ class YouTubeRangerApp(App):
         except Exception as e:
             logger.error(f"Error loading playlists: {e}")
             self.notify(f"Failed to load playlists: {e}", severity="error")
+            # Log error
+            if self.command_logger:
+                self.command_logger.log_error(str(e), "load_playlists")
+    
+    async def refresh_playlist_list(self) -> None:
+        """Helper method to refresh the playlist list.
+        
+        This invalidates the cache and forces a fresh fetch from the API.
+        Use this after operations that modify the playlist list itself.
+        """
+        self._cache.invalidate_playlists_cache()
+        await self.load_playlists(force_refresh=True)
     
     async def load_playlist_videos(self, playlist: Playlist, force_refresh: bool = False) -> None:
         """Load videos for a specific playlist.
@@ -498,6 +530,8 @@ class YouTubeRangerApp(App):
     
     def action_quit(self) -> None:
         """Quit the application."""
+        if self.command_logger:
+            self.command_logger.log_action("quit")
         self.exit(0)
     
     def action_force_quit(self) -> None:
@@ -545,6 +579,8 @@ class YouTubeRangerApp(App):
     
     def action_help(self) -> None:
         """Show help overlay."""
+        if self.command_logger:
+            self.command_logger.log_action("show_help")
         if self.help_overlay:
             self.help_overlay.show()
     
@@ -554,6 +590,10 @@ class YouTubeRangerApp(App):
         
         if not self.miller_view:
             return
+        
+        # Log the action
+        if self.command_logger:
+            self.command_logger.log_action("open_in_browser")
         
         urls_to_open = []
         
@@ -625,6 +665,174 @@ class YouTubeRangerApp(App):
         # No selection
         self.notify("No video or playlist selected", severity="warning", timeout=2)
     
+    def action_undo(self) -> None:
+        """Undo the last operation."""
+        if not self._operation_stack.can_undo():
+            self.notify("Nothing to undo", severity="info", timeout=2)
+            return
+        
+        # Get description of what we're undoing
+        description = self._operation_stack.get_undo_description()
+        
+        # Log the undo action
+        if self.command_logger:
+            self.command_logger.log_action("undo", {"operation": description})
+        
+        # Perform undo in background
+        self.call_later(self._perform_undo, description)
+    
+    async def _perform_undo(self, description: str) -> None:
+        """Perform the undo operation asynchronously."""
+        try:
+            operation = await asyncio.to_thread(self._operation_stack.undo)
+            if operation:
+                # Check if this is a playlist-level operation
+                is_playlist_operation = (
+                    operation.__class__.__name__ == 'CreatePlaylistOperation' or
+                    (operation.__class__.__name__ == 'RenameOperation' and 
+                     hasattr(operation, 'item_type') and operation.item_type == 'playlist')
+                )
+                
+                if is_playlist_operation:
+                    # For playlist operations, refresh the playlist list
+                    await self.refresh_playlist_list()
+                else:
+                    # For video operations, invalidate affected playlists
+                    if hasattr(operation, 'target_playlist_id'):
+                        self._cache.invalidate_playlist(operation.target_playlist_id)
+                    if hasattr(operation, 'source_playlist_id') and operation.source_playlist_id:
+                        self._cache.invalidate_playlist(operation.source_playlist_id)
+                    
+                    # Refresh current view
+                    if self.current_playlist:
+                        await self.load_playlist_videos(self.current_playlist)
+                
+                self.notify(f"Undone: {description}", timeout=2)
+                
+                # Update status bar
+                if self.status_bar:
+                    if self._operation_stack.can_redo():
+                        self.status_bar.update_status(
+                            "Press 'U' to redo",
+                            f"{self.api_client.get_quota_remaining()}/10000"
+                        )
+                    else:
+                        self.status_bar.update_status(
+                            "",
+                            f"{self.api_client.get_quota_remaining()}/10000"
+                        )
+            else:
+                self.notify("Undo failed", severity="error", timeout=2)
+        except Exception as e:
+            logger.error(f"Error during undo: {e}")
+            self.notify(f"Undo failed: {e}", severity="error")
+    
+    def action_redo(self) -> None:
+        """Redo the last undone operation."""
+        if not self._operation_stack.can_redo():
+            self.notify("Nothing to redo", severity="info", timeout=2)
+            return
+        
+        # Get description of what we're redoing
+        description = self._operation_stack.get_redo_description()
+        
+        # Log the redo action
+        if self.command_logger:
+            self.command_logger.log_action("redo", {"operation": description})
+        
+        # Perform redo in background
+        self.call_later(self._perform_redo, description)
+    
+    async def _perform_redo(self, description: str) -> None:
+        """Perform the redo operation asynchronously."""
+        try:
+            operation = await asyncio.to_thread(self._operation_stack.redo)
+            if operation:
+                # Check if this is a playlist-level operation
+                is_playlist_operation = (
+                    operation.__class__.__name__ == 'CreatePlaylistOperation' or
+                    (operation.__class__.__name__ == 'RenameOperation' and 
+                     hasattr(operation, 'item_type') and operation.item_type == 'playlist')
+                )
+                
+                if is_playlist_operation:
+                    # For playlist operations, refresh the playlist list
+                    await self.refresh_playlist_list()
+                else:
+                    # For video operations, invalidate affected playlists
+                    if hasattr(operation, 'target_playlist_id'):
+                        self._cache.invalidate_playlist(operation.target_playlist_id)
+                    if hasattr(operation, 'source_playlist_id') and operation.source_playlist_id:
+                        self._cache.invalidate_playlist(operation.source_playlist_id)
+                    
+                    # Refresh current view
+                    if self.current_playlist:
+                        await self.load_playlist_videos(self.current_playlist)
+                
+                self.notify(f"Redone: {description}", timeout=2)
+                
+                # Update status bar
+                if self.status_bar:
+                    if self._operation_stack.can_undo():
+                        self.status_bar.update_status(
+                            "Press 'u' to undo",
+                            f"{self.api_client.get_quota_remaining()}/10000"
+                        )
+                    else:
+                        self.status_bar.update_status(
+                            "",
+                            f"{self.api_client.get_quota_remaining()}/10000"
+                        )
+            else:
+                self.notify("Redo failed", severity="error", timeout=2)
+        except Exception as e:
+            logger.error(f"Error during redo: {e}")
+            self.notify(f"Redo failed: {e}", severity="error")
+    
+    def action_new_playlist(self) -> None:
+        """Show modal to create a new playlist."""
+        if self.command_logger:
+            self.command_logger.log_action("new_playlist_modal")
+        self.push_screen(PlaylistCreationModal())
+    
+    def action_rename(self) -> None:
+        """Show modal to rename current playlist or video."""
+        if not self.miller_view:
+            return
+        
+        # Log the rename action
+        if self.command_logger:
+            self.command_logger.log_action("rename_modal")
+        
+        # Determine what to rename based on current focus
+        if self.miller_view.video_column and self.miller_view.video_column.has_focus:
+            # Rename video
+            if (self.miller_view.video_column.selected_index >= 0 and 
+                self.miller_view.video_column.selected_index < len(self.miller_view.video_column.videos)):
+                video = self.miller_view.video_column.videos[self.miller_view.video_column.selected_index]
+                self.push_screen(RenameModal("video", video.id, video.title))
+        elif self.current_playlist:
+            # Rename playlist
+            # Check if it's a virtual playlist (can't rename those)
+            if self.current_playlist.is_virtual:
+                self.notify(
+                    "Cannot rename virtual playlists (imported from Takeout)",
+                    severity="warning",
+                    timeout=3
+                )
+                return
+            
+            # Check for special playlists that shouldn't be renamed
+            if self.current_playlist.id in ['WL', 'HL', 'LL']:
+                self.notify(
+                    "Cannot rename system playlists (Watch Later, History, Liked)",
+                    severity="warning",
+                    timeout=3
+                )
+                return
+            
+            self.push_screen(RenameModal("playlist", self.current_playlist.id, self.current_playlist.title))
+    
     def action_command_mode(self) -> None:
         """Enter command mode."""
         if self.command_input:
@@ -633,6 +841,27 @@ class YouTubeRangerApp(App):
     
     async def on_key(self, event: events.Key) -> None:
         """Handle global key events."""
+        # Log the key press if logger is enabled
+        if self.command_logger:
+            # Determine current context
+            context = "global"
+            if self.miller_view:
+                if self.miller_view.video_column and self.miller_view.video_column.has_focus:
+                    context = "video_list"
+                elif self.miller_view.playlist_column and self.miller_view.playlist_column.has_focus:
+                    context = "playlist_list"
+                elif self.miller_view.preview_column and self.miller_view.preview_column.has_focus:
+                    context = "preview"
+            
+            # Log the key with modifiers
+            modifiers = {
+                "ctrl": event.ctrl,
+                "shift": event.shift,
+                "meta": event.meta
+            } if hasattr(event, 'ctrl') else None
+            
+            self.command_logger.log_key(event.key, context, modifiers)
+        
         # FIRST: Check for pending sort selection
         if hasattr(self, '_pending_sort') and self._pending_sort:
             if event.key in ['t', 'd', 'p', 'v', 'D', 'escape']:
@@ -649,10 +878,48 @@ class YouTubeRangerApp(App):
                     self.status_bar.update_status("", "")
             self._pending_command = None
             event.stop()
+        # Check for single 'g' - wait for second key for 'gn' (new playlist)
+        elif event.key == 'g' and not hasattr(self, '_pending_g'):
+            self._pending_g = True
+            if self.status_bar:
+                self.status_bar.update_status("Press 'n' for new playlist", "")
+            event.stop()
+        # Check for 'gn' - create new playlist
+        elif hasattr(self, '_pending_g') and self._pending_g:
+            if event.key == 'n':
+                self.action_new_playlist()
+            elif event.key == 'g':
+                # Double 'g' - pass to miller view for go to top
+                if self.miller_view:
+                    await self.miller_view.handle_key('g')
+            else:
+                # Cancel 'g' command if different key pressed
+                if self.status_bar:
+                    self.status_bar.update_status("", "")
+            self._pending_g = False
+            event.stop()
+        # Check for single 'c' - wait for second key for 'cw' (rename)
+        elif event.key == 'c' and not hasattr(self, '_pending_c'):
+            self._pending_c = True
+            if self.status_bar:
+                self.status_bar.update_status("Press 'w' to rename", "")
+            event.stop()
+        # Check for 'cw' - rename
+        elif hasattr(self, '_pending_c') and self._pending_c:
+            if event.key == 'w':
+                self.action_rename()
+            else:
+                # Cancel 'c' command if different key pressed
+                if self.status_bar:
+                    self.status_bar.update_status("", "")
+            self._pending_c = False
+            event.stop()
         # THEN: Let miller view handle navigation keys, ranger commands, search, and visual mode
         # V = visual mode, v = invert selection, space = toggle mark (no auto-advance)
         # pageup/pagedown for pagination
-        elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'g', 'G', 'enter', 'space', 'd', 'y', 'p', '/', 'n', 'N', 'v', 'V', 'u', 'escape', 'o', 'pageup', 'pagedown']:
+        # Note: 'u' is now handled at app level for undo, not passed to miller_view
+        # Note: 'g' and 'c' are now intercepted for special commands
+        elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'G', 'enter', 'space', 'd', 'y', 'p', '/', 'n', 'N', 'v', 'V', 'escape', 'o', 'pageup', 'pagedown']:
             await self.miller_view.handle_key(event.key)
             event.stop()
     
@@ -667,6 +934,11 @@ class YouTubeRangerApp(App):
     
     async def handle_playlist_selection(self, playlist: Playlist) -> None:
         """Handle playlist selection."""
+        # Log playlist navigation
+        if self.command_logger:
+            prev_playlist = self.current_playlist.title if self.current_playlist else "None"
+            self.command_logger.log_navigation(prev_playlist, playlist.title, "select_playlist")
+        
         await self.load_playlist_videos(playlist)
     
     async def handle_video_selection(self, video: Video) -> None:
@@ -807,6 +1079,126 @@ class YouTubeRangerApp(App):
                     f"{self.api_client.get_quota_remaining()}/10000" if self.api_client else ""
                 )
     
+    def on_playlist_created(self, message: PlaylistCreated) -> None:
+        """Handle playlist creation from modal."""
+        if not self.api_client:
+            return
+        
+        # Create the playlist in background
+        self.call_later(
+            self.create_playlist,
+            message.title,
+            message.description,
+            message.privacy
+        )
+    
+    async def create_playlist(self, title: str, description: str, privacy: str) -> None:
+        """Create a new playlist via API."""
+        try:
+            # Create operation for undo support
+            create_op = CreatePlaylistOperation(
+                api_client=self.api_client,
+                title=title,
+                description=description,
+                privacy_status=privacy
+            )
+            
+            # Execute through operation stack
+            success = await asyncio.to_thread(self._operation_stack.execute, create_op)
+            
+            if success:
+                self.notify(f"Created playlist: {title}", timeout=2)
+                
+                # Log playlist creation
+                if self.command_logger:
+                    self.command_logger.log_operation(
+                        "create_playlist",
+                        success=True,
+                        details={"title": title, "privacy": privacy}
+                    )
+                
+                # Refresh playlist list to show the new one
+                await self.refresh_playlist_list()
+                
+                # Update status bar
+                if self.status_bar:
+                    self.status_bar.update_status(
+                        "Press 'u' to undo",
+                        f"{self.api_client.get_quota_remaining()}/10000"
+                    )
+            else:
+                self.notify("Failed to create playlist", severity="error")
+                
+        except Exception as e:
+            logger.error(f"Error creating playlist: {e}")
+            self.notify(f"Error: {e}", severity="error")
+    
+    def on_item_renamed(self, message: ItemRenamed) -> None:
+        """Handle rename from modal."""
+        if not self.api_client:
+            return
+        
+        # Rename the item in background
+        self.call_later(
+            self.rename_item,
+            message.item_type,
+            message.item_id,
+            message.old_name,
+            message.new_name
+        )
+    
+    async def rename_item(self, item_type: str, item_id: str, 
+                          old_name: str, new_name: str) -> None:
+        """Rename a playlist or video via API."""
+        try:
+            # Create operation for undo support
+            playlist_id = self.current_playlist.id if item_type == "video" else None
+            rename_op = RenameOperation(
+                api_client=self.api_client,
+                item_type=item_type,
+                item_id=item_id,
+                old_title=old_name,
+                new_title=new_name,
+                playlist_id=playlist_id
+            )
+            
+            # Execute through operation stack
+            success = await asyncio.to_thread(self._operation_stack.execute, rename_op)
+            
+            if success:
+                self.notify(f"Renamed {item_type}: {new_name}", timeout=2)
+                
+                # Log rename operation
+                if self.command_logger:
+                    self.command_logger.log_operation(
+                        f"rename_{item_type}",
+                        success=True,
+                        details={"old_name": old_name, "new_name": new_name}
+                    )
+                
+                # Refresh current view to show the new name
+                if item_type == "playlist":
+                    # Refresh playlist list to show the new name
+                    await self.refresh_playlist_list()
+                else:
+                    # Refresh videos if renamed a video
+                    if self.current_playlist:
+                        self._cache.invalidate_playlist(self.current_playlist.id)
+                        await self.load_playlist_videos(self.current_playlist)
+                
+                # Update status bar
+                if self.status_bar:
+                    self.status_bar.update_status(
+                        "Press 'u' to undo",
+                        f"{self.api_client.get_quota_remaining()}/10000"
+                    )
+            else:
+                self.notify(f"Failed to rename {item_type}", severity="error")
+                
+        except Exception as e:
+            logger.error(f"Error renaming {item_type}: {e}")
+            self.notify(f"Error: {e}", severity="error")
+    
     def on_sort_menu_request(self, message: SortMenuRequest) -> None:
         """Handle sort menu request."""
         # For now, show a simple notification with sort options
@@ -861,17 +1253,28 @@ class YouTubeRangerApp(App):
             
         video_column = self.miller_view.video_column
         
+        # Log the ranger command
+        if self.command_logger:
+            self.command_logger.log_action(f"ranger_command_{command}", {"command": command})
+        
         if command == 'd':  # Cut
             marked_videos = video_column.get_marked_videos()
             if marked_videos:
                 # Cut marked videos
                 self._clipboard.cut(marked_videos, self.current_playlist.id)
                 msg = f"Cut {len(marked_videos)} videos"
+                # Log clipboard operation
+                if self.command_logger:
+                    self.command_logger.log_clipboard("cut", len(marked_videos), 
+                                                     source=self.current_playlist.title)
             elif 0 <= video_column.selected_index < len(video_column.videos):
                 # Cut current video
                 video = video_column.videos[video_column.selected_index]
                 self._clipboard.cut([video], self.current_playlist.id)
                 msg = f"Cut: {video.title}"
+                # Log clipboard operation
+                if self.command_logger:
+                    self.command_logger.log_clipboard("cut", 1, source=self.current_playlist.title)
             else:
                 msg = "Nothing to cut"
                 
@@ -888,11 +1291,18 @@ class YouTubeRangerApp(App):
                 # Copy marked videos
                 self._clipboard.copy(marked_videos, self.current_playlist.id)
                 msg = f"Copied {len(marked_videos)} videos"
+                # Log clipboard operation
+                if self.command_logger:
+                    self.command_logger.log_clipboard("copy", len(marked_videos), 
+                                                     source=self.current_playlist.title)
             elif 0 <= video_column.selected_index < len(video_column.videos):
                 # Copy current video
                 video = video_column.videos[video_column.selected_index]
                 self._clipboard.copy([video], self.current_playlist.id)
                 msg = f"Copied: {video.title}"
+                # Log clipboard operation
+                if self.command_logger:
+                    self.command_logger.log_clipboard("copy", 1, source=self.current_playlist.title)
             else:
                 msg = "Nothing to copy"
                 
@@ -933,45 +1343,62 @@ class YouTubeRangerApp(App):
             return
             
         try:
-            pasted_count = 0
             operation_type = self._clipboard.get_operation_type()
+            videos = [item.video for item in self._clipboard.items]
+            source_playlist_id = self._clipboard.items[0].source_playlist_id if self._clipboard.items else None
             
-            for item in self._clipboard.items:
-                # Add to current playlist
-                await asyncio.to_thread(
-                    self.api_client.add_video_to_playlist,
-                    item.video.id,
-                    self.current_playlist.id
-                )
-                pasted_count += 1
+            # Create paste operation
+            paste_op = PasteOperation(
+                api_client=self.api_client,
+                videos=videos,
+                target_playlist_id=self.current_playlist.id,
+                source_playlist_id=source_playlist_id,
+                is_cut=(operation_type == "cut")
+            )
+            
+            # Execute operation through the stack (enables undo)
+            success = await asyncio.to_thread(self._operation_stack.execute, paste_op)
+            
+            if success:
+                pasted_count = len(videos)
                 
-                # If cut operation, remove from source
-                if operation_type == "cut" and item.video.playlist_item_id:
-                    await asyncio.to_thread(
-                        self.api_client.remove_video_from_playlist,
-                        item.video.playlist_item_id
+                # Log paste operation
+                if self.command_logger:
+                    self.command_logger.log_clipboard(
+                        "paste", 
+                        pasted_count,
+                        source=source_playlist_id,
+                        target=self.current_playlist.title
                     )
-                    
-            # Clear clipboard after successful paste
-            self._clipboard.clear()
-            
-            # Clear marks in video column
-            if self.miller_view and self.miller_view.video_column:
-                self.miller_view.video_column.clear_marks()
-                # Clear marks indicator
-                self.post_message(MarksChanged(0))
-            
-            # Invalidate cache for affected playlists
-            self._cache.invalidate_playlist(self.current_playlist.id)
-            for item in self._clipboard.items:
-                if item.source_playlist_id != self.current_playlist.id:
-                    self._cache.invalidate_playlist(item.source_playlist_id)
-            
-            # Refresh current playlist
-            await self.load_playlist_videos(self.current_playlist)
-            
-            self.notify(f"Pasted {pasted_count} videos", timeout=2)
-            
+                
+                # Clear clipboard after successful paste
+                self._clipboard.clear()
+                
+                # Clear marks in video column
+                if self.miller_view and self.miller_view.video_column:
+                    self.miller_view.video_column.clear_marks()
+                    # Clear marks indicator
+                    self.post_message(MarksChanged(0))
+                
+                # Invalidate cache for affected playlists
+                self._cache.invalidate_playlist(self.current_playlist.id)
+                if source_playlist_id and source_playlist_id != self.current_playlist.id:
+                    self._cache.invalidate_playlist(source_playlist_id)
+                
+                # Refresh current playlist
+                await self.load_playlist_videos(self.current_playlist)
+                
+                self.notify(f"Pasted {pasted_count} videos", timeout=2)
+                
+                # Update status bar to show undo is available
+                if self.status_bar:
+                    self.status_bar.update_status(
+                        "Press 'u' to undo",
+                        f"{self.api_client.get_quota_remaining()}/10000"
+                    )
+            else:
+                self.notify("Paste operation failed", severity="error")
+                
         except Exception as e:
             logger.error(f"Error pasting videos: {e}")
             self.notify(f"Paste failed: {e}", severity="error")
@@ -987,6 +1414,10 @@ class YouTubeRangerApp(App):
         
         if not cmd_name:
             return
+        
+        # Log the command execution
+        if self.command_logger:
+            self.command_logger.log_command(cmd_name, " ".join(args) if args else None)
             
         # Handle built-in commands
         if cmd_name == "quit" or cmd_name == "q":

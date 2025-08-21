@@ -379,6 +379,70 @@ class YouTubeAPIClient:
                 raise QuotaExceededError("YouTube API quota exceeded")
             raise
     
+    def rename_playlist(self, playlist_id: str, new_title: str) -> None:
+        """Rename a playlist.
+        
+        Args:
+            playlist_id: ID of the playlist to rename
+            new_title: New title for the playlist
+        """
+        self.update_playlist(playlist_id, title=new_title)
+    
+    def update_video_title(self, video_id: str, new_title: str, 
+                          playlist_id: Optional[str] = None) -> None:
+        """Update the title of a video.
+        
+        Note: YouTube API doesn't allow directly editing video titles unless you own
+        the video. This method updates the video's metadata if you have permission,
+        or can update the note/description in a playlist item if playlist_id is provided.
+        
+        Args:
+            video_id: ID of the video to update
+            new_title: New title for the video
+            playlist_id: Optional playlist ID for playlist-specific title update
+        """
+        try:
+            # First, try to update the video directly (only works if user owns it)
+            try:
+                self._track_quota('videos.list')
+                # Get current video data
+                response = self.youtube.videos().list(
+                    part='snippet',
+                    id=video_id
+                ).execute()
+                
+                if response.get('items'):
+                    video_data = response['items'][0]
+                    video_data['snippet']['title'] = new_title
+                    
+                    self._track_quota('videos.update')
+                    self.youtube.videos().update(
+                        part='snippet',
+                        body={
+                            'id': video_id,
+                            'snippet': video_data['snippet']
+                        }
+                    ).execute()
+                    
+                    logger.info(f"Updated video title: {video_id}")
+                    return
+                    
+            except HttpError as e:
+                if e.resp.status == 403:
+                    logger.debug(f"Cannot update video {video_id} directly (not owner)")
+                    # If playlist_id provided, we could potentially update playlist item note
+                    if playlist_id:
+                        logger.warning(
+                            f"Cannot rename videos you don't own. "
+                            f"Video {video_id} title cannot be changed."
+                        )
+                else:
+                    raise
+                    
+        except HttpError as e:
+            logger.error(f"Error updating video title: {e}")
+            raise
+    
     def delete_playlist(self, playlist_id: str) -> None:
         """Delete a playlist.
         

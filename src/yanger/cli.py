@@ -66,8 +66,11 @@ def cli(ctx: click.Context, version: bool, verbose: bool, config_dir: Optional[s
 
 @cli.command()
 @click.option('--no-cache', is_flag=True, help='Disable offline cache')
+@click.option('--log', type=click.Path(), help='Log keyboard commands and actions to file')
+@click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR'], case_sensitive=False),
+              default='INFO', help='Log level for command logging')
 @click.pass_context
-def run(ctx: click.Context, no_cache: bool):
+def run(ctx: click.Context, no_cache: bool, log: Optional[str], log_level: str):
     """Run the YouTube Ranger TUI application."""
     try:
         # Import here to avoid circular imports and defer heavy imports
@@ -79,7 +82,9 @@ def run(ctx: click.Context, no_cache: bool):
         # Create and run the app
         app = YouTubeRangerApp(
             config_dir=config_dir,
-            use_cache=not no_cache
+            use_cache=not no_cache,
+            log_file=log,
+            log_level=log_level
         )
         app.run()
         

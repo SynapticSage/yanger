@@ -349,6 +349,19 @@ class PersistentCache:
             conn.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
             conn.commit()
             logger.debug(f"Invalidated cache for playlist {playlist_id}")
+    
+    def invalidate_playlists_cache(self) -> None:
+        """Invalidate the entire playlists cache.
+        
+        This forces a fresh fetch from the API on the next load_playlists call.
+        Useful after operations that modify the playlist list itself (create, rename, delete).
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            # Delete all playlist entries but keep virtual playlists
+            conn.execute("DELETE FROM playlists")
+            conn.execute("DELETE FROM videos")
+            conn.commit()
+            logger.debug("Invalidated playlists cache")
             
     def clear(self) -> None:
         """Clear entire cache."""

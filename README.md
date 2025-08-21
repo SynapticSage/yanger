@@ -35,6 +35,10 @@
 - 🌐 **Open in Browser**: Open videos/playlists directly in your browser
 - 🔄 **Auto Metadata Fetching**: Automatically fetch missing video titles
 - 📋 **Virtual Playlists**: Local playlists from imported data
+- ↩️ **Undo/Redo**: Full undo/redo support for all operations
+- ➕ **Playlist Creation**: Create new playlists with privacy settings
+- ✏️ **Rename Operations**: Rename playlists and videos in-place
+- 📝 **Command Logging**: Log all keyboard inputs and operations for debugging
 
 ## Quick Start
 
@@ -92,6 +96,10 @@ yanger
 | `dd` | Cut selected/marked videos |
 | `yy` | Copy selected/marked videos |
 | `pp` | Paste videos from clipboard |
+| `u` | Undo last operation |
+| `U` | Redo last undone operation |
+| `gn` | Create new playlist |
+| `cw` | Rename playlist/video |
 | `o` | Open sort menu |
 | `r` | Open video(s)/playlist in browser |
 | `M` | Fetch metadata for virtual playlist videos |
@@ -129,6 +137,47 @@ Press `:` to enter command mode with tab completion:
 :stats                   # Show playlist statistics
 :help [command]          # Get help for command
 ```
+
+## Command Logging
+
+Yanger can log all keyboard inputs and operations for debugging and auditing:
+
+### Enable Logging
+
+```bash
+# Log all operations to a file
+yanger run --log session.json
+
+# Log with different verbosity levels
+yanger run --log debug.json --log-level DEBUG
+yanger run --log info.json --log-level INFO
+```
+
+### Log Levels
+
+- **DEBUG**: Logs every keystroke, API call, and internal operation
+- **INFO**: Logs commands, actions, and major operations (default)
+- **WARNING**: Logs only warnings and errors
+- **ERROR**: Logs only errors
+
+### Log Format
+
+Logs are saved in line-delimited JSON format for easy parsing:
+
+```json
+{"type": "SESSION_START", "session_id": "20250821_143022", "timestamp": "2025-08-21T14:30:22.123456"}
+{"type": "KEY", "key": "j", "context": "playlist_list", "timestamp": "2025-08-21T14:30:25.234567"}
+{"type": "ACTION", "action": "navigate_down", "details": {"from": "Music", "to": "Tutorials"}}
+{"type": "COMMAND", "command": "sort", "args": "title", "success": true}
+{"type": "OPERATION", "operation": "paste_videos", "success": true, "details": {"count": 3}}
+```
+
+### Use Cases
+
+- **Debugging**: Track exact sequence of actions leading to issues
+- **Auditing**: Review what operations were performed
+- **Analytics**: Analyze usage patterns and common workflows
+- **Testing**: Record and replay user sessions
 
 ## Google Takeout Import
 
@@ -244,6 +293,12 @@ cache:
 - 🌐 Press `r` to open videos in browser - works with marked videos or current selection
 - 📥 Import your Watch Later and History from Google Takeout for full access
 
+### New Features
+- ↩️ Made a mistake? Press `u` to undo, `U` to redo
+- ➕ Create playlists with `gn` - choose privacy level in the dialog
+- ✏️ Rename anything with `cw` - works on both playlists and videos
+- 📝 Debug issues with `--log` to track every action
+
 ### API Quota Management
 - 📊 Check quota with `:quota` command
 - 💾 Cache persists for 7 days - no API calls for cached content
@@ -291,15 +346,19 @@ With the default quota, you can:
 - Deduplication of imported playlists
 - Pagination for large playlists (7000+ videos)
 - Date-based filtering for metadata fetching
+- Undo/redo functionality (u/U commands)
+- Playlist creation with privacy settings (gn command)
+- Rename operations for playlists and videos (cw command)
+- Command logging for debugging and auditing
 
 ### 🚧 Planned Features
-- [ ] Playlist creation/deletion (gn/gd commands)
-- [ ] Rename operations (cw command)
+- [ ] Playlist deletion (gd command)
 - [ ] Advanced filtering
 - [ ] Custom keybinding configuration
-- [ ] Export/import playlists
+- [ ] Export/import playlists to various formats
 - [ ] Playlist statistics dashboard
-- [ ] Undo/redo functionality
+- [ ] Macro recording and playback
+- [ ] Multi-window/tab support
 
 ## Project Structure
 
@@ -312,11 +371,15 @@ yanger/
 │   ├── cache.py       # Persistent caching
 │   ├── app.py         # Main TUI application
 │   ├── keybindings.py # Central keybinding registry
+│   ├── operation_history.py  # Undo/redo system
+│   ├── command_logger.py     # Command logging
 │   └── ui/            # UI components
-│       ├── miller_view.py    # Three-column layout
-│       ├── help_overlay.py   # Help system
-│       ├── command_input.py  # Command mode
-│       └── ...               # Other UI widgets
+│       ├── miller_view.py           # Three-column layout
+│       ├── help_overlay.py          # Help system
+│       ├── command_input.py         # Command mode
+│       ├── playlist_creation_modal.py  # Create playlist dialog
+│       ├── rename_modal.py          # Rename dialog
+│       └── ...                       # Other UI widgets
 ├── config/            # Configuration files
 └── tests/            # Test suite
 ```

@@ -180,6 +180,10 @@ class HelpOverlay(Container):
         lines.append("  • [bold]V[/bold] enters visual mode for range selection")
         lines.append("  • [bold]v[/bold] inverts selection (marked ↔ unmarked)")
         lines.append("  • Search with [bold]/[/bold], navigate matches with [bold]n[/bold]/[bold]N[/bold]")
+        lines.append("  • [bold]gn[/bold] creates a new playlist")
+        lines.append("  • [bold]cw[/bold] renames current playlist or video")
+        lines.append("  • [bold]u[/bold] undoes last operation, [bold]U[/bold] redoes")
+        lines.append("  • [bold]r[/bold] opens video/playlist in browser")
         lines.append("  • Commands support tab completion and history")
         
         return "\n".join(lines)
