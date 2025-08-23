@@ -843,8 +843,8 @@ class YouTubeRangerApp(App):
             self.notify("Search not available - search input not initialized", severity="warning")
             return
         
-        # Determine context and placeholder
-        if self.miller_view.playlist_column.has_focus:
+        # Determine context and placeholder based on focused column
+        if self.miller_view.focused_column == 0:
             context = "playlist"
             placeholder = "Search playlists..."
         else:
@@ -867,6 +867,32 @@ class YouTubeRangerApp(App):
     
     async def on_key(self, event: events.Key) -> None:
         """Handle global key events."""
+        
+        # IMPORTANT: Let Input widgets handle their own keys when focused
+        # Check if command input has focus
+        if (self.command_input and 
+            hasattr(self.command_input, 'input_widget') and 
+            self.command_input.input_widget and 
+            self.command_input.input_widget.has_focus):
+            return  # Let the command input handle it
+        
+        # Check if search input has focus
+        if (self.miller_view and 
+            self.miller_view.search_input and 
+            hasattr(self.miller_view.search_input, 'input_field') and
+            self.miller_view.search_input.input_field and 
+            self.miller_view.search_input.input_field.has_focus):
+            # Only handle ESC to cancel search
+            if event.key == "escape":
+                self.miller_view.search_input.hide()
+                self.miller_view.search_active = False
+                if self.miller_view.video_column:
+                    self.miller_view.video_column.clear_search()
+                if self.miller_view.playlist_column:
+                    self.miller_view.playlist_column.clear_search()
+                event.stop()
+            return  # Let the search input handle other keys
+        
         # Log the key press if logger is enabled
         if self.command_logger:
             # Determine current context

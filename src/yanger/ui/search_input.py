@@ -35,6 +35,17 @@ class SearchInput(Container):
     SearchInput Input {
         width: 100%;
         background: $background;
+        color: $text;  /* Ensure text is visible */
+        border: tall $accent;
+    }
+    
+    SearchInput Input:focus {
+        border: tall $primary;
+        color: $text;  /* Keep text visible when focused */
+    }
+    
+    SearchInput Input._input {
+        color: $text;  /* Target the internal text element */
     }
     
     SearchInput .search-label {
@@ -119,6 +130,8 @@ class SearchInput(Container):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle input submission."""
         self.action_submit()
+        # Hide the search input after submission so n/N navigation works
+        self.hide()
 
 
 class SearchHighlighter:

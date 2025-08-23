@@ -728,11 +728,14 @@ class MillerView(Widget):
         """Handle search submission based on current focus."""
         match_count = 0
         
-        # Search in the appropriate column based on focus
-        if self.playlist_column and self.playlist_column.has_focus:
+        # Set search as active
+        self.search_active = True
+        
+        # Search in the appropriate column based on focused_column
+        if self.focused_column == 0 and self.playlist_column:
             # Search playlists
             match_count = self.playlist_column.search(query)
-        elif self.video_column:
+        elif self.focused_column == 1 and self.video_column:
             # Search videos
             match_count = self.video_column.search(query)
         
@@ -805,11 +808,8 @@ class MillerView(Widget):
             self.video_column.exit_visual_mode(mark_selection=False)
             return
             
-        # Search mode
-        if key == '/' and self.focused_column == 1:
-            self.search_input.show()
-            self.search_active = True
-            return
+        # Search mode - removed focused_column restriction since it's handled in action_search
+        # This code path may not be needed anymore since '/' is handled via action_search
         elif key == 'n' and self.search_active and self.video_column:
             # Next search match
             if self.video_column.next_match():
