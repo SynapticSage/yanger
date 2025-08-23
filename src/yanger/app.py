@@ -48,6 +48,7 @@ class YouTubeRangerApp(App):
         Binding("q", "quit", "Quit", priority=True),
         Binding("?", "help", "Help"),
         Binding(":", "command_mode", "Command"),
+        Binding("/", "search", "Search"),
         Binding("r", "open_in_browser", "Open in Browser"),
         Binding("u", "undo", "Undo"),
         Binding("U", "redo", "Redo"),
@@ -835,7 +836,11 @@ class YouTubeRangerApp(App):
     
     def action_search(self) -> None:
         """Start search in the current context."""
-        if not self.miller_view or not self.miller_view.search_input:
+        if not self.miller_view:
+            self.notify("Search not available - UI not initialized", severity="warning")
+            return
+        if not self.miller_view.search_input:
+            self.notify("Search not available - search input not initialized", severity="warning")
             return
         
         # Determine context and placeholder
@@ -871,7 +876,7 @@ class YouTubeRangerApp(App):
                     context = "video_list"
                 elif self.miller_view.playlist_column and self.miller_view.playlist_column.has_focus:
                     context = "playlist_list"
-                elif self.miller_view.preview_column and self.miller_view.preview_column.has_focus:
+                elif self.miller_view.preview_pane and self.miller_view.preview_pane.has_focus:
                     context = "preview"
             
             # Log the key with modifiers
@@ -935,16 +940,11 @@ class YouTubeRangerApp(App):
                     self.status_bar.update_status("", "")
             self._pending_c = False
             event.stop()
-        # Check for '/' - start search
-        elif event.key == '/':
-            self.action_search()
-            event.stop()
         # THEN: Let miller view handle navigation keys, ranger commands, search, and visual mode
         # V = visual mode, v = invert selection, space = toggle mark (no auto-advance)
         # pageup/pagedown for pagination
         # Note: 'u' is now handled at app level for undo, not passed to miller_view
         # Note: 'g' and 'c' are now intercepted for special commands
-        # Note: '/' is now handled at app level for search
         elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'G', 'enter', 'space', 'd', 'y', 'p', 'n', 'N', 'v', 'V', 'escape', 'o', 'pageup', 'pagedown']:
             await self.miller_view.handle_key(event.key)
             event.stop()
