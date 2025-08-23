@@ -159,7 +159,7 @@ class CreatePlaylistOperation(Operation):
                 self.description,
                 self.privacy_status
             )
-            self.created_playlist_id = playlist['id']
+            self.created_playlist_id = playlist.id
             self.executed = True
             logger.info(f"Created playlist: {self.title}")
             return True

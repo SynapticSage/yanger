@@ -46,6 +46,14 @@ class PlaylistColumn(ScrollableContainer):
         text-style: bold;
     }
     
+    PlaylistColumn > .playlist-item.search-match {
+        background: $warning-darken-2;
+    }
+    
+    PlaylistColumn > .playlist-item.selected.search-match {
+        background: $warning;
+    }
+    
     PlaylistColumn > .loading {
         width: 100%;
         height: 100%;
@@ -59,6 +67,9 @@ class PlaylistColumn(ScrollableContainer):
         super().__init__(*args, **kwargs)
         self.playlists: List[Playlist] = []
         self.can_focus = True
+        self.search_query = ""
+        self.search_matches: List[int] = []
+        self.current_match_index = -1
         
     def compose(self) -> ComposeResult:
         """Initial composition."""
@@ -79,6 +90,8 @@ class PlaylistColumn(ScrollableContainer):
             classes = ["playlist-item"]
             if i == self.selected_index:
                 classes.append("selected")
+            if i in self.search_matches:
+                classes.append("search-match")
                 
             item = Static(
                 f"{playlist.title} ({playlist.item_count})",
@@ -125,6 +138,76 @@ class PlaylistColumn(ScrollableContainer):
         if self.playlists:
             self.selected_index = len(self.playlists) - 1
             self.scroll_end()
+    
+    def search(self, query: str) -> int:
+        """Search for playlists matching query.
+        
+        Args:
+            query: Search query
+            
+        Returns:
+            Number of matches found
+        """
+        import re
+        
+        self.search_query = query
+        self.search_matches = []
+        self.current_match_index = -1
+        
+        if not query:
+            asyncio.create_task(self.refresh_display())
+            return 0
+            
+        # Case-insensitive search in title
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+        
+        for i, playlist in enumerate(self.playlists):
+            if pattern.search(playlist.title):
+                self.search_matches.append(i)
+                
+        # Jump to first match
+        if self.search_matches:
+            self.current_match_index = 0
+            self.selected_index = self.search_matches[0]
+            self.scroll_to_widget(self.query(".playlist-item")[self.search_matches[0]])
+            
+        asyncio.create_task(self.refresh_display())
+        return len(self.search_matches)
+        
+    def next_search_match(self) -> bool:
+        """Jump to next search match.
+        
+        Returns:
+            True if there was a next match, False otherwise
+        """
+        if not self.search_matches:
+            return False
+            
+        self.current_match_index = (self.current_match_index + 1) % len(self.search_matches)
+        self.selected_index = self.search_matches[self.current_match_index]
+        self.scroll_to_widget(self.query(".playlist-item")[self.selected_index])
+        return True
+        
+    def previous_search_match(self) -> bool:
+        """Jump to previous search match.
+        
+        Returns:
+            True if there was a previous match, False otherwise
+        """
+        if not self.search_matches:
+            return False
+            
+        self.current_match_index = (self.current_match_index - 1) % len(self.search_matches)
+        self.selected_index = self.search_matches[self.current_match_index]
+        self.scroll_to_widget(self.query(".playlist-item")[self.selected_index])
+        return True
+        
+    def clear_search(self) -> None:
+        """Clear search highlighting."""
+        self.search_query = ""
+        self.search_matches = []
+        self.current_match_index = -1
+        asyncio.create_task(self.refresh_display())
 
 
 class VideoColumn(ScrollableContainer):
@@ -642,19 +725,33 @@ class MillerView(Widget):
         return 0
         
     def on_search_submit(self, query: str) -> None:
-        """Handle search submission."""
-        if self.video_column:
+        """Handle search submission based on current focus."""
+        match_count = 0
+        
+        # Search in the appropriate column based on focus
+        if self.playlist_column and self.playlist_column.has_focus:
+            # Search playlists
+            match_count = self.playlist_column.search(query)
+        elif self.video_column:
+            # Search videos
             match_count = self.video_column.search(query)
-            if match_count > 0:
-                self.post_message(SearchStatusUpdate(1, match_count))
-            else:
-                self.post_message(SearchStatusUpdate(0, 0))
+        
+        # Update search status
+        if match_count > 0:
+            self.post_message(SearchStatusUpdate(1, match_count))
+        else:
+            self.post_message(SearchStatusUpdate(0, 0))
                 
     def on_search_cancel(self) -> None:
         """Handle search cancellation."""
         self.search_active = False
+        
+        # Clear search in both columns
+        if self.playlist_column:
+            self.playlist_column.clear_search()
         if self.video_column:
             self.video_column.clear_search()
+            
         self.post_message(SearchStatusUpdate(0, 0))
             
     def watch_focused_column(self, old_value: int, new_value: int) -> None:
@@ -769,6 +866,26 @@ class MillerView(Widget):
         elif key == 'o' and self.focused_column == 1 and self.video_column:
             # Handle sort menu
             self.post_message(SortMenuRequest())
+        
+        # Search navigation - 'n' and 'N'
+        elif key == 'n' and self.search_active:
+            # Next search match
+            if self.focused_column == 0 and self.playlist_column:
+                self.playlist_column.next_search_match()
+            elif self.focused_column == 1 and self.video_column:
+                self.video_column.next_search_match()
+        elif key == 'N' and self.search_active:
+            # Previous search match
+            if self.focused_column == 0 and self.playlist_column:
+                self.playlist_column.previous_search_match()
+            elif self.focused_column == 1 and self.video_column:
+                self.video_column.previous_search_match()
+        
+        # Cancel search with escape
+        elif key == 'escape' and self.search_active:
+            self.on_search_cancel()
+            if self.search_input:
+                self.search_input.hide()
                     
         # Vertical navigation in focused column
         elif key in ['j', 'k', 'g', 'G']:

@@ -86,7 +86,7 @@ class KeybindingRegistry:
         self.register("U", "Redo last undone operation", KeyContext.GLOBAL, "Operations")
         
         # Search
-        self.register("/", "Search in current list", KeyContext.VIDEO, "Search")
+        self.register("/", "Search in current list", KeyContext.GLOBAL, "Search")
         self.register("n", "Next search result", KeyContext.SEARCH, "Search")
         self.register("N", "Previous search result", KeyContext.SEARCH, "Search")
         self.register("escape", "Cancel search/visual mode", KeyContext.SEARCH, "Search")

@@ -833,6 +833,27 @@ class YouTubeRangerApp(App):
             
             self.push_screen(RenameModal("playlist", self.current_playlist.id, self.current_playlist.title))
     
+    def action_search(self) -> None:
+        """Start search in the current context."""
+        if not self.miller_view or not self.miller_view.search_input:
+            return
+        
+        # Determine context and placeholder
+        if self.miller_view.playlist_column.has_focus:
+            context = "playlist"
+            placeholder = "Search playlists..."
+        else:
+            context = "video"
+            placeholder = "Search videos..."
+        
+        # Log the search action
+        if self.command_logger:
+            self.command_logger.log_action("search_start", {"context": context})
+        
+        # Show the search input with appropriate placeholder
+        self.miller_view.search_active = True
+        self.miller_view.search_input.show(placeholder)
+    
     def action_command_mode(self) -> None:
         """Enter command mode."""
         if self.command_input:
@@ -914,12 +935,17 @@ class YouTubeRangerApp(App):
                     self.status_bar.update_status("", "")
             self._pending_c = False
             event.stop()
+        # Check for '/' - start search
+        elif event.key == '/':
+            self.action_search()
+            event.stop()
         # THEN: Let miller view handle navigation keys, ranger commands, search, and visual mode
         # V = visual mode, v = invert selection, space = toggle mark (no auto-advance)
         # pageup/pagedown for pagination
         # Note: 'u' is now handled at app level for undo, not passed to miller_view
         # Note: 'g' and 'c' are now intercepted for special commands
-        elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'G', 'enter', 'space', 'd', 'y', 'p', '/', 'n', 'N', 'v', 'V', 'escape', 'o', 'pageup', 'pagedown']:
+        # Note: '/' is now handled at app level for search
+        elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'G', 'enter', 'space', 'd', 'y', 'p', 'n', 'N', 'v', 'V', 'escape', 'o', 'pageup', 'pagedown']:
             await self.miller_view.handle_key(event.key)
             event.stop()
     

@@ -85,10 +85,15 @@ class SearchInput(Container):
             yield self.input_field
             yield Static("ESC to cancel", classes="search-hint")
             
-    def show(self) -> None:
-        """Show the search input and focus it."""
+    def show(self, placeholder: str = "Search videos...") -> None:
+        """Show the search input and focus it.
+        
+        Args:
+            placeholder: Placeholder text for the input field
+        """
         self.add_class("visible")
         if self.input_field:
+            self.input_field.placeholder = placeholder
             self.input_field.value = ""
             self.input_field.focus()
             
