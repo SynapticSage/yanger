@@ -31,6 +31,7 @@ from .keybindings import registry
 from .config.settings import load_settings
 from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation
 from .command_logger import CommandLogger
+from .export import PlaylistExporter
 
 
 logger = logging.getLogger(__name__)
@@ -1455,6 +1456,161 @@ class YouTubeRangerApp(App):
             logger.error(f"Error pasting videos: {e}")
             self.notify(f"Paste failed: {e}", severity="error")
     
+    async def handle_export_command(self, args: List[str]) -> None:
+        """Handle the export command.
+        
+        Args:
+            args: Command arguments
+        """
+        try:
+            # Determine output path and format
+            if not args:
+                # Default: export current playlist to JSON
+                if not self.current_playlist:
+                    self.notify("No playlist selected", severity="warning")
+                    return
+                
+                # Clean filename from playlist title
+                import re
+                safe_title = re.sub(r'[^\w\s-]', '', self.current_playlist.title)
+                safe_title = re.sub(r'[-\s]+', '-', safe_title)
+                output_path = Path(f"{safe_title}.json")
+                format = "json"
+                export_all = False
+                
+            elif args[0] == "all":
+                # Export all playlists
+                output_path = Path("youtube_playlists_export.json")
+                format = "json"
+                export_all = True
+                if len(args) > 1:
+                    output_path = Path(args[1])
+                    # Detect format from extension
+                    if output_path.suffix == ".yaml" or output_path.suffix == ".yml":
+                        format = "yaml"
+                    elif output_path.suffix == ".csv":
+                        format = "csv"
+                        
+            else:
+                # Export current playlist to specified file
+                if not self.current_playlist:
+                    self.notify("No playlist selected", severity="warning")
+                    return
+                    
+                output_path = Path(args[0])
+                export_all = False
+                
+                # Detect format from extension
+                if output_path.suffix == ".yaml" or output_path.suffix == ".yml":
+                    format = "yaml"
+                elif output_path.suffix == ".csv":
+                    format = "csv"
+                else:
+                    format = "json"
+            
+            # Create exporter
+            exporter = PlaylistExporter(
+                api_client=self.api_client,
+                cache=self._cache
+            )
+            
+            # Perform export
+            if export_all:
+                # Export all playlists
+                stats = await asyncio.to_thread(
+                    exporter.export_all,
+                    output_path,
+                    format=format,
+                    include_virtual=True,
+                    include_real=True
+                )
+                
+                self.notify(
+                    f"Exported {stats['real_playlist_count']} real and "
+                    f"{stats['virtual_playlist_count']} virtual playlists to {output_path}",
+                    timeout=5
+                )
+                
+            else:
+                # Export single playlist with current videos
+                if not self.current_videos:
+                    self.notify("No videos to export", severity="warning")
+                    return
+                
+                # Build export data
+                export_data = {
+                    "export_date": datetime.now().isoformat(),
+                    "playlist": {
+                        "id": self.current_playlist.id,
+                        "title": self.current_playlist.title,
+                        "description": self.current_playlist.description,
+                        "channel": self.current_playlist.channel_title,
+                        "privacy": self.current_playlist.privacy_status.value if self.current_playlist.privacy_status else "private",
+                        "video_count": len(self.current_videos),
+                        "is_virtual": self.current_playlist.is_virtual
+                    },
+                    "videos": []
+                }
+                
+                # Add video data
+                for i, video in enumerate(self.current_videos):
+                    video_data = {
+                        "position": i + 1,
+                        "video_id": video.id,
+                        "title": video.title,
+                        "channel": video.channel_title,
+                        "description": video.description[:500] if video.description else "",  # Truncate long descriptions
+                        "duration": video.duration,
+                        "view_count": video.view_count,
+                        "like_count": video.like_count,
+                        "published_at": video.published_at.isoformat() if video.published_at else None,
+                        "added_at": video.added_at.isoformat() if video.added_at else None,
+                        "url": f"https://www.youtube.com/watch?v={video.id}"
+                    }
+                    export_data["videos"].append(video_data)
+                
+                # Write to file based on format
+                import json
+                import yaml
+                
+                if format == "json":
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        json.dump(export_data, f, indent=2, ensure_ascii=False)
+                        
+                elif format == "yaml":
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        yaml.dump(export_data, f, default_flow_style=False, allow_unicode=True)
+                        
+                elif format == "csv":
+                    import csv
+                    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                        if export_data["videos"]:
+                            fieldnames = ["position", "video_id", "title", "channel", "url", "duration", "view_count"]
+                            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+                            writer.writeheader()
+                            writer.writerows(export_data["videos"])
+                
+                self.notify(
+                    f"Exported {len(self.current_videos)} videos from '{self.current_playlist.title}' to {output_path}",
+                    timeout=5
+                )
+                
+            # Log the export
+            if self.command_logger:
+                self.command_logger.log_operation(
+                    "export",
+                    success=True,
+                    details={
+                        "output": str(output_path),
+                        "format": format,
+                        "export_all": export_all
+                    }
+                )
+                
+        except Exception as e:
+            logger.error(f"Export failed: {e}")
+            self.notify(f"Export failed: {e}", severity="error")
+    
     def execute_command(self, command: str) -> None:
         """Execute a command entered in command mode.
         
@@ -1594,8 +1750,8 @@ class YouTubeRangerApp(App):
                 self.notify("This command only works for virtual playlists", severity="warning")
             
         elif cmd_name == "export":
-            # TODO: Implement export
-            self.notify("Export not implemented yet", severity="warning")
+            # Export current playlist or all playlists
+            self.call_later(self.handle_export_command, args)
             
         elif cmd_name == "stats":
             if self.current_playlist and self.current_videos:
