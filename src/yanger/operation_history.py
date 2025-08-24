@@ -244,6 +244,84 @@ class RenameOperation(Operation):
             return False
 
 
+class DeleteVideosOperation(Operation):
+    """Operation to delete videos from a playlist (with undo support)."""
+    
+    def __init__(self, api_client, playlist_id: str, videos: List[Video]):
+        """Initialize delete videos operation.
+        
+        Args:
+            api_client: YouTube API client
+            playlist_id: ID of the playlist
+            videos: List of videos to delete
+        """
+        video_count = len(videos)
+        video_word = "video" if video_count == 1 else "videos"
+        super().__init__(f"Delete {video_count} {video_word}")
+        
+        self.api_client = api_client
+        self.playlist_id = playlist_id
+        self.videos = videos
+        self.deleted_videos_data = []  # Store video data for potential undo
+        
+    def execute(self) -> bool:
+        """Delete the videos from the playlist.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Store video data before deletion for undo capability
+            self.deleted_videos_data = []
+            
+            for video in self.videos:
+                # Store the video data
+                self.deleted_videos_data.append({
+                    'video_id': video.id,
+                    'playlist_item_id': video.playlist_item_id,
+                    'position': video.position,
+                    'title': video.title
+                })
+                
+                # Delete from playlist
+                self.api_client.remove_from_playlist(video.playlist_item_id)
+                logger.info(f"Deleted video '{video.title}' from playlist")
+            
+            self.executed = True
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to delete videos: {e}")
+            return False
+    
+    def undo(self) -> bool:
+        """Restore the deleted videos to the playlist.
+        
+        Note: This adds the videos back but may not preserve original positions.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.executed:
+            return False
+            
+        try:
+            # Re-add videos to the playlist
+            for video_data in self.deleted_videos_data:
+                self.api_client.add_to_playlist(
+                    video_data['video_id'],
+                    self.playlist_id
+                )
+                logger.info(f"Restored video '{video_data['title']}' to playlist")
+            
+            self.executed = False
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to restore deleted videos: {e}")
+            return False
+
+
 class OperationStack:
     """Manages undo and redo stacks for operations."""
     

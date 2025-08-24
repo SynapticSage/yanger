@@ -38,6 +38,8 @@
 - ↩️ **Undo/Redo**: Full undo/redo support for all operations
 - ➕ **Playlist Creation**: Create new playlists with privacy settings
 - ✏️ **Rename Operations**: Rename playlists and videos in-place
+- 🗑️ **Delete Operations**: Delete videos from playlists or entire playlists
+- 📤 **Export Playlists**: Export to JSON/YAML/CSV formats
 - 📝 **Command Logging**: Log all keyboard inputs and operations for debugging
 
 ## Quick Start
@@ -96,9 +98,11 @@ yanger
 | `dd` | Cut selected/marked videos |
 | `yy` | Copy selected/marked videos |
 | `pp` | Paste videos from clipboard |
+| `dD` | Delete selected/marked videos permanently |
 | `u` | Undo last operation |
 | `U` | Redo last undone operation |
 | `gn` | Create new playlist |
+| `gd` | Delete current playlist |
 | `cw` | Rename playlist/video |
 | `o` | Open sort menu |
 | `r` | Open video(s)/playlist in browser |
@@ -131,8 +135,10 @@ Press `:` to enter command mode with tab completion:
 :refresh [all]           # Refresh current view or all playlists
 :cache [status|clear]    # Manage cache
 :sort <field> [order]    # Sort videos
-:filter <criteria>       # Filter videos (coming soon)
+:filter <criteria>       # Filter videos
 :clear [marks|search]    # Clear selections/search
+:delete [videos|playlist] # Delete videos or playlist
+:export [filename]       # Export playlist(s) to JSON/YAML/CSV
 :quota                   # Show API quota usage
 :stats                   # Show playlist statistics
 :help [command]          # Get help for command

@@ -26,10 +26,11 @@ from .ui.help_overlay import HelpOverlay
 from .ui.command_input import CommandInput, parse_command
 from .ui.playlist_creation_modal import PlaylistCreationModal, PlaylistCreated
 from .ui.rename_modal import RenameModal, ItemRenamed
+from .ui.confirmation_modal import ConfirmationModal, ConfirmationResult
 from .cache import PersistentCache
 from .keybindings import registry
 from .config.settings import load_settings
-from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation
+from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation
 from .command_logger import CommandLogger
 from .export import PlaylistExporter
 
@@ -923,7 +924,10 @@ class YouTubeRangerApp(App):
             event.stop()
         # SECOND: Check for pending double-key ranger commands
         elif hasattr(self, '_pending_command') and self._pending_command:
-            if self._pending_command == event.key:  # Double key pressed
+            if self._pending_command == 'd' and event.key == 'D':
+                # dD - delete videos
+                await self.handle_delete_videos()
+            elif self._pending_command == event.key:  # Double key pressed (dd, yy, pp)
                 await self.execute_ranger_command(self._pending_command)
             else:
                 # Cancel pending command if different key pressed
@@ -931,16 +935,18 @@ class YouTubeRangerApp(App):
                     self.status_bar.update_status("", "")
             self._pending_command = None
             event.stop()
-        # Check for single 'g' - wait for second key for 'gn' (new playlist)
-        elif event.key == 'g' and not hasattr(self, '_pending_g'):
+        # Check for single 'g' - wait for second key for 'gn' (new playlist) or 'gd' (delete playlist)
+        elif event.key == 'g' and not getattr(self, '_pending_g', False):
             self._pending_g = True
             if self.status_bar:
-                self.status_bar.update_status("Press 'n' for new playlist", "")
+                self.status_bar.update_status("Press 'n' for new playlist, 'd' to delete playlist", "")
             event.stop()
-        # Check for 'gn' - create new playlist
+        # Check for 'gn' or 'gd' commands
         elif hasattr(self, '_pending_g') and self._pending_g:
             if event.key == 'n':
                 self.action_new_playlist()
+            elif event.key == 'd':
+                await self.handle_delete_playlist()
             elif event.key == 'g':
                 # Double 'g' - pass to miller view for go to top
                 if self.miller_view:
@@ -952,7 +958,7 @@ class YouTubeRangerApp(App):
             self._pending_g = False
             event.stop()
         # Check for single 'c' - wait for second key for 'cw' (rename)
-        elif event.key == 'c' and not hasattr(self, '_pending_c'):
+        elif event.key == 'c' and not getattr(self, '_pending_c', False):
             self._pending_c = True
             if self.status_bar:
                 self.status_bar.update_status("Press 'w' to rename", "")
@@ -1096,7 +1102,7 @@ class YouTubeRangerApp(App):
         # Show hint in status bar
         if self.status_bar:
             hints = {
-                'd': "Press 'd' again to cut",
+                'd': "Press 'd' to cut or 'D' to delete",
                 'y': "Press 'y' again to copy", 
                 'p': "Press 'p' again to paste"
             }
@@ -1753,6 +1759,17 @@ class YouTubeRangerApp(App):
             # Export current playlist or all playlists
             self.call_later(self.handle_export_command, args)
             
+        elif cmd_name == "delete":
+            # Delete videos or playlist
+            if not args or args[0] == "videos":
+                # Delete selected/marked videos
+                self.call_later(self.handle_delete_videos)
+            elif args[0] == "playlist":
+                # Delete current playlist  
+                self.call_later(self.handle_delete_playlist)
+            else:
+                self.notify("Usage: :delete [videos|playlist]", severity="warning")
+        
         elif cmd_name == "stats":
             if self.current_playlist and self.current_videos:
                 total_duration = sum(v.duration or 0 for v in self.current_videos)
@@ -1778,3 +1795,190 @@ class YouTubeRangerApp(App):
         # Just hide the command input
         if self.command_input:
             self.command_input.hide()
+    
+    async def handle_delete_videos(self) -> None:
+        """Handle dD command to delete videos from playlist."""
+        if not self.miller_view or not self.miller_view.video_column:
+            self.notify("No videos to delete", severity="warning")
+            return
+        
+        video_column = self.miller_view.video_column
+        
+        # Get videos to delete (marked or current)
+        marked_videos = video_column.get_marked_videos()
+        if marked_videos:
+            videos_to_delete = marked_videos
+            message = f"Delete {len(marked_videos)} marked videos?"
+            details = "This will permanently remove them from the playlist."
+        elif 0 <= video_column.selected_index < len(video_column.videos):
+            videos_to_delete = [video_column.videos[video_column.selected_index]]
+            message = f"Delete '{videos_to_delete[0].title}'?"
+            details = "This will permanently remove it from the playlist."
+        else:
+            self.notify("No video selected", severity="warning")
+            return
+        
+        # Show confirmation dialog
+        modal = ConfirmationModal(
+            title="Confirm Delete",
+            message=message,
+            details=details,
+            confirm_text="Delete",
+            cancel_text="Cancel",
+            action="delete_videos",
+            dangerous=True
+        )
+        
+        # Store the videos for deletion after confirmation
+        self._pending_delete_videos = videos_to_delete
+        await self.push_screen(modal)
+    
+    async def handle_delete_playlist(self) -> None:
+        """Handle gd command to delete a playlist."""
+        if not self.current_playlist:
+            self.notify("No playlist selected", severity="warning")
+            return
+        
+        # Check if it's a special playlist that can't be deleted
+        if self.current_playlist.is_special:
+            self.notify(f"Cannot delete special playlist '{self.current_playlist.title}'", severity="error")
+            return
+        
+        # Get video count for warning
+        video_count = len(self.current_videos) if self.current_videos else 0
+        
+        message = f"Delete playlist '{self.current_playlist.title}'?"
+        if video_count > 0:
+            details = f"WARNING: This playlist contains {video_count} videos. Deletion cannot be undone!"
+        else:
+            details = "This action cannot be undone."
+        
+        # Show confirmation dialog
+        modal = ConfirmationModal(
+            title="Confirm Playlist Deletion",
+            message=message,
+            details=details,
+            confirm_text="Delete Playlist",
+            cancel_text="Cancel",
+            action="delete_playlist",
+            dangerous=True
+        )
+        
+        await self.push_screen(modal)
+    
+    def on_confirmation_result(self, message: ConfirmationResult) -> None:
+        """Handle confirmation dialog result."""
+        if not message.confirmed:
+            self.notify("Cancelled", timeout=1)
+            return
+        
+        if message.action == "delete_videos":
+            # Execute video deletion
+            if hasattr(self, '_pending_delete_videos'):
+                self.call_later(self.execute_delete_videos, self._pending_delete_videos)
+                delattr(self, '_pending_delete_videos')
+        elif message.action == "delete_playlist":
+            # Execute playlist deletion
+            self.call_later(self.execute_delete_playlist)
+    
+    async def execute_delete_videos(self, videos: List[Video]) -> None:
+        """Execute the actual video deletion."""
+        try:
+            if not self.current_playlist:
+                return
+            
+            # Create delete operation for undo support
+            delete_op = DeleteVideosOperation(
+                api_client=self.api_client,
+                playlist_id=self.current_playlist.id,
+                videos=videos
+            )
+            
+            # Execute through operation stack
+            success = await asyncio.to_thread(self._operation_stack.execute, delete_op)
+            
+            if success:
+                # Remove videos from UI
+                if self.miller_view and self.miller_view.video_column:
+                    remaining_videos = [v for v in self.current_videos if v not in videos]
+                    self.current_videos = remaining_videos
+                    await self.miller_view.set_videos(remaining_videos)
+                    
+                    # Clear marks if any
+                    self.miller_view.video_column.clear_marks()
+                
+                video_word = "video" if len(videos) == 1 else "videos"
+                self.notify(f"Deleted {len(videos)} {video_word}", timeout=2)
+                
+                # Log the deletion
+                if self.command_logger:
+                    self.command_logger.log_operation(
+                        "delete_videos",
+                        success=True,
+                        details={"count": len(videos), "playlist": self.current_playlist.title}
+                    )
+                
+                # Update status bar
+                if self.status_bar:
+                    self.status_bar.update_status(
+                        "",
+                        f"{self.api_client.get_quota_remaining()}/10000"
+                    )
+            else:
+                self.notify("Delete operation failed", severity="error")
+                
+        except Exception as e:
+            logger.error(f"Error deleting videos: {e}")
+            self.notify(f"Delete failed: {e}", severity="error")
+    
+    async def execute_delete_playlist(self) -> None:
+        """Execute the actual playlist deletion."""
+        try:
+            if not self.current_playlist:
+                return
+            
+            playlist_to_delete = self.current_playlist
+            playlist_title = playlist_to_delete.title
+            
+            # Delete the playlist
+            if playlist_to_delete.is_virtual:
+                # Delete virtual playlist from cache
+                self._cache.delete_virtual_playlist(playlist_to_delete.id)
+                logger.info(f"Deleted virtual playlist: {playlist_title}")
+            else:
+                # Delete real playlist via API
+                await asyncio.to_thread(
+                    self.api_client.delete_playlist,
+                    playlist_to_delete.id
+                )
+                logger.info(f"Deleted playlist: {playlist_title}")
+            
+            self.notify(f"Deleted playlist: {playlist_title}", timeout=3)
+            
+            # Log the deletion
+            if self.command_logger:
+                self.command_logger.log_operation(
+                    "delete_playlist",
+                    success=True,
+                    details={"playlist": playlist_title, "virtual": playlist_to_delete.is_virtual}
+                )
+            
+            # Refresh playlist list and navigate to first available playlist
+            await self.refresh_playlist_list()
+            
+            # Select first playlist if available
+            if self.miller_view and self.miller_view.playlist_column:
+                if self.miller_view.playlist_column.playlists:
+                    self.miller_view.playlist_column.selected_index = 0
+                    first_playlist = self.miller_view.playlist_column.playlists[0]
+                    await self.handle_playlist_selection(first_playlist)
+                else:
+                    # No playlists left
+                    self.current_playlist = None
+                    self.current_videos = []
+                    if self.miller_view:
+                        await self.miller_view.set_videos([])
+                        
+        except Exception as e:
+            logger.error(f"Error deleting playlist: {e}")
+            self.notify(f"Delete failed: {e}", severity="error")
