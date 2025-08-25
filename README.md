@@ -9,11 +9,21 @@
   
   ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
-  ![Status](https://img.shields.io/badge/status-active%20development-yellow)
+  ![Status](https://img.shields.io/badge/status-alpha-red)
   
   ---
   
-  > ⚠️ **Note**: This project is under active development. Core features are working but expect frequent updates and potential breaking changes.
+  > 🚨 **ALPHA SOFTWARE WARNING** 🚨
+  > 
+  > This project is in **ALPHA** stage. This means:
+  > - It may contain bugs
+  > - Some features may not work as expected
+  > - YouTube API operations are irreversible (deletions, moves, etc.)
+  > 
+  > **Use at your own risk!** Consider backing up your playlists before use.
+  >
+  > In my hands, this library hastens my interaction with youtube videos
+  > and their playlists. So I'm experiencing a net benefit. More to come.
   
   ---
 </div>
