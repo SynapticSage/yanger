@@ -471,6 +471,11 @@ class VideoColumn(ScrollableContainer):
             self.current_match_index = 0
             self.selected_index = self.search_matches[0]
             
+            # Update page if necessary to show the first match
+            new_page = self.selected_index // self.page_size
+            if new_page != self.current_page:
+                self.current_page = new_page
+            
         asyncio.create_task(self.refresh_display())
         return len(self.search_matches)
         
@@ -485,6 +490,12 @@ class VideoColumn(ScrollableContainer):
             
         self.current_match_index = (self.current_match_index + 1) % len(self.search_matches)
         self.selected_index = self.search_matches[self.current_match_index]
+        
+        # Update page if necessary to show the selected match
+        new_page = self.selected_index // self.page_size
+        if new_page != self.current_page:
+            self.current_page = new_page
+            
         asyncio.create_task(self.refresh_display())
         return True
         
@@ -499,6 +510,12 @@ class VideoColumn(ScrollableContainer):
             
         self.current_match_index = (self.current_match_index - 1) % len(self.search_matches)
         self.selected_index = self.search_matches[self.current_match_index]
+        
+        # Update page if necessary to show the selected match
+        new_page = self.selected_index // self.page_size
+        if new_page != self.current_page:
+            self.current_page = new_page
+            
         asyncio.create_task(self.refresh_display())
         return True
         
@@ -696,11 +713,18 @@ class MillerView(Widget):
             loading = LoadingIndicator()
             await self.playlist_column.mount(loading)
             
-    async def show_loading_videos(self) -> None:
-        """Show loading state in video column."""
+    async def show_loading_videos(self, message: str = "Loading...") -> None:
+        """Show loading state in video column.
+        
+        Args:
+            message: Optional custom loading message
+        """
         if self.video_column:
             await self.video_column.remove_children()
             loading = LoadingIndicator()
+            # Update loading message if LoadingIndicator supports it
+            if hasattr(loading, 'message'):
+                loading.message = message
             await self.video_column.mount(loading)
             
     async def set_playlists(self, playlists: List[Playlist]) -> None:
@@ -808,23 +832,40 @@ class MillerView(Widget):
             self.video_column.exit_visual_mode(mark_selection=False)
             return
             
-        # Search mode - removed focused_column restriction since it's handled in action_search
-        # This code path may not be needed anymore since '/' is handled via action_search
-        elif key == 'n' and self.search_active and self.video_column:
+        # Search mode - handle n/N for both playlist and video columns
+        elif key == 'n' and self.search_active:
             # Next search match
-            if self.video_column.next_match():
-                self.post_message(SearchStatusUpdate(
-                    self.video_column.current_match_index + 1,
-                    len(self.video_column.search_matches)
-                ))
+            if self.focused_column == 0 and self.playlist_column:
+                # Search in playlist column
+                if self.playlist_column.next_search_match():
+                    self.post_message(SearchStatusUpdate(
+                        self.playlist_column.current_match_index + 1,
+                        len(self.playlist_column.search_matches)
+                    ))
+            elif self.focused_column == 1 and self.video_column:
+                # Search in video column
+                if self.video_column.next_match():
+                    self.post_message(SearchStatusUpdate(
+                        self.video_column.current_match_index + 1,
+                        len(self.video_column.search_matches)
+                    ))
             return
-        elif key == 'N' and self.search_active and self.video_column:
+        elif key == 'N' and self.search_active:
             # Previous search match
-            if self.video_column.prev_match():
-                self.post_message(SearchStatusUpdate(
-                    self.video_column.current_match_index + 1,
-                    len(self.video_column.search_matches)
-                ))
+            if self.focused_column == 0 and self.playlist_column:
+                # Search in playlist column
+                if self.playlist_column.previous_search_match():
+                    self.post_message(SearchStatusUpdate(
+                        self.playlist_column.current_match_index + 1,
+                        len(self.playlist_column.search_matches)
+                    ))
+            elif self.focused_column == 1 and self.video_column:
+                # Search in video column
+                if self.video_column.prev_match():
+                    self.post_message(SearchStatusUpdate(
+                        self.video_column.current_match_index + 1,
+                        len(self.video_column.search_matches)
+                    ))
             return
             
         # Column navigation

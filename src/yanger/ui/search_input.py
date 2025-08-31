@@ -35,17 +35,18 @@ class SearchInput(Container):
     SearchInput Input {
         width: 100%;
         background: $background;
-        color: $text;  /* Ensure text is visible */
+        color: white;  /* Explicit white text */
         border: tall $accent;
     }
     
     SearchInput Input:focus {
         border: tall $primary;
-        color: $text;  /* Keep text visible when focused */
+        color: white;  /* Keep text visible when focused */
+        background: $background-darken-1;  /* Slightly darker background */
     }
     
     SearchInput Input._input {
-        color: $text;  /* Target the internal text element */
+        color: white !important;  /* Force white text */
     }
     
     SearchInput .search-label {

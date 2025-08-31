@@ -144,12 +144,14 @@ class YouTubeAPIClient:
     
     def get_playlist_items(self,
                           playlist_id: str,
-                          max_results: int = 50) -> List[Video]:
+                          max_results: int = 50,
+                          progress_callback: Optional[callable] = None) -> List[Video]:
         """Get all videos in a playlist.
         
         Args:
             playlist_id: ID of the playlist (including special playlists like 'WL', 'HL')
             max_results: Maximum results per page (max 50)
+            progress_callback: Optional callback for progress updates (videos_loaded, total_expected)
             
         Returns:
             List of Video objects
@@ -174,15 +176,28 @@ class YouTubeAPIClient:
                 maxResults=min(max_results, 50)
             )
             
+            # Get total count if possible
+            total_results = None
+            page_count = 0
+            
             # Handle pagination
             while request:
                 self._track_quota('playlistItems.list')
                 response = request.execute()
+                page_count += 1
+                
+                # Get total results from first response
+                if total_results is None and 'pageInfo' in response:
+                    total_results = response['pageInfo'].get('totalResults', 0)
                 
                 # Convert response items to Video objects
                 for item in response.get('items', []):
                     video = Video.from_playlist_item(item)
                     videos.append(video)
+                
+                # Call progress callback if provided
+                if progress_callback and total_results:
+                    progress_callback(len(videos), total_results)
                 
                 # Get next page
                 request = self.youtube.playlistItems().list_next(request, response)

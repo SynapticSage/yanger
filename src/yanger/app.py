@@ -501,14 +501,41 @@ class YouTubeRangerApp(App):
                     logger.debug(f"Loaded {len(cached_videos)} videos from cache for {playlist.title}")
                     return
             
-            # Show loading state only when fetching from API
-            if self.miller_view:
-                await self.miller_view.show_loading_videos()
+            # Check if this is a large playlist (>50 videos)
+            is_large_playlist = playlist.item_count > 50
+            if is_large_playlist:
+                logger.info(f"Large playlist detected: {playlist.title} has {playlist.item_count} videos")
+                # Show loading state with progress for large playlists
+                if self.miller_view:
+                    await self.miller_view.show_loading_videos(
+                        f"Loading {playlist.item_count} videos..."
+                    )
+            else:
+                # Show loading state only when fetching from API
+                if self.miller_view:
+                    await self.miller_view.show_loading_videos()
             
-            # Load videos from API
+            # Create progress callback for pagination
+            def update_progress(loaded: int, total: int):
+                """Update loading progress for paginated requests."""
+                if self.status_bar:
+                    self.status_bar.update_status(
+                        f"Loading videos: {loaded}/{total}",
+                        f"Quota: {self.api_client.get_quota_remaining()}/10000"
+                    )
+                # Also update the loading message
+                if self.miller_view and is_large_playlist:
+                    self.call_later(
+                        self.miller_view.show_loading_videos,
+                        f"Loading videos... {loaded}/{total}"
+                    )
+            
+            # Load videos from API with progress callback for large playlists
             self.current_videos = await asyncio.to_thread(
                 self.api_client.get_playlist_items,
-                playlist.id
+                playlist.id,
+                50,  # max_results per page
+                update_progress if is_large_playlist else None
             )
             self.unfiltered_videos = self.current_videos.copy()
             
@@ -1713,8 +1740,19 @@ class YouTubeRangerApp(App):
                 )
                 
         elif cmd_name == "sort":
-            # TODO: Implement sorting
-            self.notify(f"Sort by {' '.join(args) if args else 'default'} not implemented yet", severity="warning")
+            # Sort videos in current playlist
+            if not args:
+                self.notify("Usage: :sort <field> [asc|desc]", severity="warning")
+                self.notify("Fields: title, date, views, duration, position", severity="info")
+                return
+            
+            field = args[0].lower()
+            reverse = False
+            if len(args) > 1:
+                order = args[1].lower()
+                reverse = (order == "desc")
+            
+            self.call_later(self.sort_videos, field, reverse)
             
         elif cmd_name == "filter":
             if not args:
@@ -1930,6 +1968,82 @@ class YouTubeRangerApp(App):
         except Exception as e:
             logger.error(f"Error deleting videos: {e}")
             self.notify(f"Delete failed: {e}", severity="error")
+    
+    async def sort_videos(self, field: str, reverse: bool = False) -> None:
+        """Sort videos in the current playlist.
+        
+        Args:
+            field: Field to sort by (title, date, views, duration, position)
+            reverse: Whether to sort in descending order
+        """
+        if not self.miller_view or not self.miller_view.video_column:
+            self.notify("No videos to sort", severity="warning")
+            return
+        
+        videos = self.current_videos
+        if not videos:
+            self.notify("No videos to sort", severity="warning")
+            return
+        
+        try:
+            # Sort based on field
+            if field == "title":
+                sorted_videos = sorted(videos, key=lambda v: v.title.lower(), reverse=reverse)
+                sort_desc = f"title ({'desc' if reverse else 'asc'})"
+            elif field == "date":
+                sorted_videos = sorted(videos, 
+                                     key=lambda v: v.added_at or datetime.min, 
+                                     reverse=not reverse)  # Most recent first by default
+                sort_desc = f"date added ({'oldest first' if reverse else 'newest first'})"
+            elif field == "views":
+                sorted_videos = sorted(videos, 
+                                     key=lambda v: v.view_count or 0, 
+                                     reverse=not reverse)  # Most views first by default
+                sort_desc = f"views ({'least first' if reverse else 'most first'})"
+            elif field == "duration":
+                # Parse ISO 8601 duration for sorting
+                def parse_duration(duration_str):
+                    if not duration_str:
+                        return 0
+                    # Simple parser for PT#M#S format
+                    import re
+                    match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration_str)
+                    if match:
+                        hours = int(match.group(1) or 0)
+                        minutes = int(match.group(2) or 0)  
+                        seconds = int(match.group(3) or 0)
+                        return hours * 3600 + minutes * 60 + seconds
+                    return 0
+                
+                sorted_videos = sorted(videos, 
+                                     key=lambda v: parse_duration(v.duration), 
+                                     reverse=not reverse)  # Longest first by default
+                sort_desc = f"duration ({'shortest first' if reverse else 'longest first'})"
+            elif field == "position":
+                sorted_videos = sorted(videos, key=lambda v: v.position, reverse=reverse)
+                sort_desc = f"position ({'reverse' if reverse else 'original'})"
+            else:
+                self.notify(f"Unknown sort field: {field}", severity="error")
+                self.notify("Valid fields: title, date, views, duration, position", severity="info")
+                return
+            
+            # Update the video column with sorted videos
+            self.current_videos = sorted_videos
+            await self.miller_view.set_videos(sorted_videos)
+            
+            self.notify(f"Sorted by {sort_desc}", timeout=2)
+            
+            # Log the sort operation
+            if self.command_logger:
+                self.command_logger.log_operation(
+                    "sort_videos",
+                    success=True,
+                    details={"field": field, "reverse": reverse, "count": len(sorted_videos)}
+                )
+                
+        except Exception as e:
+            logger.error(f"Error sorting videos: {e}")
+            self.notify(f"Sort failed: {e}", severity="error")
     
     async def execute_delete_playlist(self) -> None:
         """Execute the actual playlist deletion."""
