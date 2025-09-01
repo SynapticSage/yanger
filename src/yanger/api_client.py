@@ -88,7 +88,8 @@ class YouTubeAPIClient:
                       mine: bool = True,
                       channel_id: Optional[str] = None,
                       max_results: int = 50,
-                      include_special: bool = True) -> List[Playlist]:
+                      include_special: bool = True,
+                      progress_callback: Optional[callable] = None) -> List[Playlist]:
         """Get playlists for the authenticated user or a channel.
         
         Args:
@@ -96,6 +97,7 @@ class YouTubeAPIClient:
             channel_id: Channel ID to get playlists for (if mine=False)
             max_results: Maximum results per page (max 50)
             include_special: If True, append special playlists (Watch Later, History)
+            progress_callback: Optional callback for progress updates (page_num, total_so_far)
             
         Returns:
             List of Playlist objects
@@ -119,17 +121,29 @@ class YouTubeAPIClient:
             request = self.youtube.playlists().list(**request_params)
             
             # Handle pagination
+            page_count = 0
             while request:
+                page_count += 1
                 self._track_quota('playlists.list')
                 response = request.execute()
+                
+                # Log pagination progress
+                items_in_page = len(response.get('items', []))
+                logger.info(f"Fetched page {page_count} of playlists: {items_in_page} items")
                 
                 # Convert response items to Playlist objects
                 for item in response.get('items', []):
                     playlist = Playlist.from_youtube_response(item)
                     playlists.append(playlist)
                 
+                # Call progress callback if provided
+                if progress_callback:
+                    progress_callback(page_count, len(playlists))
+                
                 # Get next page
                 request = self.youtube.playlists().list_next(request, response)
+                
+            logger.info(f"Total playlists fetched: {len(playlists)} across {page_count} pages")
                 
         except HttpError as e:
             logger.error(f"Error fetching playlists: {e}")

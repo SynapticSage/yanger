@@ -174,10 +174,30 @@ class PersistentCache:
         """Get all cached playlists.
         
         Returns:
-            List of playlists if cached, None if cache is empty
+            List of playlists if cached and fresh, None if cache is empty or expired
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
+            
+            # First check if we have any playlists and when they were cached
+            cursor = conn.execute("""
+                SELECT MIN(cached_at) as oldest_cache, COUNT(*) as count 
+                FROM playlists 
+                WHERE id NOT LIKE 'virtual_%'
+            """)
+            
+            row = cursor.fetchone()
+            if not row or row['count'] == 0:
+                return None
+            
+            # Check if the oldest cached playlist is expired
+            if row['oldest_cache']:
+                cached_at = datetime.fromisoformat(row['oldest_cache'])
+                if datetime.now() - cached_at > timedelta(days=self.ttl_days):
+                    logger.debug(f"Playlist cache expired (oldest: {row['oldest_cache']})")
+                    return None
+            
+            # Get all playlists
             cursor = conn.execute("""
                 SELECT * FROM playlists 
                 ORDER BY title

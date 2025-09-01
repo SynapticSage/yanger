@@ -339,10 +339,23 @@ class YouTubeRangerApp(App):
             if self.miller_view:
                 await self.miller_view.show_loading_playlists()
             
+            # Create progress callback for pagination
+            def update_progress(page: int, total: int):
+                """Update loading progress for paginated playlist fetching."""
+                if self.status_bar:
+                    self.status_bar.update_status(
+                        f"Loading playlists: page {page}, {total} so far...",
+                        f"Quota: {self.api_client.get_quota_remaining()}/10000"
+                    )
+            
             # Load playlists from API (without special playlists to avoid caching them)
             self.playlists = await asyncio.to_thread(
                 self.api_client.get_playlists,
-                include_special=False  # Don't include special playlists from API
+                True,  # mine
+                None,  # channel_id
+                50,    # max_results per page
+                False,  # Don't include special playlists from API
+                update_progress  # progress callback
             )
             
             # Cache the regular playlists (not special ones)
