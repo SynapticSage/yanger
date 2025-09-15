@@ -71,19 +71,29 @@ class CommandInput(Container):
         width: 100%;
         height: 1;
         margin-top: 1;
-        color: white;  /* Explicit white text */
-        background: $background;
+        color: white !important;
+        background: #1e1e1e !important;
         border: tall $accent;
     }
     
     CommandInput > Input:focus {
         border: tall $primary;
-        color: white;  /* Ensure text is visible when focused */
-        background: $background-darken-1;  /* Slightly darker background */
+        color: white !important;
+        background: #0a0a0a !important;
     }
     
-    CommandInput > Input._input {
-        color: white !important;  /* Force white text */
+    /* Target the actual text content area */
+    CommandInput Input > .input--placeholder {
+        color: #666 !important;
+    }
+    
+    CommandInput Input > .input--cursor {
+        color: white !important;
+        background: white !important;
+    }
+    
+    CommandInput Input .input--suggestion {
+        color: #888 !important;
     }
     
     CommandInput .command-hint {
@@ -112,6 +122,10 @@ class CommandInput(Container):
             suggester=CommandSuggester(),
             id="command-input-field"
         )
+        # Apply inline styles to ensure text visibility
+        self.input_widget.styles.color = "white"
+        self.input_widget.styles.background = "#1e1e1e"
+        
         self.hint_widget = Static("", classes="command-hint")
         
         yield self.hint_widget

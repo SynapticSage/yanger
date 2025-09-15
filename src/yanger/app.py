@@ -1775,29 +1775,25 @@ class YouTubeRangerApp(App):
                     self.current_videos = self.unfiltered_videos.copy()
                     self.notify("Cleared filter", timeout=2)
             else:
-                # Apply filter
-                filter_text = ' '.join(args).lower()
-                if self.miller_view and self.miller_view.video_column and self.current_videos:
-                    # Support wildcard matching
-                    import fnmatch
-                    filtered_videos = []
-                    for video in self.current_videos:
-                        # Check title, channel, or description
-                        searchable = f"{video.title} {video.channel_title or ''} {video.description or ''}".lower()
-                        # Support * wildcards
-                        if '*' in filter_text or '?' in filter_text:
-                            if fnmatch.fnmatch(searchable, f"*{filter_text}*"):
-                                filtered_videos.append(video)
-                        else:
-                            if filter_text in searchable:
-                                filtered_videos.append(video)
+                # Apply advanced filter
+                filter_expression = ' '.join(args)
+                if self.miller_view and self.miller_view.video_column and self.unfiltered_videos:
+                    from .filters import VideoFilter
                     
-                    if filtered_videos:
-                        self.call_later(self.miller_view.set_videos, filtered_videos)
-                        self.current_videos = filtered_videos  # Update current videos to filtered set
-                        self.notify(f"Filtered: {len(filtered_videos)} matches", timeout=2)
-                    else:
-                        self.notify("No matches found", severity="warning")
+                    video_filter = VideoFilter()
+                    try:
+                        # Always filter from the unfiltered set to allow re-filtering
+                        filtered_videos = video_filter.filter(self.unfiltered_videos, filter_expression)
+                        
+                        if filtered_videos:
+                            self.call_later(self.miller_view.set_videos, filtered_videos)
+                            self.current_videos = filtered_videos
+                            self.notify(f"Filtered: {len(filtered_videos)}/{len(self.unfiltered_videos)} videos", timeout=3)
+                        else:
+                            self.notify("No matches found", severity="warning")
+                    except Exception as e:
+                        logger.error(f"Filter error: {e}")
+                        self.notify(f"Filter error: {e}", severity="error")
             
         elif cmd_name == "fetch-metadata":
             # Fetch metadata for current virtual playlist
@@ -1805,6 +1801,14 @@ class YouTubeRangerApp(App):
                 self.call_later(self.fetch_metadata_for_current_playlist)
             else:
                 self.notify("This command only works for virtual playlists", severity="warning")
+            
+        elif cmd_name == "stats" or cmd_name == "statistics":
+            # Show playlist statistics
+            self.call_later(self.show_statistics, args)
+            
+        elif cmd_name == "duplicates" or cmd_name == "dupes":
+            # Find duplicate videos
+            self.call_later(self.find_duplicates, args)
             
         elif cmd_name == "export":
             # Export current playlist or all playlists
@@ -2109,3 +2113,88 @@ class YouTubeRangerApp(App):
         except Exception as e:
             logger.error(f"Error deleting playlist: {e}")
             self.notify(f"Delete failed: {e}", severity="error")
+    
+    async def show_statistics(self, args: List[str]) -> None:
+        """Show statistics for current playlist or all playlists.
+        
+        Args:
+            args: Command arguments (e.g., ["all"] for all playlists)
+        """
+        from .statistics import PlaylistAnalyzer
+        
+        analyzer = PlaylistAnalyzer()
+        
+        # Check if we want stats for all playlists
+        if args and args[0] == "all":
+            # TODO: Implement all playlists comparison
+            self.notify("All playlists statistics not yet implemented", severity="warning")
+            return
+        
+        # Show stats for current playlist
+        if not self.current_videos:
+            self.notify("No videos loaded to analyze", severity="warning")
+            return
+        
+        # Check if detailed stats requested
+        detailed = args and args[0] == "detailed"
+        
+        # Analyze current playlist
+        playlist_name = self.current_playlist.title if self.current_playlist else "Current Videos"
+        stats = analyzer.analyze(self.current_videos, playlist_name)
+        
+        # Format and display
+        formatted_stats = analyzer.format_stats(stats, detailed=detailed)
+        
+        # Use notify with longer timeout for stats
+        self.notify(formatted_stats, timeout=30)
+    
+    async def find_duplicates(self, args: List[str]) -> None:
+        """Find duplicate videos in current playlist or across all playlists.
+        
+        Args:
+            args: Command arguments (e.g., ["all"] for cross-playlist search)
+        """
+        from .duplicates import DuplicateDetector
+        
+        detector = DuplicateDetector()
+        
+        # Check if we want cross-playlist duplicate search
+        if args and args[0] == "all":
+            # Find duplicates across all playlists
+            if not self.playlists:
+                self.notify("No playlists loaded", severity="warning")
+                return
+            
+            # Gather all playlists and their videos
+            all_playlist_videos = []
+            for playlist in self.playlists:
+                # Skip special and virtual playlists
+                if playlist.is_special or playlist.is_virtual:
+                    continue
+                
+                # Try to get from cache first
+                videos = self._cache.get_videos(playlist.id)
+                if videos:
+                    all_playlist_videos.append((playlist, videos))
+            
+            if not all_playlist_videos:
+                self.notify("No playlist videos cached. Load some playlists first.", severity="warning")
+                return
+            
+            # Find cross-playlist duplicates
+            duplicates = detector.find_duplicates_across(all_playlist_videos)
+            formatted = detector.format_duplicates(duplicates)
+            self.notify(formatted, timeout=30)
+            
+        else:
+            # Find duplicates in current playlist
+            if not self.current_videos:
+                self.notify("No videos loaded to check for duplicates", severity="warning")
+                return
+            
+            playlist_name = self.current_playlist.title if self.current_playlist else "Current Videos"
+            duplicates = detector.find_duplicates(self.current_videos, playlist_name)
+            
+            # Format and display
+            formatted = detector.format_duplicates(duplicates)
+            self.notify(formatted, timeout=20)

@@ -34,19 +34,25 @@ class SearchInput(Container):
     
     SearchInput Input {
         width: 100%;
-        background: $background;
-        color: white;  /* Explicit white text */
+        background: #1e1e1e !important;
+        color: white !important;
         border: tall $accent;
     }
     
     SearchInput Input:focus {
         border: tall $primary;
-        color: white;  /* Keep text visible when focused */
-        background: $background-darken-1;  /* Slightly darker background */
+        color: white !important;
+        background: #0a0a0a !important;
     }
     
-    SearchInput Input._input {
-        color: white !important;  /* Force white text */
+    /* Target internal input elements */
+    SearchInput Input > .input--placeholder {
+        color: #666 !important;
+    }
+    
+    SearchInput Input > .input--cursor {
+        color: white !important;
+        background: white !important;
     }
     
     SearchInput .search-label {
@@ -94,6 +100,9 @@ class SearchInput(Container):
                 placeholder="Search videos...",
                 id="search-input"
             )
+            # Apply inline styles to ensure text visibility
+            self.input_field.styles.color = "white"
+            self.input_field.styles.background = "#1e1e1e"
             yield self.input_field
             yield Static("ESC to cancel", classes="search-hint")
             

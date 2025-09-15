@@ -284,7 +284,7 @@ class DeleteVideosOperation(Operation):
                 })
                 
                 # Delete from playlist
-                self.api_client.remove_from_playlist(video.playlist_item_id)
+                self.api_client.remove_video_from_playlist(video.playlist_item_id)
                 logger.info(f"Deleted video '{video.title}' from playlist")
             
             self.executed = True
