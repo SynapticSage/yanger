@@ -51,6 +51,10 @@
 - 🗑️ **Delete Operations**: Delete videos from playlists or entire playlists
 - 📤 **Export Playlists**: Export to JSON/YAML/CSV formats
 - 📝 **Command Logging**: Log all keyboard inputs and operations for debugging
+- 📜 **Transcript Caching**: Fetch, cache, and display video transcripts with compression
+- 🔤 **Multi-language Support**: Fetch transcripts in preferred languages
+- 💾 **Transcript Export**: Export transcripts to text and JSON formats
+- ✏️ **Bulk Edit**: Edit playlists and videos in external text editor
 
 ## Quick Start
 
@@ -117,6 +121,10 @@ yanger
 | `o` | Open sort menu |
 | `r` | Open video(s)/playlist in browser |
 | `M` | Fetch metadata for virtual playlist videos |
+| `B` | Bulk edit playlists/videos in text editor |
+| `gt` | Fetch transcript for current video |
+| `gT` | Toggle auto-fetch transcript mode |
+| `ge` | Export transcript to files |
 
 ### Search
 | Key | Action |
@@ -151,6 +159,10 @@ Press `:` to enter command mode with tab completion:
 :export [filename]       # Export playlist(s) to JSON/YAML/CSV
 :quota                   # Show API quota usage
 :stats                   # Show playlist statistics
+:bulkedit [--dry-run]    # Bulk edit in external editor
+:transcript fetch        # Fetch transcript for current video
+:transcript export <dir> # Export transcript to directory
+:transcript clear        # Clear transcript cache
 :help [command]          # Get help for command
 ```
 
@@ -297,7 +309,111 @@ cache:
   show_all_virtual_playlists: false  # Show only Watch Later/History by default
   auto_fetch_metadata: true          # Auto-fetch missing titles
   auto_fetch_batch_size: 20          # Videos to fetch per batch
+
+transcripts:
+  enabled: true
+  auto_fetch: false                  # Auto-fetch transcripts on hover
+  store_in_db: true                  # Cache in SQLite database
+  store_compressed: true             # Compress with gzip
+  export_directory: null             # Optional external folder
+  export_txt: true                   # Export plain text files
+  export_json: true                  # Export JSON with timestamps
+  languages: ["en"]                  # Preferred languages
 ```
+
+## Video Transcript Caching
+
+Yanger can fetch, cache, and display video transcripts:
+
+### Features
+- 📜 **Automatic Display**: Transcripts appear at bottom of preview pane when available
+- 🗜️ **Compressed Storage**: Transcripts stored compressed with gzip to save space
+- 🌍 **Multi-language**: Fetch transcripts in your preferred languages
+- 💾 **Dual Storage**: Store in database and/or export to external files
+- 📄 **Multiple Formats**: Export as plain text or JSON with timestamps
+- ⚡ **Smart Caching**: Fetch once, use forever (or until cleared)
+
+### Usage
+
+#### Fetch Transcripts
+```bash
+# Manual fetch for current video
+Press 'gt' while viewing a video
+
+# Toggle auto-fetch mode (fetches as you navigate)
+Press 'gT' to enable/disable
+
+# Command mode
+:transcript fetch
+```
+
+#### View Transcripts
+- Transcripts automatically display at bottom of preview pane (right column)
+- Shows language and type (auto-generated vs manual)
+- Truncated to 1000 characters with "..." indicator
+
+#### Export Transcripts
+```bash
+# Export current video transcript
+Press 'ge' to export to configured directory
+
+# Export via command mode
+:transcript export ~/my-transcripts
+
+# Exports both .txt and .json files by default
+```
+
+#### Configuration
+Edit `~/.config/yanger/config.yaml`:
+
+```yaml
+transcripts:
+  enabled: true                      # Enable transcript feature
+  auto_fetch: false                  # Fetch automatically on hover
+  store_in_db: true                  # Store in SQLite cache
+  store_compressed: true             # Compress with gzip (recommended)
+  export_directory: ~/.cache/yanger/transcripts  # External folder (optional)
+  export_txt: true                   # Export plain text
+  export_json: true                  # Export JSON with timestamps
+  languages: ["en", "es", "fr"]      # Preferred languages (in priority)
+```
+
+### Transcript Formats
+
+#### Plain Text (.txt)
+```
+Hello world
+This is a test transcript
+With multiple segments
+Thank you
+```
+
+#### JSON (.json)
+```json
+{
+  "video_id": "dQw4w9WgXcQ",
+  "language": "en",
+  "auto_generated": false,
+  "fetched_at": "2024-01-15T12:00:00Z",
+  "segments": [
+    {"start": 0.0, "duration": 2.5, "text": "Hello world"},
+    {"start": 2.5, "duration": 3.0, "text": "This is a test transcript"}
+  ]
+}
+```
+
+### Tips
+- 💡 Enable `auto_fetch` to automatically fetch transcripts as you browse
+- 🗜️ Keep `store_compressed` enabled - saves ~70% database space
+- 🌍 Add multiple languages to `languages` list for better coverage
+- 📁 Set `export_directory` to automatically export all fetched transcripts
+- 🚫 Some videos don't have transcripts - these are cached as "NOT_AVAILABLE"
+
+### API Considerations
+- 🔌 Uses `youtube-transcript-api` library (not official YouTube API)
+- ✅ No YouTube API quota used for transcript fetching
+- ⚡ Free and unlimited transcript access
+- 🌐 Works with auto-generated and manual transcripts
 
 ## Tips & Tricks
 
@@ -366,15 +482,19 @@ With the default quota, you can:
 - Playlist creation with privacy settings (gn command)
 - Rename operations for playlists and videos (cw command)
 - Command logging for debugging and auditing
+- Video transcript caching with compression (gt/gT/ge commands)
+- Bulk edit mode for playlists and videos (B command)
+- Multi-language transcript support
+- Export transcripts to text and JSON formats
 
 ### 🚧 Planned Features
 - [ ] Playlist deletion (gd command)
 - [ ] Advanced filtering
 - [ ] Custom keybinding configuration
-- [ ] Export/import playlists to various formats
 - [ ] Playlist statistics dashboard
 - [ ] Macro recording and playback
 - [ ] Multi-window/tab support
+- [ ] Transcript search and keyword highlighting
 
 ## Project Structure
 
@@ -384,20 +504,31 @@ yanger/
 │   ├── auth.py        # OAuth2 authentication
 │   ├── api_client.py  # YouTube API wrapper
 │   ├── models.py      # Data models
-│   ├── cache.py       # Persistent caching
+│   ├── cache.py       # Persistent caching (including transcripts)
 │   ├── app.py         # Main TUI application
 │   ├── keybindings.py # Central keybinding registry
 │   ├── operation_history.py  # Undo/redo system
 │   ├── command_logger.py     # Command logging
+│   ├── bulkedit.py    # Bulk edit functionality
+│   ├── core/          # Core functionality
+│   │   └── transcript_fetcher.py  # Transcript fetching/processing
+│   ├── config/        # Configuration management
+│   │   └── settings.py            # Settings dataclasses
 │   └── ui/            # UI components
 │       ├── miller_view.py           # Three-column layout
 │       ├── help_overlay.py          # Help system
 │       ├── command_input.py         # Command mode
 │       ├── playlist_creation_modal.py  # Create playlist dialog
 │       ├── rename_modal.py          # Rename dialog
+│       ├── bulkedit_preview.py      # Bulk edit preview
 │       └── ...                       # Other UI widgets
 ├── config/            # Configuration files
-└── tests/            # Test suite
+│   └── default_config.yaml          # Default settings
+└── tests/             # Test suite (60 tests)
+    ├── conftest.py                  # Shared fixtures
+    ├── test_transcript_fetcher.py   # Transcript tests
+    ├── test_cache_transcripts.py    # Cache tests
+    └── test_transcript_settings.py  # Settings tests
 ```
 
 ## Contributing
