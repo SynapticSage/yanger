@@ -83,7 +83,13 @@ config/keybindings_user.yaml
 CLAUDE.md
 PLAN.md
 TESTING_*.md
-outputs
+outputs/
+
+# Test outputs and exports
+test-*.json
+*_export_*.json
+
+# Takeout data
 Takeout/YouTube and YouTube Music/videos
 Takeout-2/YouTube and YouTube Music/videos
 Takeout-3/YouTube and YouTube Music/videos
