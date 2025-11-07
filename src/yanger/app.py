@@ -154,7 +154,7 @@ class YouTubeRangerApp(App):
             await loading_msg.remove()
             
             container = self.query_one("#main-container")
-            self.miller_view = MillerView(id="miller-view")
+            self.miller_view = MillerView(cache=self._cache, settings=self.settings, id="miller-view")
             await container.mount(self.miller_view)
             
             # Get status bar reference

@@ -150,7 +150,23 @@ class PersistentCache:
             # Create indices for virtual tables
             conn.execute("CREATE INDEX IF NOT EXISTS idx_virtual_videos_playlist ON virtual_videos(playlist_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_virtual_videos_video ON virtual_videos(video_id)")
-            
+
+            # Video transcripts table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS video_transcripts (
+                    video_id TEXT PRIMARY KEY,
+                    transcript_text BLOB,  -- Compressed transcript (gzip)
+                    transcript_json TEXT,  -- JSON with timestamps and metadata
+                    language TEXT,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    auto_generated BOOLEAN,
+                    fetch_status TEXT  -- 'SUCCESS', 'NOT_AVAILABLE', 'ERROR'
+                )
+            """)
+
+            # Create index for transcript lookups
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_transcripts_video ON video_transcripts(video_id)")
+
             # Check and update schema version
             cursor = conn.execute("SELECT value FROM cache_metadata WHERE key = 'schema_version'")
             row = cursor.fetchone()
@@ -881,6 +897,143 @@ class PersistentCache:
                 return False
                 
             return True
+
+    # Transcript caching methods
+
+    def get_transcript(self, video_id: str) -> Optional[Dict[str, Any]]:
+        """Get cached transcript for a video.
+
+        Args:
+            video_id: YouTube video ID
+
+        Returns:
+            Dictionary with transcript data or None if not cached
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM video_transcripts WHERE video_id = ?
+            """, (video_id,))
+
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            return {
+                'video_id': row['video_id'],
+                'transcript_text': row['transcript_text'],
+                'transcript_json': row['transcript_json'],
+                'language': row['language'],
+                'fetched_at': row['fetched_at'],
+                'auto_generated': bool(row['auto_generated']),
+                'fetch_status': row['fetch_status']
+            }
+
+    def cache_transcript(self, video_id: str, transcript_text: Optional[bytes],
+                        transcript_json: Optional[str], language: Optional[str],
+                        auto_generated: bool, fetch_status: str) -> None:
+        """Cache a transcript for a video.
+
+        Args:
+            video_id: YouTube video ID
+            transcript_text: Compressed transcript text (gzip)
+            transcript_json: JSON string with timestamps
+            language: Language code
+            auto_generated: Whether transcript is auto-generated
+            fetch_status: 'SUCCESS', 'NOT_AVAILABLE', or 'ERROR'
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO video_transcripts
+                (video_id, transcript_text, transcript_json, language,
+                 fetched_at, auto_generated, fetch_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                video_id,
+                transcript_text,
+                transcript_json,
+                language,
+                datetime.now().isoformat(),
+                auto_generated,
+                fetch_status
+            ))
+            conn.commit()
+
+        logger.debug(f"Cached transcript for video {video_id} (status: {fetch_status})")
+
+    def export_transcript(self, video_id: str, directory: Path) -> Tuple[bool, Optional[str]]:
+        """Export transcript to text and JSON files.
+
+        Args:
+            video_id: YouTube video ID
+            directory: Export directory path
+
+        Returns:
+            Tuple of (success, error_message)
+        """
+        try:
+            # Get transcript from cache
+            transcript_data = self.get_transcript(video_id)
+            if not transcript_data or transcript_data['fetch_status'] != 'SUCCESS':
+                return False, "Transcript not available"
+
+            # Ensure directory exists
+            directory.mkdir(parents=True, exist_ok=True)
+
+            # Export plain text
+            if transcript_data['transcript_text']:
+                from .core.transcript_fetcher import TranscriptFetcher
+                text = TranscriptFetcher.decompress_transcript(transcript_data['transcript_text'])
+                txt_path = directory / f"{video_id}.txt"
+                with open(txt_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                logger.info(f"Exported transcript text to {txt_path}")
+
+            # Export JSON
+            if transcript_data['transcript_json']:
+                json_path = directory / f"{video_id}.json"
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    f.write(transcript_data['transcript_json'])
+                logger.info(f"Exported transcript JSON to {json_path}")
+
+            return True, None
+
+        except Exception as e:
+            logger.error(f"Error exporting transcript for {video_id}: {e}")
+            return False, str(e)
+
+    def get_transcript_status(self, video_id: str) -> Optional[str]:
+        """Check if transcript is cached and get its status.
+
+        Args:
+            video_id: YouTube video ID
+
+        Returns:
+            Status string ('SUCCESS', 'NOT_AVAILABLE', 'ERROR') or None if not cached
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT fetch_status FROM video_transcripts WHERE video_id = ?
+            """, (video_id,))
+
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    def clear_transcript_cache(self) -> int:
+        """Clear all cached transcripts.
+
+        Returns:
+            Number of transcripts cleared
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM video_transcripts")
+            count = cursor.fetchone()[0]
+
+            conn.execute("DELETE FROM video_transcripts")
+            conn.commit()
+
+        logger.info(f"Cleared {count} cached transcripts")
+        return count
 
 
 # Keep the old PlaylistCache for backwards compatibility during migration

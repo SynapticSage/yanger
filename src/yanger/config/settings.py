@@ -76,6 +76,19 @@ class CacheSettings:
 
 
 @dataclass
+class TranscriptSettings:
+    """Transcript caching settings."""
+    enabled: bool = True
+    auto_fetch: bool = False  # Auto-fetch on hover vs manual
+    store_in_db: bool = True  # Store in SQLite database
+    store_compressed: bool = True  # Compress transcripts in DB (gzip)
+    export_directory: Optional[str] = None  # External folder for transcript files
+    export_txt: bool = True  # Export plain text files
+    export_json: bool = True  # Export JSON files with timestamps
+    languages: list = field(default_factory=lambda: ["en"])  # Preferred languages
+
+
+@dataclass
 class YouTubeSettings:
     """YouTube API settings."""
     client_secrets_file: str = "config/client_secret.json"
@@ -91,6 +104,7 @@ class Settings:
     ui: UISettings = field(default_factory=UISettings)
     keybindings: KeybindingSettings = field(default_factory=KeybindingSettings)
     cache: CacheSettings = field(default_factory=CacheSettings)
+    transcripts: TranscriptSettings = field(default_factory=TranscriptSettings)
     youtube: YouTubeSettings = field(default_factory=YouTubeSettings)
     
     @classmethod
@@ -118,22 +132,28 @@ class Settings:
             for key, value in data['cache'].items():
                 if hasattr(settings.cache, key):
                     setattr(settings.cache, key, value)
-        
+
+        # Update transcript settings
+        if 'transcripts' in data:
+            for key, value in data['transcripts'].items():
+                if hasattr(settings.transcripts, key):
+                    setattr(settings.transcripts, key, value)
+
         # Update YouTube settings
         if 'youtube' in data:
             for key, value in data['youtube'].items():
                 if hasattr(settings.youtube, key):
                     setattr(settings.youtube, key, value)
-        
+
         return settings
     
     def merge(self, other: 'Settings') -> None:
         """Merge another Settings object into this one."""
         # Merge each section
-        for section in ['ui', 'keybindings', 'cache', 'youtube']:
+        for section in ['ui', 'keybindings', 'cache', 'transcripts', 'youtube']:
             self_section = getattr(self, section)
             other_section = getattr(other, section)
-            
+
             for key in vars(other_section):
                 value = getattr(other_section, key)
                 if value is not None:  # Only override non-None values
@@ -212,6 +232,7 @@ def save_settings(settings: Settings, config_dir: Optional[Path] = None) -> None
         'ui': vars(settings.ui),
         'keybindings': vars(settings.keybindings),
         'cache': vars(settings.cache),
+        'transcripts': vars(settings.transcripts),
         'youtube': vars(settings.youtube)
     }
     

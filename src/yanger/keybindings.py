@@ -97,6 +97,11 @@ class KeybindingRegistry:
         self.register("cw", "Rename playlist/video", KeyContext.GLOBAL, "Operations")
         self.register("o", "Open sort menu", KeyContext.VIDEO, "Operations")
         self.register("r", "Open in browser", KeyContext.GLOBAL, "Operations")
+
+        # Transcript operations
+        self.register("gt", "Fetch transcript for current video", KeyContext.VIDEO, "Transcript")
+        self.register("gT", "Toggle auto-fetch transcript mode", KeyContext.GLOBAL, "Transcript")
+        self.register("ge", "Export transcript to files", KeyContext.VIDEO, "Transcript")
         
     def _initialize_default_commands(self):
         """Initialize default commands."""
@@ -191,6 +196,17 @@ class KeybindingRegistry:
             "Show playlist statistics",
             ":stats",
             [":stats"]
+        )
+
+        self.register_command(
+            "transcript",
+            "Manage video transcripts",
+            ":transcript [fetch|export|clear] [options]",
+            [
+                ":transcript fetch",
+                ":transcript export ~/transcripts",
+                ":transcript clear"
+            ]
         )
         
     def register(self, key: str, description: str, 
