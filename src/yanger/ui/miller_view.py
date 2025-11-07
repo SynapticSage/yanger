@@ -578,31 +578,37 @@ class VideoColumn(ScrollableContainer):
 
 class PreviewPane(ScrollableContainer):
     """Right column showing video preview/metadata."""
-    
+
     DEFAULT_CSS = """
     PreviewPane {
         width: 1fr;
         height: 100%;
         padding: 1;
     }
-    
+
     PreviewPane > .preview-content {
         width: 100%;
     }
-    
+
     PreviewPane > .preview-title {
         text-style: bold;
         margin-bottom: 1;
     }
-    
+
     PreviewPane > .preview-field {
         margin-bottom: 1;
     }
-    
+
     PreviewPane > .preview-label {
         color: $text-muted;
     }
-    
+
+    PreviewPane > .preview-transcript {
+        margin-top: 1;
+        padding-top: 1;
+        border-top: solid $accent;
+    }
+
     PreviewPane > .empty-preview {
         width: 100%;
         height: 100%;
@@ -611,7 +617,18 @@ class PreviewPane(ScrollableContainer):
         text-style: italic;
     }
     """
-    
+
+    def __init__(self, cache=None, settings=None, *args, **kwargs):
+        """Initialize preview pane.
+
+        Args:
+            cache: PersistentCache instance for transcript access
+            settings: Settings instance for configuration
+        """
+        super().__init__(*args, **kwargs)
+        self.cache = cache
+        self.settings = settings
+
     def compose(self) -> ComposeResult:
         """Initial composition."""
         yield Static("Select a video to preview", classes="empty-preview")
@@ -663,6 +680,33 @@ class PreviewPane(ScrollableContainer):
                 desc += "..."
             await self.mount(Static(desc, classes="preview-field"))
 
+        # Transcript (if enabled and cached)
+        if self.cache and self.settings and self.settings.transcripts.enabled:
+            transcript_data = self.cache.get_transcript(video.id)
+            if transcript_data and transcript_data['fetch_status'] == 'SUCCESS':
+                try:
+                    from ..core.transcript_fetcher import TranscriptFetcher
+
+                    # Decompress transcript text
+                    text = TranscriptFetcher.decompress_transcript(transcript_data['transcript_text'])
+
+                    # Format for display
+                    max_chars = 1000
+                    if len(text) > max_chars:
+                        text = text[:max_chars] + "..."
+
+                    # Type string
+                    type_str = "auto-generated" if transcript_data['auto_generated'] else "manual"
+                    header = f"[dim]Transcript ({transcript_data['language']}, {type_str}):[/dim]"
+
+                    await self.mount(Static(header, classes="preview-transcript"))
+                    await self.mount(Static(text, classes="preview-field"))
+
+                except Exception as e:
+                    # Silently fail if transcript display fails
+                    import logging
+                    logging.getLogger(__name__).warning(f"Failed to display transcript: {e}")
+
 
 class MillerView(Widget):
     """Three-column Miller view container."""
@@ -677,9 +721,11 @@ class MillerView(Widget):
     
     # Track which column has focus (0=playlists, 1=videos, 2=preview)
     focused_column = reactive(0)
-    
-    def __init__(self, *args, **kwargs):
+
+    def __init__(self, cache=None, settings=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.cache = cache
+        self.settings = settings
         self.playlist_column: Optional[PlaylistColumn] = None
         self.video_column: Optional[VideoColumn] = None
         self.preview_pane: Optional[PreviewPane] = None
@@ -691,7 +737,7 @@ class MillerView(Widget):
         """Create the three columns."""
         self.playlist_column = PlaylistColumn(id="playlist-column")
         self.video_column = VideoColumn(id="video-column")
-        self.preview_pane = PreviewPane(id="preview-pane")
+        self.preview_pane = PreviewPane(cache=self.cache, settings=self.settings, id="preview-pane")
         self.search_input = SearchInput(
             on_search=self.on_search_submit,
             on_cancel=self.on_search_cancel
