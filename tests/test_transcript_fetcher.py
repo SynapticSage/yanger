@@ -49,7 +49,8 @@ class TestTranscriptFetcher:
 
     def test_compress_decompress_roundtrip(self):
         """Test compression and decompression preserve text."""
-        original_text = "This is a test transcript with multiple words."
+        # Use longer text for better compression ratio
+        original_text = "This is a test transcript. " * 50  # Repeat for better compression
         compressed = TranscriptFetcher.compress_transcript(original_text)
 
         assert isinstance(compressed, bytes)
@@ -129,7 +130,6 @@ class TestTranscriptFetcher:
 class TestTranscriptFetcherWithMockAPI:
     """Test TranscriptFetcher with mocked YouTube API."""
 
-    @patch('yanger.core.transcript_fetcher.TranscriptFetcher.__init__')
     def setup_mock_fetcher(self, mock_api, mock_errors=None):
         """Helper to create fetcher with mocked API."""
         fetcher = TranscriptFetcher.__new__(TranscriptFetcher)
