@@ -62,6 +62,13 @@ Issues = "https://github.com/yourusername/yanger/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Ensure non-Python assets are included in the distribution
+# so runtime CSS (app.tcss) is available when the package is installed.
+[tool.setuptools.package-data]
+yanger = [
+    "app.tcss",
+]
+
 [tool.black]
 line-length = 88
 target-version = ['py310', 'py311', 'py312']

@@ -1,8 +1,39 @@
 /* YouTube Ranger Theme */
-/* Created: 2025-08-03 */
+/* Modified: 2025-09-14 */
 
 Screen {
     background: $surface;
+}
+
+/* Global Input widget styles to ensure text visibility */
+Input {
+    color: white !important;
+    background: black !important;
+    text-style: not dim !important;
+}
+
+Input:focus {
+    color: white !important;
+    background: rgb(20, 20, 20) !important;
+    text-style: not dim !important;
+}
+
+/* Force all internal Input elements to be visible */
+Input * {
+    color: white !important;
+}
+
+Input > .input--placeholder {
+    color: gray !important;
+}
+
+Input > .input--cursor {
+    color: white !important;
+    background: white !important;
+}
+
+Input .input--suggestion {
+    color: darkgray !important;
 }
 
 #main-container {

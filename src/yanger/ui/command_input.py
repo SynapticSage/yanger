@@ -6,6 +6,7 @@ Provides a command line interface similar to vim/ranger.
 
 from typing import Callable, Optional, List
 import shlex
+import logging
 
 from textual.app import ComposeResult
 from textual.containers import Container
@@ -14,6 +15,9 @@ from textual import events
 from textual.suggester import Suggester
 
 from ..keybindings import registry
+
+
+logger = logging.getLogger(__name__)
 
 
 class CommandSuggester(Suggester):
@@ -72,19 +76,26 @@ class CommandInput(Container):
         height: 1;
         margin-top: 1;
         color: white !important;
-        background: #1e1e1e !important;
+        background: black !important;
+        text-style: not dim !important;
         border: tall $accent;
     }
     
     CommandInput > Input:focus {
         border: tall $primary;
         color: white !important;
-        background: #0a0a0a !important;
+        background: rgb(20, 20, 20) !important;
+        text-style: not dim !important;
+    }
+    
+    /* Override ALL internal Input elements */
+    CommandInput Input * {
+        color: white !important;
     }
     
     /* Target the actual text content area */
     CommandInput Input > .input--placeholder {
-        color: #666 !important;
+        color: gray !important;
     }
     
     CommandInput Input > .input--cursor {
@@ -93,7 +104,7 @@ class CommandInput(Container):
     }
     
     CommandInput Input .input--suggestion {
-        color: #888 !important;
+        color: darkgray !important;
     }
     
     CommandInput .command-hint {
@@ -122,9 +133,10 @@ class CommandInput(Container):
             suggester=CommandSuggester(),
             id="command-input-field"
         )
-        # Apply inline styles to ensure text visibility
+        # Force dark mode and explicit styles
         self.input_widget.styles.color = "white"
-        self.input_widget.styles.background = "#1e1e1e"
+        self.input_widget.styles.background = "black"
+        self.input_widget.styles.text_style = "not dim"
         
         self.hint_widget = Static("", classes="command-hint")
         
@@ -136,8 +148,20 @@ class CommandInput(Container):
         self.add_class("visible")
         if self.input_widget:
             self.input_widget.value = initial_text
+
+            # Force styles directly on the Input widget after showing
+            self.input_widget.styles.color = "white"
+            self.input_widget.styles.background = "rgb(0,0,0)"
+            self.input_widget.styles.text_style = "bold"
+
             self.input_widget.focus()
             self._update_hint(initial_text)
+
+            # Debug: Log actual styles
+            logger.debug(f"Input widget value: '{self.input_widget.value}'")
+            logger.debug(f"Input color: {self.input_widget.styles.color}")
+            logger.debug(f"Input background: {self.input_widget.styles.background}")
+            logger.debug(f"Input has focus: {self.input_widget.has_focus}")
             
     def hide(self) -> None:
         """Hide the command input."""

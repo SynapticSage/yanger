@@ -2,9 +2,10 @@
 
 Provides an overlay input field for searching videos.
 """
-# Created: 2025-08-08
+# Modified: 2025-09-14
 
 from typing import Optional, Callable
+import logging
 from textual.app import ComposeResult
 from textual.containers import Container
 from textual.widgets import Input, Static
@@ -12,6 +13,8 @@ from textual.widget import Widget
 from textual.reactive import reactive
 from textual import events
 from textual.binding import Binding
+
+logger = logging.getLogger(__name__)
 
 
 class SearchInput(Container):
@@ -34,25 +37,36 @@ class SearchInput(Container):
     
     SearchInput Input {
         width: 100%;
-        background: #1e1e1e !important;
+        background: black !important;
         color: white !important;
+        text-style: not dim !important;
         border: tall $accent;
     }
     
     SearchInput Input:focus {
         border: tall $primary;
         color: white !important;
-        background: #0a0a0a !important;
+        background: rgb(20, 20, 20) !important;
+        text-style: not dim !important;
+    }
+    
+    /* Override ALL internal Input elements */
+    SearchInput Input * {
+        color: white !important;
     }
     
     /* Target internal input elements */
     SearchInput Input > .input--placeholder {
-        color: #666 !important;
+        color: gray !important;
     }
     
     SearchInput Input > .input--cursor {
         color: white !important;
         background: white !important;
+    }
+    
+    SearchInput Input .input--suggestion {
+        color: darkgray !important;
     }
     
     SearchInput .search-label {
@@ -100,15 +114,16 @@ class SearchInput(Container):
                 placeholder="Search videos...",
                 id="search-input"
             )
-            # Apply inline styles to ensure text visibility
+            # Force inline styles to ensure text visibility
             self.input_field.styles.color = "white"
-            self.input_field.styles.background = "#1e1e1e"
+            self.input_field.styles.background = "black"
+            self.input_field.styles.text_style = "not dim"
             yield self.input_field
             yield Static("ESC to cancel", classes="search-hint")
             
     def show(self, placeholder: str = "Search videos...") -> None:
         """Show the search input and focus it.
-        
+
         Args:
             placeholder: Placeholder text for the input field
         """
@@ -116,7 +131,19 @@ class SearchInput(Container):
         if self.input_field:
             self.input_field.placeholder = placeholder
             self.input_field.value = ""
+
+            # Force styles directly on the Input widget after showing
+            self.input_field.styles.color = "white"
+            self.input_field.styles.background = "rgb(0,0,0)"
+            self.input_field.styles.text_style = "bold"
+
             self.input_field.focus()
+
+            # Debug: Log actual styles
+            logger.debug(f"Search input value: '{self.input_field.value}'")
+            logger.debug(f"Search color: {self.input_field.styles.color}")
+            logger.debug(f"Search background: {self.input_field.styles.background}")
+            logger.debug(f"Search has focus: {self.input_field.has_focus}")
             
     def hide(self) -> None:
         """Hide the search input."""

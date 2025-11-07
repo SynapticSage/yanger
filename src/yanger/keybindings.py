@@ -97,6 +97,7 @@ class KeybindingRegistry:
         self.register("cw", "Rename playlist/video", KeyContext.GLOBAL, "Operations")
         self.register("o", "Open sort menu", KeyContext.VIDEO, "Operations")
         self.register("r", "Open in browser", KeyContext.GLOBAL, "Operations")
+        self.register("B", "Bulk edit playlists and videos", KeyContext.GLOBAL, "Operations")
         
     def _initialize_default_commands(self):
         """Initialize default commands."""
@@ -191,6 +192,16 @@ class KeybindingRegistry:
             "Show playlist statistics",
             ":stats",
             [":stats"]
+        )
+
+        self.register_command(
+            "bulkedit",
+            "Bulk edit playlists and videos in text editor",
+            ":bulkedit [--dry-run]",
+            [
+                ":bulkedit",
+                ":bulkedit --dry-run"
+            ]
         )
         
     def register(self, key: str, description: str, 

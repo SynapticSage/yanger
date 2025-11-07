@@ -11,6 +11,7 @@ from datetime import datetime
 import logging
 
 from .models import Video, Playlist
+from .bulkedit import BulkEditChanges
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +243,140 @@ class RenameOperation(Operation):
         except Exception as e:
             logger.error(f"Failed to restore {self.item_type} name: {e}")
             return False
+
+
+class BulkEditOperation(Operation):
+    """Operation for bulk edit changes (moves, reorders, renames, deletions)."""
+
+    def __init__(self, api_client, changes: BulkEditChanges):
+        """Initialize bulk edit operation.
+
+        Args:
+            api_client: YouTube API client
+            changes: BulkEditChanges containing all changes to apply
+        """
+        super().__init__(f"Bulk edit: {changes.summary()}")
+        self.api_client = api_client
+        self.changes = changes
+        self.applied_moves = []
+        self.applied_reorders = []
+        self.applied_deletions = []
+
+    def execute(self) -> bool:
+        """Execute bulk edit changes.
+
+        Returns:
+            True if successful (even partial), False if complete failure
+        """
+        success_count = 0
+        total_operations = (len(self.changes.moves) + len(self.changes.reorders) +
+                          len(self.changes.deletions))
+
+        # Process deletions first
+        for video, playlist_id in self.changes.deletions:
+            try:
+                self.api_client.remove_video_from_playlist(video.playlist_item_id)
+                self.applied_deletions.append((video, playlist_id))
+                success_count += 1
+                logger.info(f"Deleted '{video.title}' from playlist")
+            except Exception as e:
+                logger.error(f"Failed to delete '{video.title}': {e}")
+
+        # Process moves
+        for move in self.changes.moves:
+            try:
+                # Add to target
+                new_item_id = self.api_client.add_video_to_playlist(
+                    move.video.id,
+                    move.target_playlist_id,
+                    position=move.new_position
+                )
+                # Remove from source
+                self.api_client.remove_video_from_playlist(
+                    move.video.playlist_item_id
+                )
+                self.applied_moves.append((move, new_item_id))
+                success_count += 1
+                logger.info(f"Moved '{move.video.title}' to different playlist")
+            except Exception as e:
+                logger.error(f"Failed to move '{move.video.title}': {e}")
+
+        # Process reorders
+        for reorder in sorted(self.changes.reorders, key=lambda r: r.new_position):
+            try:
+                self.api_client.update_video_position(
+                    reorder.video.playlist_item_id,
+                    reorder.new_position
+                )
+                self.applied_reorders.append(reorder)
+                success_count += 1
+                logger.info(f"Reordered '{reorder.video.title}' to position {reorder.new_position}")
+            except Exception as e:
+                logger.error(f"Failed to reorder '{reorder.video.title}': {e}")
+
+        self.executed = success_count > 0
+
+        if self.executed:
+            logger.info(f"Bulk edit completed: {success_count}/{total_operations} operations successful")
+
+        return self.executed
+
+    def undo(self) -> bool:
+        """Undo bulk edit changes.
+
+        Note: This is a best-effort undo. Some operations may not be fully reversible.
+
+        Returns:
+            True if undo attempted, False otherwise
+        """
+        if not self.executed:
+            return False
+
+        undo_count = 0
+
+        # Undo reorders (restore original positions)
+        for reorder in self.applied_reorders:
+            try:
+                self.api_client.update_video_position(
+                    reorder.video.playlist_item_id,
+                    reorder.old_position
+                )
+                undo_count += 1
+                logger.info(f"Restored position of '{reorder.video.title}'")
+            except Exception as e:
+                logger.error(f"Failed to restore position of '{reorder.video.title}': {e}")
+
+        # Undo moves (move back to original playlist)
+        for move, new_item_id in self.applied_moves:
+            try:
+                # Remove from target
+                self.api_client.remove_video_from_playlist(new_item_id)
+                # Add back to source
+                self.api_client.add_video_to_playlist(
+                    move.video.id,
+                    move.source_playlist_id
+                )
+                undo_count += 1
+                logger.info(f"Moved '{move.video.title}' back to original playlist")
+            except Exception as e:
+                logger.error(f"Failed to move '{move.video.title}' back: {e}")
+
+        # Undo deletions (re-add videos)
+        for video, playlist_id in self.applied_deletions:
+            try:
+                self.api_client.add_video_to_playlist(
+                    video.id,
+                    playlist_id
+                )
+                undo_count += 1
+                logger.info(f"Restored '{video.title}' to playlist")
+            except Exception as e:
+                logger.error(f"Failed to restore '{video.title}': {e}")
+
+        self.executed = False
+        logger.info(f"Bulk edit undo completed: {undo_count} operations undone")
+
+        return True
 
 
 class DeleteVideosOperation(Operation):

@@ -27,12 +27,14 @@ from .ui.command_input import CommandInput, parse_command
 from .ui.playlist_creation_modal import PlaylistCreationModal, PlaylistCreated
 from .ui.rename_modal import RenameModal, ItemRenamed
 from .ui.confirmation_modal import ConfirmationModal, ConfirmationResult
+from .ui.bulkedit_preview import BulkEditPreview, BulkEditConfirmed, BulkEditCancelled
 from .cache import PersistentCache
 from .keybindings import registry
 from .config.settings import load_settings
-from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation
+from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation, BulkEditOperation
 from .command_logger import CommandLogger
 from .export import PlaylistExporter
+from .bulkedit import BulkEditor
 
 
 logger = logging.getLogger(__name__)
@@ -97,6 +99,7 @@ class YouTubeRangerApp(App):
         self._operation_stack = OperationStack()
         self._cache = PersistentCache()  # Persistent SQLite cache
         self.offline_mode = False  # Track if running in offline mode
+        self.bulk_editor: Optional[BulkEditor] = None  # Initialized when API is ready
         
         # Data
         self.playlists: List[Playlist] = []
@@ -146,6 +149,24 @@ class YouTubeRangerApp(App):
     async def on_mount(self) -> None:
         """Initialize the application after mounting."""
         try:
+            # Best-effort: ensure our CSS is loaded even when running from a
+            # different working directory (e.g. editable installs, tests)
+            try:
+                from pathlib import Path as _Path
+                candidates = [
+                    _Path(__file__).with_name("app.tcss"),
+                    _Path.cwd() / "src" / "yanger" / "app.tcss",
+                    _Path.cwd() / "app.tcss",
+                ]
+                for css_path in candidates:
+                    if css_path.is_file():
+                        # Merge/override any existing stylesheet rules
+                        self.stylesheet.read(css_path)
+                        break
+            except Exception:
+                # Non-fatal; proceed with defaults if stylesheet can't be read
+                pass
+
             # Setup authentication
             await self.setup_authentication()
             
@@ -265,6 +286,9 @@ class YouTubeRangerApp(App):
             self.auth.authenticate()
             self.api_client = YouTubeAPIClient(self.auth)
             self.offline_mode = False
+
+            # Initialize bulk editor with API client
+            self.bulk_editor = BulkEditor(self.api_client)
             
         except FileNotFoundError:
             self.notify(
@@ -1012,6 +1036,10 @@ class YouTubeRangerApp(App):
                 if self.status_bar:
                     self.status_bar.update_status("", "")
             self._pending_c = False
+            event.stop()
+        # Check for 'B' - bulk edit
+        elif event.key == 'B':
+            await self.execute_bulkedit()
             event.stop()
         # THEN: Let miller view handle navigation keys, ranger commands, search, and visual mode
         # V = visual mode, v = invert selection, space = toggle mark (no auto-advance)
@@ -1825,6 +1853,11 @@ class YouTubeRangerApp(App):
             else:
                 self.notify("Usage: :delete [videos|playlist]", severity="warning")
         
+        elif cmd_name == "bulkedit":
+            # Execute bulk edit
+            dry_run = "--dry-run" in args if args else False
+            self.call_later(self.execute_bulkedit, dry_run=dry_run)
+
         elif cmd_name == "stats":
             if self.current_playlist and self.current_videos:
                 total_duration = sum(v.duration or 0 for v in self.current_videos)
@@ -1850,6 +1883,119 @@ class YouTubeRangerApp(App):
         # Just hide the command input
         if self.command_input:
             self.command_input.hide()
+
+    async def execute_bulkedit(self, dry_run: bool = False) -> None:
+        """Execute bulk edit functionality."""
+        if not self.bulk_editor:
+            self.notify("Bulk editor not available", severity="error")
+            return
+
+        if not self.playlists:
+            self.notify("No playlists available for bulk edit", severity="warning")
+            return
+
+        # Prepare data for bulk edit
+        videos_by_playlist = {}
+
+        # Collect all videos from all playlists
+        for playlist in self.playlists:
+            if playlist.is_virtual:
+                continue  # Skip virtual playlists
+
+            # Try to get cached videos first
+            videos = self._cache.get_playlist_videos(playlist.id)
+
+            if not videos and self.api_client:
+                # Fetch from API if not cached
+                try:
+                    videos = await asyncio.to_thread(
+                        self.api_client.get_playlist_videos,
+                        playlist.id
+                    )
+                    # Cache the fetched videos
+                    self._cache.cache_playlist(playlist, videos)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch videos for playlist {playlist.title}: {e}")
+                    videos = []
+
+            videos_by_playlist[playlist.id] = videos
+
+        # Execute bulk edit
+        try:
+            changes, results = await asyncio.to_thread(
+                self.bulk_editor.bulk_edit,
+                self.playlists,
+                videos_by_playlist,
+                dry_run=dry_run
+            )
+
+            if changes.is_empty():
+                self.notify("No changes made", timeout=2)
+                return
+
+            # Show preview modal
+            preview = BulkEditPreview(changes)
+            preview.dry_run = dry_run
+            self.push_screen(preview)
+
+        except Exception as e:
+            logger.error(f"Error during bulk edit: {e}")
+            self.notify(f"Bulk edit failed: {e}", severity="error")
+
+    async def on_bulk_edit_confirmed(self, message: BulkEditConfirmed) -> None:
+        """Handle bulk edit confirmation."""
+        if not self.bulk_editor or not self.api_client:
+            self.notify("Bulk editor not available", severity="error")
+            return
+
+        changes = message.changes
+        dry_run = getattr(changes, 'dry_run', False)
+
+        try:
+            # Create operation for undo support
+            if not dry_run:
+                bulk_op = BulkEditOperation(self.api_client, changes)
+                success = await asyncio.to_thread(self._operation_stack.execute, bulk_op)
+
+                if success:
+                    self.notify(f"Bulk edit completed: {changes.summary()}", timeout=5)
+
+                    # Invalidate cache for affected playlists
+                    affected_playlists = set()
+                    for move in changes.moves:
+                        affected_playlists.add(move.source_playlist_id)
+                        affected_playlists.add(move.target_playlist_id)
+                    for reorder in changes.reorders:
+                        affected_playlists.add(reorder.playlist_id)
+                    for video, playlist_id in changes.deletions:
+                        affected_playlists.add(playlist_id)
+
+                    for playlist_id in affected_playlists:
+                        self._cache.invalidate_playlist(playlist_id)
+
+                    # Refresh current view
+                    if self.current_playlist:
+                        await self.load_playlist_videos(self.current_playlist)
+
+                    # Update status bar
+                    if self.status_bar:
+                        self.status_bar.update_status(
+                            "Press 'u' to undo bulk edit",
+                            f"{self.api_client.get_quota_remaining()}/10000"
+                        )
+                else:
+                    self.notify("Bulk edit failed", severity="error")
+            else:
+                # Dry run - just show what would happen
+                self.notify(f"DRY RUN - Would apply: {changes.summary()}", timeout=5)
+
+        except Exception as e:
+            logger.error(f"Error applying bulk edit: {e}")
+            self.notify(f"Bulk edit failed: {e}", severity="error")
+
+    def on_bulk_edit_cancelled(self, message: BulkEditCancelled) -> None:
+        """Handle bulk edit cancellation."""
+        self.notify("Bulk edit cancelled", timeout=2)
     
     async def handle_delete_videos(self) -> None:
         """Handle dD command to delete videos from playlist."""
