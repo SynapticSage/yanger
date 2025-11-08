@@ -3,68 +3,69 @@
 
 ui:
   colorscheme: default
-  show_hidden: false  # Show private playlists
+  show_hidden: false # Show private playlists
   preview_lines: 10
   column_ratios: [0.3, 0.4, 0.3]
   show_icons: true
   confirm_delete: true
   auto_refresh: false
-  refresh_interval: 300  # seconds
+  refresh_interval: 300 # seconds
 
 keybindings:
   # General
-  quit: ['q', 'Q']
-  help: ['?']
-  command: [':']
-  search: ['/']
-  
+  quit: ["q", "Q"]
+  help: ["?"]
+  command: [":"]
+  search: ["/"]
+
   # Navigation
-  up: ['k']
-  down: ['j']
-  left: ['h']
-  right: ['l']
-  top: ['g', 'g']
-  bottom: ['G']
-  
+  up: ["k"]
+  down: ["j"]
+  left: ["h"]
+  right: ["l"]
+  top: ["g", "g"]
+  bottom: ["G"]
+
   # Selection
-  mark: [' ']  # space
-  visual: ['v']
-  unselect_all: ['u', 'v']
-  invert_selection: ['V']
-  
+  mark: [" "] # space
+  visual: ["v"]
+  unselect_all: ["u", "v"]
+  invert_selection: ["V"]
+
   # Operations
-  copy: ['y', 'y']
-  cut: ['d', 'd']
-  paste: ['p', 'p']
-  delete: ['d', 'D']
-  rename: ['c', 'w']
-  
+  copy: ["y", "y"]
+  cut: ["d", "d"]
+  paste: ["p", "p"]
+  delete: ["d", "D"]
+  rename: ["c", "w"]
+
   # Playlist operations
-  new_playlist: ['g', 'n']
-  delete_playlist: ['g', 'd']
-  refresh: ['g', 'r']
-  refresh_all: ['g', 'R']
+  new_playlist: ["g", "n"]
+  delete_playlist: ["g", "d"]
+  refresh: ["g", "r"]
+  refresh_all: ["g", "R"]
 
 cache:
   enabled: true
   directory: ".yanger_cache"
-  ttl: 3600  # 1 hour
+  ttl: 3600 # 1 hour
   max_size_mb: 100
-  load_on_startup: false  # Set to true to load playlists automatically
+  load_on_startup: false # Set to true to load playlists automatically
 
 transcripts:
   enabled: true
-  auto_fetch: false  # Automatically fetch transcripts on hover (vs manual with 'gt')
-  store_in_db: true  # Store transcripts in SQLite database
-  store_compressed: true  # Compress transcripts with gzip to save space
-  export_directory: null  # External folder for transcript files (null = disabled, or path like ~/.cache/yanger/transcripts)
-  export_txt: true  # Export plain text transcript files
-  export_json: true  # Export JSON files with timestamps and metadata
-  languages: ["en"]  # Preferred transcript languages (in priority order)
+  auto_fetch: false # Automatically fetch transcripts on hover (vs manual with 'gt')
+  store_in_db: true # Store transcripts in SQLite database
+  store_compressed: true # Compress transcripts with gzip to save space
+  export_directory: "~/.cache/yanger/transcripts" # External folder for transcript files (null = disabled, or path like ~/.cache/yanger/transcripts)
+  export_txt: true # Export plain text transcript files
+  export_json: true # Export JSON files with timestamps and metadata
+  languages: ["en"] # Preferred transcript languages (in priority order)
 
 youtube:
   client_secrets_file: "config/client_secret.json"
   token_file: "token.json"
   max_results_per_page: 50
-  quota_warning_threshold: 7500  # 75%
-  quota_critical_threshold: 9000  # 90%
+  quota_warning_threshold: 7500 # 75%
+  quota_critical_threshold: 9000 # 90%
+

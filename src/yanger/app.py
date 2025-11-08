@@ -929,8 +929,174 @@ class YouTubeRangerApp(App):
         """Enter command mode."""
         if self.command_input:
             self.command_input.show(":")
-    
-    
+
+    async def _auto_fetch_transcript(self, video: Video) -> None:
+        """Auto-fetch transcript in background (silent, no notifications)."""
+        try:
+            from .core.transcript_fetcher import TranscriptFetcher
+            fetcher = TranscriptFetcher(preferred_languages=self.settings.transcripts.languages)
+
+            # Run in thread since it's I/O bound
+            transcript_data, status = await asyncio.to_thread(
+                fetcher.fetch_transcript,
+                video.id
+            )
+
+            if status == 'SUCCESS' and transcript_data:
+                # Compress transcript text
+                compressed_text = TranscriptFetcher.compress_transcript(
+                    TranscriptFetcher.format_as_text(transcript_data)
+                )
+                # Convert to JSON for storage
+                transcript_json = TranscriptFetcher.format_as_json(transcript_data)
+
+                # Cache the transcript
+                self._cache.cache_transcript(
+                    video.id,
+                    compressed_text,
+                    transcript_json,
+                    transcript_data.language,
+                    transcript_data.auto_generated,
+                    status
+                )
+
+                # Refresh preview pane if this is still the current video
+                if self.current_video and self.current_video.id == video.id:
+                    if self.status_bar:
+                        lang_str = f"{transcript_data.language}" + (" [auto]" if transcript_data.auto_generated else "")
+                        self.status_bar.update_status(f"Transcript loaded ({lang_str})", "")
+                    if self.miller_view and self.miller_view.preview_pane:
+                        await self.miller_view.preview_pane.show_video(video)
+            else:
+                # Cache the status to avoid refetching
+                self._cache.cache_transcript(
+                    video.id,
+                    None,
+                    None,
+                    None,
+                    False,
+                    status
+                )
+        except Exception as e:
+            # Silent failure for auto-fetch - log but don't notify
+            logger.warning(f"Auto-fetch transcript failed for {video.id}: {e}")
+
+    async def fetch_transcript_for_current_video(self) -> None:
+        """Fetch transcript for the currently selected video."""
+        if not self.current_video:
+            self.notify("No video selected", severity="warning")
+            return
+
+        # Show feedback that fetch is starting
+        self.notify(f"Fetching transcript for: {self.current_video.title[:50]}...")
+
+        # Use TranscriptFetcher from core
+        from .core.transcript_fetcher import TranscriptFetcher
+        fetcher = TranscriptFetcher(preferred_languages=self.settings.transcripts.languages)
+
+        # Run in thread since it's I/O bound
+        transcript_data, status = await asyncio.to_thread(
+            fetcher.fetch_transcript,
+            self.current_video.id
+        )
+
+        if status == 'SUCCESS' and transcript_data:
+            # Compress transcript text
+            compressed_text = TranscriptFetcher.compress_transcript(
+                TranscriptFetcher.format_as_text(transcript_data)
+            )
+            # Convert to JSON for storage
+            transcript_json = TranscriptFetcher.format_as_json(transcript_data)
+
+            # Cache the transcript
+            self._cache.cache_transcript(
+                self.current_video.id,
+                compressed_text,
+                transcript_json,
+                transcript_data.language,
+                transcript_data.auto_generated,
+                status
+            )
+
+            lang_str = f"{transcript_data.language}" + (" [auto]" if transcript_data.auto_generated else "")
+            self.notify(f"Transcript fetched ({lang_str})", timeout=3)
+
+            # Refresh preview pane to show transcript
+            if self.miller_view and self.miller_view.preview_pane:
+                await self.miller_view.preview_pane.show_video(self.current_video)
+
+        elif status == 'NOT_AVAILABLE':
+            # Cache the not-available status to avoid refetching
+            self._cache.cache_transcript(
+                self.current_video.id,
+                None,
+                None,
+                None,
+                False,
+                status
+            )
+            self.notify("No transcript available for this video", severity="warning")
+        else:
+            # Error status - extract error message if present
+            error_msg = "Error fetching transcript"
+            if status.startswith('ERROR:'):
+                error_details = status[6:].strip()  # Remove "ERROR:" prefix
+                error_msg = f"Transcript error: {error_details}"
+
+            self.notify(error_msg, severity="error")
+            logger.error(f"Transcript fetch failed for {self.current_video.id}: {status}")
+
+    async def toggle_auto_fetch_transcript(self) -> None:
+        """Toggle auto-fetch transcript mode."""
+        # Toggle the setting
+        self.settings.transcripts.auto_fetch = not self.settings.transcripts.auto_fetch
+
+        if self.settings.transcripts.auto_fetch:
+            self.notify("Auto-fetch transcripts: ON", timeout=3)
+        else:
+            self.notify("Auto-fetch transcripts: OFF", timeout=3)
+
+    async def export_transcript(self) -> None:
+        """Export transcript for the currently selected video."""
+        if not self.current_video:
+            self.notify("No video selected", severity="warning")
+            return
+
+        # Check if transcript is cached
+        transcript_data = self._cache.get_transcript(self.current_video.id)
+        if not transcript_data or transcript_data['fetch_status'] != 'SUCCESS':
+            self.notify("No transcript cached. Press 'gt' to fetch first.", severity="warning")
+            return
+
+        # Check export directory configuration
+        export_dir = self.settings.transcripts.export_directory
+        if not export_dir:
+            self.notify("No export directory configured in settings", severity="warning")
+            return
+
+        from pathlib import Path
+        export_path = Path(export_dir)
+
+        # Export using cache method
+        try:
+            exported_files = await asyncio.to_thread(
+                self._cache.export_transcript,
+                self.current_video.id,
+                export_path,
+                export_txt=self.settings.transcripts.export_txt,
+                export_json=self.settings.transcripts.export_json
+            )
+
+            if exported_files:
+                file_list = ", ".join([str(f.name) for f in exported_files])
+                self.notify(f"Exported: {file_list}", timeout=4)
+            else:
+                self.notify("No files exported (check settings)", severity="warning")
+        except Exception as e:
+            logger.error(f"Error exporting transcript: {e}")
+            self.notify(f"Export failed: {e}", severity="error")
+
+
     async def on_key(self, event: events.Key) -> None:
         """Handle global key events."""
         
@@ -1003,14 +1169,20 @@ class YouTubeRangerApp(App):
         elif event.key == 'g' and not getattr(self, '_pending_g', False):
             self._pending_g = True
             if self.status_bar:
-                self.status_bar.update_status("Press 'n' for new playlist, 'd' to delete playlist", "")
+                self.status_bar.update_status("Press 'n':new 'd':delete 't':transcript 'T':auto-fetch 'e':export 'g':top", "")
             event.stop()
-        # Check for 'gn' or 'gd' commands
+        # Check for 'gn' or 'gd' or 'gt' or 'gT' or 'ge' commands
         elif hasattr(self, '_pending_g') and self._pending_g:
             if event.key == 'n':
                 self.action_new_playlist()
             elif event.key == 'd':
                 await self.handle_delete_playlist()
+            elif event.key == 't':
+                await self.fetch_transcript_for_current_video()
+            elif event.key == 'T':
+                await self.toggle_auto_fetch_transcript()
+            elif event.key == 'e':
+                await self.export_transcript()
             elif event.key == 'g':
                 # Double 'g' - pass to miller view for go to top
                 if self.miller_view:
@@ -1073,6 +1245,16 @@ class YouTubeRangerApp(App):
         self.current_video = video
         if self.miller_view:
             await self.miller_view.update_preview(video)
+
+        # Auto-fetch transcript if enabled
+        if self.settings.transcripts.enabled and self.settings.transcripts.auto_fetch:
+            # Check if transcript is already cached
+            transcript_status = self._cache.get_transcript_status(video.id)
+
+            # Only fetch if not already cached (SUCCESS) or known unavailable
+            if transcript_status not in ['SUCCESS', 'NOT_AVAILABLE']:
+                # Fetch in background without blocking UI
+                asyncio.create_task(self._auto_fetch_transcript(video))
     
     async def fetch_metadata_for_current_playlist(self) -> None:
         """Fetch metadata for videos in current virtual playlist."""
@@ -1922,8 +2104,7 @@ class YouTubeRangerApp(App):
 
         # Execute bulk edit
         try:
-            changes, results = await asyncio.to_thread(
-                self.bulk_editor.bulk_edit,
+            changes, results = await self.bulk_editor.bulk_edit(
                 self.playlists,
                 videos_by_playlist,
                 dry_run=dry_run

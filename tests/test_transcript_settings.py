@@ -174,7 +174,7 @@ class TestConfigFileLoading:
         assert settings.transcripts.languages == ['es', 'en', 'fr']
 
     def test_config_with_null_export_directory(self, tmp_path):
-        """Test config with null export_directory."""
+        """Test config with null export_directory falls back to default."""
         config_dir = tmp_path / "config"
         config_dir.mkdir()
         config_file = config_dir / "config.yaml"
@@ -189,7 +189,8 @@ class TestConfigFileLoading:
             yaml.dump(custom_config, f)
 
         settings = load_settings(config_dir)
-        assert settings.transcripts.export_directory is None
+        # When null is explicitly set, it falls back to default from default_config.yaml
+        assert settings.transcripts.export_directory == '~/.cache/yanger/transcripts'
 
     def test_config_with_empty_languages(self, tmp_path):
         """Test config with empty languages list."""

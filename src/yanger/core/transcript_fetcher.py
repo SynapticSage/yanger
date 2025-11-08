@@ -94,18 +94,21 @@ class TranscriptFetcher:
 
             # Try preferred languages first
             transcript = None
+            NoTranscriptFound = self.errors.get('NoTranscriptFound', Exception)
+
             for lang in self.preferred_languages:
                 try:
                     transcript = transcript_list.find_transcript([lang])
                     break
-                except:
+                except NoTranscriptFound:
+                    # Language not available, try next
                     continue
 
             # If no preferred language found, get any available transcript
             if not transcript:
                 try:
                     transcript = transcript_list.find_generated_transcript(['en'])
-                except:
+                except NoTranscriptFound:
                     # Get first available transcript
                     available = list(transcript_list)
                     if available:
@@ -151,8 +154,9 @@ class TranscriptFetcher:
                 logger.warning(f"Video {video_id} unavailable")
                 return None, 'NOT_AVAILABLE'
             else:
-                logger.error(f"Error fetching transcript for {video_id}: {e}")
-                return None, 'ERROR'
+                error_msg = f"Error fetching transcript for {video_id}: {error_name}: {str(e)}"
+                logger.error(error_msg)
+                return None, f'ERROR: {str(e)}'
 
     @staticmethod
     def compress_transcript(text: str) -> bytes:

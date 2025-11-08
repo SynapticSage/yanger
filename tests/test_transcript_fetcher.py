@@ -223,7 +223,8 @@ class TestTranscriptFetcherWithMockAPI:
         result, status = fetcher.fetch_transcript("error_video")
 
         assert result is None
-        assert status == 'ERROR'
+        assert status.startswith('ERROR:')  # Error status now includes error message
+        assert 'Network error' in status
 
 
 class TestTranscriptData:
