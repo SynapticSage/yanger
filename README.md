@@ -1,94 +1,71 @@
 <div align="center">
   <img src="assets/logo.png" alt="YouTube Ranger Logo" width="200">
-  
+
   # YouTube Ranger (yanger)
-  
+
   **A terminal-based file manager for YouTube playlists**
-  
-  Navigate and manage your YouTube playlists with vim-like keybindings, persistent caching, and powerful playlist operations.
-  
+
+  Navigate and manage your YouTube playlists with vim-like keybindings and ranger-style interface.
+
   ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
   ![Status](https://img.shields.io/badge/status-alpha-red)
-  
+
   ---
-  
-  > 🚨 **ALPHA SOFTWARE WARNING** 🚨
-  > 
-  > This project is in **ALPHA** stage. This means:
-  > - It may contain bugs
-  > - Some features may not work as expected
-  > - YouTube API operations are irreversible (deletions, moves, etc.)
-  > 
-  > **Use at your own risk!** Consider backing up your playlists before use.
+
+  > 🚨 **ALPHA SOFTWARE** 🚨
   >
-  > In my hands, this library hastens my interaction with youtube videos
-  > and their playlists. So I'm experiencing a net benefit. More to come.
-  
+  > YouTube API operations are **irreversible** (deletions, moves, etc.).
+  > Consider backing up your playlists before use.
+
   ---
 </div>
 
 ## Features
 
-- 📁 **Ranger-style Interface**: Three-column miller view for intuitive navigation
-- ⌨️ **Vim Keybindings**: Navigate with hjkl, gg/G, and other familiar commands
-- ✂️ **Cut/Copy/Paste**: Move videos between playlists as easily as moving files
-- 🎯 **Visual Mode**: Range selection for bulk operations (like ranger)
-- 🔍 **Search & Filter**: Find videos quickly with highlighting
-- 💾 **Persistent Cache**: SQLite-based caching across sessions
-- 🔄 **Smart Refresh**: Only fetch from API when needed
-- ❓ **Built-in Help**: Dynamic keybinding display
-- 💬 **Command Mode**: Tab-completed commands for advanced operations
-- 📊 **Quota Management**: Built-in tracking to stay within YouTube API limits
-- 🔢 **Sort Videos**: By title, date, views, duration, position
-- 📥 **Google Takeout Import**: Import Watch Later and History from Google Takeout
-- 🌐 **Open in Browser**: Open videos/playlists directly in your browser
-- 🔄 **Auto Metadata Fetching**: Automatically fetch missing video titles
-- 📋 **Virtual Playlists**: Local playlists from imported data
-- ↩️ **Undo/Redo**: Full undo/redo support for all operations
-- ➕ **Playlist Creation**: Create new playlists with privacy settings
-- ✏️ **Rename Operations**: Rename playlists and videos in-place
-- 🗑️ **Delete Operations**: Delete videos from playlists or entire playlists
-- 📤 **Export Playlists**: Export to JSON/YAML/CSV formats
-- 📝 **Command Logging**: Log all keyboard inputs and operations for debugging
-- 📜 **Transcript Caching**: Fetch, cache, and display video transcripts with compression
-- 🔤 **Multi-language Support**: Fetch transcripts in preferred languages
-- 💾 **Transcript Export**: Export transcripts to text and JSON formats
-- ✏️ **Bulk Edit**: Edit playlists and videos in external text editor
+- **Ranger-style Interface**: Three-column miller view for intuitive navigation
+- **Vim Keybindings**: Navigate with hjkl, gg/G, visual mode, and familiar commands
+- **Cut/Copy/Paste**: Move videos between playlists as easily as files
+- **Persistent Cache**: SQLite-based caching reduces API calls by ~95%
+- **Undo/Redo**: Full operation history with u/U commands
+- **Command Mode**: Tab-completed commands for advanced operations
+- **Google Takeout Import**: Access Watch Later and History (unavailable via API)
+- **Transcript Caching**: Fetch, cache, and display video transcripts
+- **Bulk Edit**: Edit playlists and videos in external text editor
+- **Smart Refresh**: Only fetch from API when needed
+- **Quota Management**: Built-in tracking for YouTube API limits
+- **Search & Filter**: Find videos quickly with highlighting
 
-## Quick Start
+## ⚡ Quick Start
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.10+
 - YouTube Data API v3 credentials
 
 ### Installation
 
-1. Clone the repository:
 ```bash
+# Clone and install
 git clone https://github.com/yourusername/yanger.git
 cd yanger
-```
-
-2. Install with pip:
-```bash
 pip install -e .
 ```
 
-3. Set up YouTube API credentials:
-   - Go to [Google Cloud Console](https://console.cloud.google.com/)
-   - Create a new project or select existing
-   - Enable YouTube Data API v3
-   - Create OAuth 2.0 credentials (Desktop application type)
-   - Download credentials and save as `config/client_secret.json`
+### API Setup
 
-4. First run (will authenticate):
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create project and enable YouTube Data API v3
+3. Create OAuth 2.0 credentials (Desktop application)
+4. Download and save as `config/client_secret.json`
+
+### First Run
+
 ```bash
-yanger
+yanger  # Will authenticate on first run
 ```
 
-## Keybindings
+## 🔑 Keybindings
 
 ### Navigation
 | Key | Action |
@@ -104,7 +81,6 @@ yanger
 | `V` | Visual mode (range selection) |
 | `v` | Invert selection |
 | `uv` | Unmark all videos |
-| `uV` | Visual unmark mode |
 
 ### Operations
 | Key | Action |
@@ -112,26 +88,23 @@ yanger
 | `dd` | Cut selected/marked videos |
 | `yy` | Copy selected/marked videos |
 | `pp` | Paste videos from clipboard |
-| `dD` | Delete selected/marked videos permanently |
-| `u` | Undo last operation |
-| `U` | Redo last undone operation |
+| `dD` | Delete selected/marked videos |
+| `u/U` | Undo/redo last operation |
 | `gn` | Create new playlist |
 | `gd` | Delete current playlist |
 | `cw` | Rename playlist/video |
 | `o` | Open sort menu |
-| `r` | Open video(s)/playlist in browser |
-| `M` | Fetch metadata for virtual playlist videos |
-| `B` | Bulk edit playlists/videos in text editor |
-| `gt` | Fetch transcript for current video |
-| `gT` | Toggle auto-fetch transcript mode |
-| `ge` | Export transcript to files |
+| `r` | Open in browser |
+| `B` | Bulk edit in text editor |
+| `gt` | Fetch transcript |
+| `gT` | Toggle auto-fetch transcripts |
+| `ge` | Export transcript |
 
 ### Search
 | Key | Action |
 |-----|--------|
 | `/` | Search in current list |
-| `n` | Next search result |
-| `N` | Previous search result |
+| `n/N` | Next/previous result |
 | `ESC` | Cancel search |
 
 ### Application
@@ -143,397 +116,176 @@ yanger
 | `Ctrl+R` | Refresh current view |
 | `Ctrl+Shift+R` | Refresh all (clear cache) |
 
-## Command Mode
+## 💬 Command Mode
 
-Press `:` to enter command mode with tab completion:
-
-### Available Commands
+Press `:` for tab-completed commands:
 
 ```vim
-:refresh [all]           # Refresh current view or all playlists
+:refresh [all]           # Refresh view or all playlists
 :cache [status|clear]    # Manage cache
-:sort <field> [order]    # Sort videos
+:sort <field> [order]    # Sort videos by title/date/views/duration
 :filter <criteria>       # Filter videos
-:clear [marks|search]    # Clear selections/search
-:delete [videos|playlist] # Delete videos or playlist
-:export [filename]       # Export playlist(s) to JSON/YAML/CSV
+:export [filename]       # Export to JSON/YAML/CSV
 :quota                   # Show API quota usage
-:stats                   # Show playlist statistics
+:stats                   # Playlist statistics
 :bulkedit [--dry-run]    # Bulk edit in external editor
-:transcript fetch        # Fetch transcript for current video
-:transcript export <dir> # Export transcript to directory
-:transcript clear        # Clear transcript cache
-:help [command]          # Get help for command
+:transcript <action>     # Manage transcripts
 ```
 
-## Command Logging
+## ⚙️ Configuration
 
-Yanger can log all keyboard inputs and operations for debugging and auditing:
-
-### Enable Logging
-
-```bash
-# Log all operations to a file
-yanger run --log session.json
-
-# Log with different verbosity levels
-yanger run --log debug.json --log-level DEBUG
-yanger run --log info.json --log-level INFO
-```
-
-### Log Levels
-
-- **DEBUG**: Logs every keystroke, API call, and internal operation
-- **INFO**: Logs commands, actions, and major operations (default)
-- **WARNING**: Logs only warnings and errors
-- **ERROR**: Logs only errors
-
-### Log Format
-
-Logs are saved in line-delimited JSON format for easy parsing:
-
-```json
-{"type": "SESSION_START", "session_id": "20250821_143022", "timestamp": "2025-08-21T14:30:22.123456"}
-{"type": "KEY", "key": "j", "context": "playlist_list", "timestamp": "2025-08-21T14:30:25.234567"}
-{"type": "ACTION", "action": "navigate_down", "details": {"from": "Music", "to": "Tutorials"}}
-{"type": "COMMAND", "command": "sort", "args": "title", "success": true}
-{"type": "OPERATION", "operation": "paste_videos", "success": true, "details": {"count": 3}}
-```
-
-### Use Cases
-
-- **Debugging**: Track exact sequence of actions leading to issues
-- **Auditing**: Review what operations were performed
-- **Analytics**: Analyze usage patterns and common workflows
-- **Testing**: Record and replay user sessions
-
-## Google Takeout Import
-
-Import your Watch Later and History playlists from Google Takeout:
-
-### Export from Google Takeout
-1. Go to [Google Takeout](https://takeout.google.com/)
-2. Select "YouTube and YouTube Music"
-3. Choose format: JSON
-4. Download and extract the archive
-
-### Import into Yanger
-
-```bash
-# Import from extracted folder
-yanger takeout ~/Downloads/Takeout/
-
-# Import from multiple archives
-yanger takeout Takeout-1/ Takeout-2/ --merge
-
-# Import from zip file
-yanger takeout ~/Downloads/takeout-20240320.zip
-```
-
-### Fetch Video Metadata
-
-Google Takeout only provides video IDs. Fetch titles and metadata:
-
-```bash
-# Fetch metadata for all videos without titles
-yanger fetch-metadata
-
-# Fetch for specific playlist
-yanger fetch-metadata --playlist "Watch Later (Imported)"
-
-# Fetch only recent videos
-yanger fetch-metadata --days-ago 30
-
-# Limit number of videos
-yanger fetch-metadata --limit 100
-```
-
-### Managing Virtual Playlists
-
-```bash
-# Remove duplicate playlists
-yanger dedupe-virtual
-
-# Export all playlists (real and virtual)
-yanger export -o backup.json
-
-# Export only virtual playlists
-yanger export --no-real -o virtual-playlists.json
-```
-
-### Features
-- ✅ Import Watch Later (unavailable via API since 2016)
-- ✅ Import full History (API only provides partial access)
-- ✅ Automatic deduplication
-- ✅ Merge with existing imports
-- ✅ Auto-fetch metadata on playlist view
-- ✅ Pagination for large playlists (7000+ videos)
-
-## Persistent Cache
-
-Yanger uses SQLite to cache playlists and videos across sessions:
-
-### Features
-- **Location**: `~/.cache/yanger/cache.db`
-- **TTL**: 7 days by default
-- **Auto-cleanup**: Expired entries removed automatically
-
-### Benefits
-- ⚡ Instant navigation for cached content
-- 📉 Dramatic reduction in API quota usage
-- 🌐 Offline browsing of previously viewed playlists
-- 🚀 Fast startup - no initial API calls
-
-### Refresh Behavior
-- **Normal navigation**: Uses cache (no API calls)
-- **Ctrl+R**: Refreshes only current view
-- **Ctrl+Shift+R**: Clears cache and refreshes everything
-- **New playlists**: Fetched automatically from API
-
-## Configuration
-
-Configuration files are stored in `~/.config/yanger/`:
-
-### Cache Settings
-
-Edit `~/.config/yanger/config.yaml`:
+Configuration: `~/.config/yanger/config.yaml`
 
 ```yaml
 cache:
   enabled: true
-  persistent: true
-  directory: ".cache/yanger"  # Relative to home
-  ttl_days: 7
+  ttl_days: 7                        # Cache duration
   auto_cleanup: true
-  max_size_mb: 100
-  show_all_virtual_playlists: false  # Show only Watch Later/History by default
+  show_all_virtual_playlists: false  # Show only Watch Later/History
   auto_fetch_metadata: true          # Auto-fetch missing titles
-  auto_fetch_batch_size: 20          # Videos to fetch per batch
+  auto_fetch_batch_size: 20
 
 transcripts:
   enabled: true
-  auto_fetch: false                  # Auto-fetch transcripts on hover
-  store_in_db: true                  # Cache in SQLite database
-  store_compressed: true             # Compress with gzip
-  export_directory: null             # Optional external folder
-  export_txt: true                   # Export plain text files
-  export_json: true                  # Export JSON with timestamps
+  auto_fetch: false                  # Auto-fetch on navigation
+  store_in_db: true                  # Cache in SQLite
+  store_compressed: true             # Compress with gzip (~70% smaller)
+  export_directory: ~/.cache/yanger/transcripts
+  export_txt: true
+  export_json: true
   languages: ["en"]                  # Preferred languages
 ```
 
-## Video Transcript Caching
+### Cache Behavior
 
-Yanger can fetch, cache, and display video transcripts:
+- **Normal navigation**: Uses cache (no API calls)
+- **Ctrl+R**: Refreshes current view only
+- **Ctrl+Shift+R**: Clears cache and refreshes all
+- **Location**: `~/.cache/yanger/cache.db`
+- **Benefits**: Instant startup, offline browsing, 95% reduction in API usage
 
-### Features
-- 📜 **Automatic Display**: Transcripts appear at bottom of preview pane when available
-- 🗜️ **Compressed Storage**: Transcripts stored compressed with gzip to save space
-- 🌍 **Multi-language**: Fetch transcripts in your preferred languages
-- 💾 **Dual Storage**: Store in database and/or export to external files
-- 📄 **Multiple Formats**: Export as plain text or JSON with timestamps
-- ⚡ **Smart Caching**: Fetch once, use forever (or until cleared)
+## 📜 Advanced Features
 
-### Usage
+### Video Transcript Caching
 
-#### Fetch Transcripts
+Fetch and display video transcripts with automatic caching.
+
+**Fetch Transcripts**:
+- Press `gt` to fetch transcript for current video
+- Press `gT` to toggle auto-fetch mode
+- Use `:transcript fetch` in command mode
+
+**View Transcripts**:
+- Automatically displayed at bottom of preview pane
+- Shows language and type (auto-generated vs manual)
+- Truncated to 1000 characters for readability
+
+**Export Transcripts**:
 ```bash
-# Manual fetch for current video
-Press 'gt' while viewing a video
-
-# Toggle auto-fetch mode (fetches as you navigate)
-Press 'gT' to enable/disable
+# Export current video
+Press 'ge'
 
 # Command mode
-:transcript fetch
-```
-
-#### View Transcripts
-- Transcripts automatically display at bottom of preview pane (right column)
-- Shows language and type (auto-generated vs manual)
-- Truncated to 1000 characters with "..." indicator
-
-#### Export Transcripts
-```bash
-# Export current video transcript
-Press 'ge' to export to configured directory
-
-# Export via command mode
 :transcript export ~/my-transcripts
-
-# Exports both .txt and .json files by default
 ```
 
-#### Configuration
-Edit `~/.config/yanger/config.yaml`:
+**Formats**:
+- **Plain text** (.txt): Transcript as continuous text
+- **JSON** (.json): Segments with timestamps and metadata
 
-```yaml
-transcripts:
-  enabled: true                      # Enable transcript feature
-  auto_fetch: false                  # Fetch automatically on hover
-  store_in_db: true                  # Store in SQLite cache
-  store_compressed: true             # Compress with gzip (recommended)
-  export_directory: ~/.cache/yanger/transcripts  # External folder (optional)
-  export_txt: true                   # Export plain text
-  export_json: true                  # Export JSON with timestamps
-  languages: ["en", "es", "fr"]      # Preferred languages (in priority)
+**Notes**:
+- Uses `youtube-transcript-api` library (no YouTube API quota)
+- Compressed storage saves ~70% space
+- Some videos don't have transcripts (cached as "NOT_AVAILABLE")
+
+### Google Takeout Import
+
+Import Watch Later and History playlists unavailable via API.
+
+**Export from Google**:
+1. Go to [Google Takeout](https://takeout.google.com/)
+2. Select "YouTube and YouTube Music"
+3. Choose JSON format
+4. Download and extract
+
+**Import into Yanger**:
+```bash
+# Import from folder
+yanger takeout ~/Downloads/Takeout/
+
+# Fetch metadata for imported videos
+yanger fetch-metadata
 ```
 
-### Transcript Formats
+**Features**:
+- Auto-fetch metadata for video titles
+- Deduplication of imports
+- Pagination for large playlists (7000+ videos)
+- Works offline with cached content
 
-#### Plain Text (.txt)
-```
-Hello world
-This is a test transcript
-With multiple segments
-Thank you
-```
+### Bulk Edit Mode
 
-#### JSON (.json)
-```json
-{
-  "video_id": "dQw4w9WgXcQ",
-  "language": "en",
-  "auto_generated": false,
-  "fetched_at": "2024-01-15T12:00:00Z",
-  "segments": [
-    {"start": 0.0, "duration": 2.5, "text": "Hello world"},
-    {"start": 2.5, "duration": 3.0, "text": "This is a test transcript"}
-  ]
-}
+Edit playlists and videos in your text editor.
+
+```bash
+# Press 'B' in app or use command mode
+:bulkedit
+
+# Dry run to preview changes
+:bulkedit --dry-run
 ```
 
-### Tips
-- 💡 Enable `auto_fetch` to automatically fetch transcripts as you browse
-- 🗜️ Keep `store_compressed` enabled - saves ~70% database space
-- 🌍 Add multiple languages to `languages` list for better coverage
-- 📁 Set `export_directory` to automatically export all fetched transcripts
-- 🚫 Some videos don't have transcripts - these are cached as "NOT_AVAILABLE"
+Opens markdown format in `$EDITOR`:
+```markdown
+- Playlist Name <!-- id:PLxxxxx -->
+  - Video Title <!-- id:videoId,item:itemId -->
+  - Another Video <!-- id:videoId2,item:itemId2 -->
+```
 
-### API Considerations
-- 🔌 Uses `youtube-transcript-api` library (not official YouTube API)
-- ✅ No YouTube API quota used for transcript fetching
-- ⚡ Free and unlimited transcript access
-- 🌐 Works with auto-generated and manual transcripts
+**Supported operations**:
+- Reorder videos (move lines)
+- Move videos between playlists (cut/paste)
+- Delete videos (remove lines)
+- Rename items (edit text before `<!--`)
 
-## Tips & Tricks
+### Command Logging
 
-### Efficient Navigation
-- 💡 Use the cache! Most navigation won't use any API quota
-- 🎯 Mark multiple videos with `Space`, then use `dd`/`yy` for bulk operations
-- 📐 Use `V` (visual mode) to quickly select a range of videos
-- 🔄 Press `v` to invert selection - useful for "select all except"
-- 🌐 Press `r` to open videos in browser - works with marked videos or current selection
-- 📥 Import your Watch Later and History from Google Takeout for full access
+Log all operations for debugging and auditing.
 
-### New Features
-- ↩️ Made a mistake? Press `u` to undo, `U` to redo
-- ➕ Create playlists with `gn` - choose privacy level in the dialog
-- ✏️ Rename anything with `cw` - works on both playlists and videos
-- 📝 Debug issues with `--log` to track every action
+```bash
+# Enable logging
+yanger run --log session.json
 
-### API Quota Management
-- 📊 Check quota with `:quota` command
-- 💾 Cache persists for 7 days - no API calls for cached content
-- 🔄 Use `Ctrl+R` sparingly - only refreshes current view
-- 📈 Monitor quota usage in the status bar
+# With verbosity level
+yanger run --log debug.json --log-level DEBUG
+```
 
-### Keyboard Shortcuts
-- ❓ Press `?` anytime to see all available keybindings
-- 🔡 Commands support tab completion - just press Tab
-- 📊 Use `:cache` to see cache statistics
-- 🔢 Sort videos quickly with `o` followed by sort key
+**Log levels**: DEBUG (every keystroke), INFO (commands), WARNING, ERROR
 
-## API Quota Limits
+**Output**: Line-delimited JSON for easy parsing
 
-YouTube Data API has daily quota limits:
-- Default quota: 10,000 units per day
-- List operations: 1 unit each
-- Write operations: 50 units each
-- Moving a video: 100 units (add + remove)
+## 📊 API Quota Limits
 
-With the default quota, you can:
+YouTube Data API daily quota: **10,000 units**
+
+**Operation costs**:
+- List operations: 1 unit
+- Write operations: 50 units
+- Move video: 100 units (add + remove)
+
+**With default quota**:
 - List playlists/videos: ~10,000 times
-- Move videos: ~100 videos per day
+- Move videos: ~100 per day
 - Create/update playlists: ~200 operations
 
-## Development Status
-
-### ✅ Completed Features
-- OAuth2 authentication
-- YouTube API client wrapper
-- Three-column miller view UI
-- Vim-style navigation
-- Visual mode for bulk selection
-- Search with highlighting
-- Command mode with tab completion
-- Persistent SQLite cache
-- Help overlay system
-- Sort videos by multiple criteria
-- Smart refresh logic
-- Cut/copy/paste operations
-- Google Takeout import (Watch Later & History)
-- Virtual playlists for imported data
-- Open videos/playlists in browser
-- Auto-fetch metadata for imported videos
-- Deduplication of imported playlists
-- Pagination for large playlists (7000+ videos)
-- Date-based filtering for metadata fetching
-- Undo/redo functionality (u/U commands)
-- Playlist creation with privacy settings (gn command)
-- Rename operations for playlists and videos (cw command)
-- Command logging for debugging and auditing
-- Video transcript caching with compression (gt/gT/ge commands)
-- Bulk edit mode for playlists and videos (B command)
-- Multi-language transcript support
-- Export transcripts to text and JSON formats
-
-### 🚧 Planned Features
-- [ ] Playlist deletion (gd command)
-- [ ] Advanced filtering
-- [ ] Custom keybinding configuration
-- [ ] Playlist statistics dashboard
-- [ ] Macro recording and playback
-- [ ] Multi-window/tab support
-- [ ] Transcript search and keyword highlighting
-
-## Project Structure
-
-```
-yanger/
-├── src/yanger/         # Main package
-│   ├── auth.py        # OAuth2 authentication
-│   ├── api_client.py  # YouTube API wrapper
-│   ├── models.py      # Data models
-│   ├── cache.py       # Persistent caching (including transcripts)
-│   ├── app.py         # Main TUI application
-│   ├── keybindings.py # Central keybinding registry
-│   ├── operation_history.py  # Undo/redo system
-│   ├── command_logger.py     # Command logging
-│   ├── bulkedit.py    # Bulk edit functionality
-│   ├── core/          # Core functionality
-│   │   └── transcript_fetcher.py  # Transcript fetching/processing
-│   ├── config/        # Configuration management
-│   │   └── settings.py            # Settings dataclasses
-│   └── ui/            # UI components
-│       ├── miller_view.py           # Three-column layout
-│       ├── help_overlay.py          # Help system
-│       ├── command_input.py         # Command mode
-│       ├── playlist_creation_modal.py  # Create playlist dialog
-│       ├── rename_modal.py          # Rename dialog
-│       ├── bulkedit_preview.py      # Bulk edit preview
-│       └── ...                       # Other UI widgets
-├── config/            # Configuration files
-│   └── default_config.yaml          # Default settings
-└── tests/             # Test suite (60 tests)
-    ├── conftest.py                  # Shared fixtures
-    ├── test_transcript_fetcher.py   # Transcript tests
-    ├── test_cache_transcripts.py    # Cache tests
-    └── test_transcript_settings.py  # Settings tests
-```
+**Tips**:
+- Cache persists 7 days (no API calls for cached content)
+- Check quota with `:quota` command
+- Monitor usage in status bar
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions welcome! Submit a Pull Request.
 
 ## License
 
@@ -541,6 +293,5 @@ MIT License - see LICENSE file for details.
 
 ## Acknowledgments
 
-- Inspired by [ranger](https://github.com/ranger/ranger) file manager
-- Built with [Textual](https://github.com/Textualize/textual) TUI framework
-- Uses YouTube Data API v3
+- Inspired by [ranger](https://github.com/ranger/ranger)
+- Built with [Textual](https://github.com/Textualize/textual)
