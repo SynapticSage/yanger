@@ -143,7 +143,9 @@ class TranscriptFetcher:
 
         except Exception as e:
             error_name = type(e).__name__
+            error_str = str(e).lower()
 
+            # Known "not available" cases
             if error_name == 'TranscriptsDisabled':
                 logger.info(f"Transcripts disabled for video {video_id}")
                 return None, 'NOT_AVAILABLE'
@@ -152,6 +154,14 @@ class TranscriptFetcher:
                 return None, 'NOT_AVAILABLE'
             elif error_name == 'VideoUnavailable':
                 logger.warning(f"Video {video_id} unavailable")
+                return None, 'NOT_AVAILABLE'
+            # XML parsing errors (empty response, video deleted, etc.)
+            elif error_name in ['ParseError', 'XMLSyntaxError'] or 'no element found' in error_str:
+                logger.info(f"Video {video_id} unavailable or has no transcript (parse error)")
+                return None, 'NOT_AVAILABLE'
+            # HTTP errors (403, 404, etc.)
+            elif 'http' in error_str or error_name == 'HTTPError':
+                logger.warning(f"HTTP error for video {video_id}: {error_name}")
                 return None, 'NOT_AVAILABLE'
             else:
                 error_msg = f"Error fetching transcript for {video_id}: {error_name}: {str(e)}"

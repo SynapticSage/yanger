@@ -19,10 +19,10 @@ keybindings:
   search: ["/"]
 
   # Navigation
-  up: ["k"]
-  down: ["j"]
-  left: ["h"]
-  right: ["l"]
+  up: ["k", "up"]
+  down: ["j", "down"]
+  left: ["h", "left"]
+  right: ["l", "right"]
   top: ["g", "g"]
   bottom: ["G"]
 

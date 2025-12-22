@@ -915,9 +915,9 @@ class MillerView(Widget):
             return
             
         # Column navigation
-        if key == 'h':  # Move left
+        if key in ['h', 'left']:  # Move left
             self.focused_column = max(0, self.focused_column - 1)
-        elif key == 'l':  # Move right
+        elif key in ['l', 'right']:  # Move right
             self.focused_column = min(2, self.focused_column + 1)
             
         # Enter key - trigger selection
@@ -975,22 +975,22 @@ class MillerView(Widget):
                 self.search_input.hide()
                     
         # Vertical navigation in focused column
-        elif key in ['j', 'k', 'g', 'G']:
+        elif key in ['j', 'down', 'k', 'up', 'g', 'G']:
             if self.focused_column == 0 and self.playlist_column:
-                if key == 'j':
+                if key in ['j', 'down']:
                     self.playlist_column.move_selection(1)
-                elif key == 'k':
+                elif key in ['k', 'up']:
                     self.playlist_column.move_selection(-1)
                 elif key == 'g':
                     self.playlist_column.select_first()
                 elif key == 'G':
                     self.playlist_column.select_last()
-                    
+
             elif self.focused_column == 1 and self.video_column:
                 # In visual mode, just update selection to expand range
-                if key == 'j':
+                if key in ['j', 'down']:
                     self.video_column.move_selection(1)
-                elif key == 'k':
+                elif key in ['k', 'up']:
                     self.video_column.move_selection(-1)
                 elif key == 'g':
                     self.video_column.select_first()

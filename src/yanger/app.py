@@ -1218,7 +1218,7 @@ class YouTubeRangerApp(App):
         # pageup/pagedown for pagination
         # Note: 'u' is now handled at app level for undo, not passed to miller_view
         # Note: 'g' and 'c' are now intercepted for special commands
-        elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'G', 'enter', 'space', 'd', 'y', 'p', 'n', 'N', 'v', 'V', 'escape', 'o', 'pageup', 'pagedown']:
+        elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'up', 'down', 'left', 'right', 'G', 'enter', 'space', 'd', 'y', 'p', 'n', 'N', 'v', 'V', 'escape', 'o', 'pageup', 'pagedown']:
             await self.miller_view.handle_key(event.key)
             event.stop()
     

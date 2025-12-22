@@ -76,13 +76,13 @@ class HelpOverlay(Container):
     HelpOverlay .help-footer {
         height: 2;
         text-align: center;
-        border-top: solid $border;
+        border-top: solid $primary;
         padding-top: 1;
         color: $text-muted;
     }
-    
+
     HelpOverlay .command-section {
-        border-top: solid $border;
+        border-top: solid $primary;
         margin-top: 2;
         padding-top: 1;
     }

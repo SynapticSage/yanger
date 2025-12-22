@@ -61,10 +61,10 @@ class KeybindingRegistry:
         self.register("ctrl+q", "Force quit", KeyContext.GLOBAL, "Application", hidden=True)
         
         # Navigation
-        self.register("h", "Move to left column", KeyContext.GLOBAL, "Navigation")
-        self.register("j", "Move down", KeyContext.GLOBAL, "Navigation")
-        self.register("k", "Move up", KeyContext.GLOBAL, "Navigation")
-        self.register("l", "Move to right column", KeyContext.GLOBAL, "Navigation")
+        self.register("h/←", "Move to left column", KeyContext.GLOBAL, "Navigation")
+        self.register("j/↓", "Move down", KeyContext.GLOBAL, "Navigation")
+        self.register("k/↑", "Move up", KeyContext.GLOBAL, "Navigation")
+        self.register("l/→", "Move to right column", KeyContext.GLOBAL, "Navigation")
         self.register("gg", "Jump to top", KeyContext.GLOBAL, "Navigation")
         self.register("G", "Jump to bottom", KeyContext.GLOBAL, "Navigation")
         self.register("enter", "Select item", KeyContext.GLOBAL, "Navigation")
