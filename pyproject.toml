@@ -52,6 +52,9 @@ dev = [
     "types-PyYAML",
     "types-python-dateutil",
 ]
+mcp = [
+    "mcp>=1.0.0",
+]
 
 [project.scripts]
 yanger = "yanger.cli:main"

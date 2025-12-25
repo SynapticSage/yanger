@@ -701,5 +701,47 @@ def fetch_metadata(playlist, batch_size, limit, since, days_ago, dry_run, verbos
         sys.exit(1)
 
 
+@cli.command()
+@click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
+def mcp(verbose):
+    """Start the MCP (Model Context Protocol) server.
+
+    Exposes yanger's playlist management capabilities to Claude
+    and other MCP-compatible tools via stdio.
+
+    Example Claude Code configuration:
+        {
+            "mcpServers": {
+                "yanger": {
+                    "command": "yanger",
+                    "args": ["mcp"]
+                }
+            }
+        }
+    """
+    try:
+        from .mcp_server import main as mcp_main, MCP_AVAILABLE
+
+        if not MCP_AVAILABLE:
+            console.print("[red]Error:[/red] MCP package not installed.")
+            console.print("\nInstall with: [bold]pip install 'yanger[mcp]'[/bold]")
+            sys.exit(1)
+
+        if verbose:
+            setup_logging(verbose=True)
+
+        mcp_main()
+
+    except ImportError as e:
+        console.print(f"[red]Error:[/red] Missing dependencies: {e}")
+        console.print("\nInstall MCP support with: [bold]pip install 'yanger[mcp]'[/bold]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        if verbose:
+            console.print_exception()
+        sys.exit(1)
+
+
 if __name__ == '__main__':
     main()
