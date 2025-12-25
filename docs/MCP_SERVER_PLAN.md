@@ -163,6 +163,23 @@ This will open a browser for OAuth2 authentication.
 | `check_quota` | Check API quota | none |
 | `get_statistics` | Get playlist stats | `playlist_id` (optional) |
 
+### Advanced Analysis
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `find_duplicates` | Find duplicate videos | `playlist_id` (optional), `include_fuzzy` |
+| `analyze_playlist` | Comprehensive playlist analytics | `playlist_id` (required) |
+| `copy_videos` | Copy videos between playlists (virtual→real!) | `source_playlist_id`, `target_playlist_id`, `video_ids`, `limit` |
+| `search_transcripts` | Search within transcript content | `query` (required), `playlist_id`, `limit` |
+| `batch_fetch_transcripts` | Fetch transcripts for entire playlist | `playlist_id` (required), `limit`, `skip_cached` |
+
+### Fabric Integration
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `fabric_analyze` | Apply Fabric pattern to video transcript | `video_id`, `pattern` (required), `model` |
+| `list_fabric_patterns` | List available Fabric patterns | none |
+
 ## Example Usage with Claude
 
 ```
@@ -177,6 +194,18 @@ Claude: [Uses get_transcript tool - no API quota used!]
 
 User: "How much quota do I have left?"
 Claude: [Uses check_quota tool]
+
+User: "Find any duplicate videos across my playlists"
+Claude: [Uses find_duplicates tool]
+
+User: "Copy my Watch Later videos to a new playlist"
+Claude: [Uses copy_videos with source_playlist_id="virtual_watchlater"]
+
+User: "Search for videos where someone mentions machine learning"
+Claude: [Uses search_transcripts with query="machine learning"]
+
+User: "Summarize this video using Fabric's extract_wisdom pattern"
+Claude: [Uses fabric_analyze with pattern="extract_wisdom"]
 ```
 
 ## Testing

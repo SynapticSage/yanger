@@ -8,13 +8,18 @@ This module reuses existing yanger components:
 - cache.py for SQLite caching
 - auth.py for OAuth2 authentication
 - core/transcript_fetcher.py for transcripts
+- duplicates.py for duplicate detection
+- statistics.py for playlist analytics
 """
 # Created: 2025-12-25
 
 import asyncio
 import json
 import logging
-from typing import Any, Optional
+import subprocess
+import shutil
+from pathlib import Path
+from typing import Any, Optional, List
 from dataclasses import asdict
 
 try:
@@ -34,6 +39,8 @@ from .api_client import YouTubeAPIClient, QuotaExceededError
 from .cache import PersistentCache
 from .core.transcript_fetcher import TranscriptFetcher
 from .models import Playlist, Video, PrivacyStatus
+from .duplicates import DuplicateDetector
+from .statistics import PlaylistAnalyzer
 
 
 logger = logging.getLogger(__name__)
@@ -302,6 +309,156 @@ class YangerMCPServer:
                         },
                     },
                 ),
+
+                # Advanced Analysis Tools
+                Tool(
+                    name="find_duplicates",
+                    description="Find duplicate videos within a playlist or across all playlists. "
+                                "Detects exact matches (same video ID) and fuzzy matches (similar titles).",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "playlist_id": {
+                                "type": "string",
+                                "description": "Check duplicates within this playlist. If omitted, checks across all playlists.",
+                            },
+                            "include_fuzzy": {
+                                "type": "boolean",
+                                "description": "Include fuzzy title matches (similar but not identical)",
+                                "default": False,
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="analyze_playlist",
+                    description="Get comprehensive analytics for a playlist including duration stats, "
+                                "channel distribution, temporal patterns, and more.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "playlist_id": {
+                                "type": "string",
+                                "description": "The playlist ID to analyze",
+                            },
+                        },
+                        "required": ["playlist_id"],
+                    },
+                ),
+                Tool(
+                    name="copy_videos",
+                    description="Copy videos from one playlist to another. Works with virtual playlists "
+                                "(imported Watch Later/History) as source, enabling transfer to real YouTube playlists.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "source_playlist_id": {
+                                "type": "string",
+                                "description": "Source playlist ID (can be virtual like 'virtual_watchlater')",
+                            },
+                            "target_playlist_id": {
+                                "type": "string",
+                                "description": "Target YouTube playlist ID",
+                            },
+                            "video_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional: specific video IDs to copy. If omitted, copies all.",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of videos to copy",
+                                "default": 50,
+                            },
+                        },
+                        "required": ["source_playlist_id", "target_playlist_id"],
+                    },
+                ),
+                Tool(
+                    name="search_transcripts",
+                    description="Search within video transcripts for specific text. "
+                                "Finds videos where the spoken content matches your query.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Text to search for within transcripts",
+                            },
+                            "playlist_id": {
+                                "type": "string",
+                                "description": "Optional: limit search to videos in this playlist",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of results",
+                                "default": 10,
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                ),
+                Tool(
+                    name="batch_fetch_transcripts",
+                    description="Fetch transcripts for all videos in a playlist. "
+                                "Does not use YouTube API quota. Results are cached for future use.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "playlist_id": {
+                                "type": "string",
+                                "description": "The playlist ID to fetch transcripts for",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of videos to process",
+                                "default": 50,
+                            },
+                            "skip_cached": {
+                                "type": "boolean",
+                                "description": "Skip videos that already have cached transcripts",
+                                "default": True,
+                            },
+                        },
+                        "required": ["playlist_id"],
+                    },
+                ),
+
+                # Fabric Integration
+                Tool(
+                    name="fabric_analyze",
+                    description="Apply a Fabric pattern to analyze a YouTube video transcript. "
+                                "Fabric provides curated AI prompts for tasks like summarization, "
+                                "extracting wisdom, finding insights, and more. "
+                                "Common patterns: extract_wisdom, summarize, extract_insights, "
+                                "analyze_claims, extract_recommendations, create_summary.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "video_id": {
+                                "type": "string",
+                                "description": "The YouTube video ID to analyze",
+                            },
+                            "pattern": {
+                                "type": "string",
+                                "description": "The Fabric pattern to apply (e.g., 'extract_wisdom', 'summarize')",
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Optional: specific model to use with Fabric",
+                            },
+                        },
+                        "required": ["video_id", "pattern"],
+                    },
+                ),
+                Tool(
+                    name="list_fabric_patterns",
+                    description="List available Fabric patterns that can be used with fabric_analyze.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                    },
+                ),
             ]
 
         @self.server.call_tool()
@@ -324,8 +481,13 @@ class YangerMCPServer:
 
     async def _handle_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Route tool calls to handlers."""
-        # Most tools require authentication
-        if name not in ["get_transcript"]:
+        # Tools that don't require YouTube API authentication
+        no_auth_tools = [
+            "get_transcript", "search_transcripts", "batch_fetch_transcripts",
+            "fabric_analyze", "list_fabric_patterns"
+        ]
+
+        if name not in no_auth_tools:
             self._ensure_auth()
 
         handlers = {
@@ -349,6 +511,17 @@ class YangerMCPServer:
             # Utilities
             "check_quota": self._check_quota,
             "get_statistics": self._get_statistics,
+
+            # Advanced Analysis
+            "find_duplicates": self._find_duplicates,
+            "analyze_playlist": self._analyze_playlist,
+            "copy_videos": self._copy_videos,
+            "search_transcripts": self._search_transcripts,
+            "batch_fetch_transcripts": self._batch_fetch_transcripts,
+
+            # Fabric Integration
+            "fabric_analyze": self._fabric_analyze,
+            "list_fabric_patterns": self._list_fabric_patterns,
         }
 
         handler = handlers.get(name)
@@ -719,6 +892,478 @@ class YangerMCPServer:
             "total_virtual_videos": total_virtual_videos,
             "quota_remaining": self.api_client.get_quota_remaining(),
         }
+
+    # --- Advanced Analysis ---
+
+    async def _find_duplicates(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Find duplicate videos within or across playlists."""
+        playlist_id = args.get("playlist_id")
+        include_fuzzy = args.get("include_fuzzy", False)
+
+        detector = DuplicateDetector(fuzzy_threshold=0.85 if include_fuzzy else 1.0)
+
+        if playlist_id:
+            # Find duplicates within a specific playlist
+            if playlist_id.startswith("virtual_"):
+                videos_data = self.cache.get_virtual_videos(playlist_id)
+                videos = [
+                    Video(
+                        id=v["video_id"],
+                        playlist_item_id=f"virtual_{v['video_id']}",
+                        title=v.get("title", ""),
+                        channel_title=v.get("channel_title", ""),
+                    )
+                    for v in videos_data
+                ]
+            else:
+                videos = self.cache.get_videos(playlist_id)
+                if videos is None:
+                    videos = self.api_client.get_playlist_items(playlist_id)
+
+            duplicates = detector.find_duplicates(videos, playlist_id)
+        else:
+            # Find duplicates across all playlists
+            playlists = self.cache.get_playlists() or []
+            playlist_videos = []
+
+            for playlist in playlists:
+                videos = self.cache.get_videos(playlist.id)
+                if videos:
+                    playlist_videos.append((playlist, videos))
+
+            duplicates = detector.find_duplicates_across(playlist_videos)
+
+        # Format results
+        results = []
+        for dup in duplicates:
+            results.append({
+                "video_id": dup.video_id,
+                "match_type": dup.match_type,
+                "similarity_score": dup.similarity_score,
+                "occurrences": [
+                    {
+                        "title": v.title,
+                        "playlist": playlist_name,
+                        "playlist_item_id": v.playlist_item_id,
+                    }
+                    for v, playlist_name in dup.videos
+                ],
+            })
+
+        return {
+            "duplicates": results,
+            "count": len(results),
+            "scope": playlist_id or "all_playlists",
+        }
+
+    async def _analyze_playlist(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Get comprehensive playlist analytics."""
+        playlist_id = args["playlist_id"]
+
+        # Get videos
+        if playlist_id.startswith("virtual_"):
+            videos_data = self.cache.get_virtual_videos(playlist_id)
+            videos = [
+                Video(
+                    id=v["video_id"],
+                    playlist_item_id=f"virtual_{v['video_id']}",
+                    title=v.get("title", ""),
+                    channel_title=v.get("channel_title", ""),
+                    duration=v.get("duration"),
+                )
+                for v in videos_data
+            ]
+            playlist_name = playlist_id
+        else:
+            videos = self.cache.get_videos(playlist_id)
+            if videos is None:
+                videos = self.api_client.get_playlist_items(playlist_id)
+            playlist_name = playlist_id
+
+        analyzer = PlaylistAnalyzer()
+        stats = analyzer.analyze(videos, playlist_name)
+
+        return {
+            "playlist_id": playlist_id,
+            "total_videos": stats.total_videos,
+            "total_duration_seconds": stats.total_duration_seconds,
+            "total_duration_formatted": self._format_duration(stats.total_duration_seconds),
+            "average_duration_seconds": round(stats.average_duration_seconds, 1),
+            "unique_channels": stats.unique_channels,
+            "top_channels": stats.top_channels[:10],
+            "videos_by_year": stats.videos_by_year,
+            "duration_distribution": stats.duration_buckets,
+            "oldest_video": stats.oldest_video.title if stats.oldest_video else None,
+            "newest_video": stats.newest_video.title if stats.newest_video else None,
+        }
+
+    def _format_duration(self, seconds: int) -> str:
+        """Format seconds to human readable duration."""
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
+
+    async def _copy_videos(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Copy videos from one playlist to another."""
+        source_playlist_id = args["source_playlist_id"]
+        target_playlist_id = args["target_playlist_id"]
+        video_ids = args.get("video_ids")
+        limit = args.get("limit", 50)
+
+        # Get source videos
+        if source_playlist_id.startswith("virtual_"):
+            videos_data = self.cache.get_virtual_videos(source_playlist_id)
+            source_videos = [
+                {"video_id": v["video_id"], "title": v.get("title", "")}
+                for v in videos_data
+            ]
+        else:
+            videos = self.cache.get_videos(source_playlist_id)
+            if videos is None:
+                videos = self.api_client.get_playlist_items(source_playlist_id)
+            source_videos = [
+                {"video_id": v.id, "title": v.title}
+                for v in videos
+            ]
+
+        # Filter by video_ids if specified
+        if video_ids:
+            source_videos = [v for v in source_videos if v["video_id"] in video_ids]
+
+        # Limit the number of videos
+        source_videos = source_videos[:limit]
+
+        # Copy to target playlist
+        copied = []
+        failed = []
+        quota_cost = 0
+
+        for video in source_videos:
+            try:
+                self.api_client.add_video_to_playlist(
+                    video_id=video["video_id"],
+                    playlist_id=target_playlist_id,
+                )
+                copied.append(video)
+                quota_cost += 50  # Each add costs 50 quota units
+            except QuotaExceededError:
+                failed.append({"video": video, "reason": "quota_exceeded"})
+                break
+            except Exception as e:
+                failed.append({"video": video, "reason": str(e)})
+
+        return {
+            "success": True,
+            "copied_count": len(copied),
+            "failed_count": len(failed),
+            "copied_videos": [v["title"] for v in copied],
+            "failed_videos": failed,
+            "quota_used": quota_cost,
+            "source": source_playlist_id,
+            "target": target_playlist_id,
+        }
+
+    async def _search_transcripts(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Search within transcript content."""
+        query = args["query"].lower()
+        playlist_id = args.get("playlist_id")
+        limit = args.get("limit", 10)
+
+        # Initialize components if needed
+        if not self.cache:
+            self.cache = PersistentCache()
+
+        results = []
+
+        # Get list of videos to search
+        if playlist_id:
+            if playlist_id.startswith("virtual_"):
+                videos_data = self.cache.get_virtual_videos(playlist_id)
+                video_ids = [v["video_id"] for v in videos_data]
+            else:
+                videos = self.cache.get_videos(playlist_id)
+                if videos:
+                    video_ids = [v.id for v in videos]
+                else:
+                    video_ids = []
+        else:
+            # Search all cached transcripts
+            video_ids = self._get_all_cached_transcript_ids()
+
+        # Search in transcripts
+        for video_id in video_ids:
+            if len(results) >= limit:
+                break
+
+            cached = self.cache.get_transcript(video_id)
+            if not cached or cached.get("fetch_status") != "SUCCESS":
+                continue
+
+            try:
+                text = TranscriptFetcher.decompress_transcript(
+                    cached.get("transcript_text", b"")
+                ).lower()
+
+                if query in text:
+                    # Find context around the match
+                    idx = text.find(query)
+                    start = max(0, idx - 50)
+                    end = min(len(text), idx + len(query) + 50)
+                    context = text[start:end]
+
+                    results.append({
+                        "video_id": video_id,
+                        "context": f"...{context}...",
+                        "language": cached.get("language"),
+                    })
+            except Exception as e:
+                logger.debug(f"Error searching transcript {video_id}: {e}")
+                continue
+
+        return {
+            "results": results,
+            "count": len(results),
+            "query": query,
+            "scope": playlist_id or "all_cached",
+        }
+
+    def _get_all_cached_transcript_ids(self) -> List[str]:
+        """Get all video IDs that have cached transcripts."""
+        import sqlite3
+        with sqlite3.connect(self.cache.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT video_id FROM video_transcripts WHERE fetch_status = 'SUCCESS'"
+            )
+            return [row[0] for row in cursor.fetchall()]
+
+    async def _batch_fetch_transcripts(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Fetch transcripts for all videos in a playlist."""
+        playlist_id = args["playlist_id"]
+        limit = args.get("limit", 50)
+        skip_cached = args.get("skip_cached", True)
+
+        # Initialize components if needed
+        if not self.cache:
+            self.cache = PersistentCache()
+        if not self.transcript_fetcher:
+            self.transcript_fetcher = TranscriptFetcher()
+
+        # Get videos
+        if playlist_id.startswith("virtual_"):
+            videos_data = self.cache.get_virtual_videos(playlist_id)
+            video_ids = [v["video_id"] for v in videos_data[:limit]]
+        else:
+            self._ensure_auth()
+            videos = self.cache.get_videos(playlist_id)
+            if videos is None:
+                videos = self.api_client.get_playlist_items(playlist_id)
+            video_ids = [v.id for v in videos[:limit]]
+
+        # Fetch transcripts
+        fetched = []
+        skipped = []
+        failed = []
+
+        for video_id in video_ids:
+            # Check cache if skip_cached is enabled
+            if skip_cached:
+                cached = self.cache.get_transcript(video_id)
+                if cached:
+                    skipped.append(video_id)
+                    continue
+
+            # Fetch transcript
+            transcript, status = self.transcript_fetcher.fetch_transcript(video_id)
+
+            if transcript:
+                # Cache it
+                self.cache.cache_transcript(
+                    video_id=video_id,
+                    transcript_text=TranscriptFetcher.compress_transcript(
+                        TranscriptFetcher.format_as_text(transcript)
+                    ),
+                    transcript_json=TranscriptFetcher.format_as_json(transcript),
+                    language=transcript.language,
+                    auto_generated=transcript.auto_generated,
+                    fetch_status="SUCCESS",
+                )
+                fetched.append({
+                    "video_id": video_id,
+                    "language": transcript.language,
+                })
+            else:
+                # Cache the failure status to avoid retrying
+                self.cache.cache_transcript(
+                    video_id=video_id,
+                    transcript_text=None,
+                    transcript_json=None,
+                    language=None,
+                    auto_generated=False,
+                    fetch_status=status,
+                )
+                failed.append({
+                    "video_id": video_id,
+                    "reason": status,
+                })
+
+        return {
+            "playlist_id": playlist_id,
+            "fetched_count": len(fetched),
+            "skipped_count": len(skipped),
+            "failed_count": len(failed),
+            "fetched": fetched,
+            "failed": failed,
+            "message": f"Fetched {len(fetched)} transcripts, skipped {len(skipped)} cached, {len(failed)} unavailable",
+        }
+
+    # --- Fabric Integration ---
+
+    async def _fabric_analyze(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Apply a Fabric pattern to analyze a video transcript."""
+        video_id = args["video_id"]
+        pattern = args["pattern"]
+        model = args.get("model")
+
+        # Check if fabric is installed
+        fabric_path = shutil.which("fabric")
+        if not fabric_path:
+            return {
+                "error": "fabric_not_installed",
+                "message": "Fabric is not installed. Install from: https://github.com/danielmiessler/fabric",
+                "install_instructions": "go install github.com/danielmiessler/fabric@latest",
+            }
+
+        # Get transcript
+        transcript_result = await self._get_transcript({
+            "video_id": video_id,
+            "format": "text",
+        })
+
+        if "error" in transcript_result:
+            return {
+                "error": "transcript_unavailable",
+                "message": transcript_result.get("message", "Could not get transcript"),
+                "video_id": video_id,
+            }
+
+        transcript_text = transcript_result["transcript"]
+
+        # Build fabric command
+        cmd = ["fabric", "--pattern", pattern]
+        if model:
+            cmd.extend(["--model", model])
+
+        try:
+            # Run fabric with transcript as input
+            process = subprocess.run(
+                cmd,
+                input=transcript_text,
+                capture_output=True,
+                text=True,
+                timeout=120,  # 2 minute timeout
+            )
+
+            if process.returncode != 0:
+                return {
+                    "error": "fabric_error",
+                    "message": process.stderr or "Fabric command failed",
+                    "pattern": pattern,
+                    "video_id": video_id,
+                }
+
+            return {
+                "video_id": video_id,
+                "pattern": pattern,
+                "model": model,
+                "result": process.stdout,
+                "transcript_language": transcript_result.get("language"),
+            }
+
+        except subprocess.TimeoutExpired:
+            return {
+                "error": "timeout",
+                "message": "Fabric analysis timed out after 2 minutes",
+                "pattern": pattern,
+                "video_id": video_id,
+            }
+        except Exception as e:
+            return {
+                "error": "execution_error",
+                "message": str(e),
+                "pattern": pattern,
+                "video_id": video_id,
+            }
+
+    async def _list_fabric_patterns(self, args: dict[str, Any]) -> dict[str, Any]:
+        """List available Fabric patterns."""
+        # Check if fabric is installed
+        fabric_path = shutil.which("fabric")
+        if not fabric_path:
+            return {
+                "error": "fabric_not_installed",
+                "message": "Fabric is not installed. Install from: https://github.com/danielmiessler/fabric",
+                "common_patterns": [
+                    "extract_wisdom",
+                    "summarize",
+                    "extract_insights",
+                    "analyze_claims",
+                    "extract_recommendations",
+                    "create_summary",
+                    "extract_ideas",
+                    "analyze_paper",
+                    "create_quiz",
+                ],
+            }
+
+        try:
+            # Run fabric --list to get patterns
+            process = subprocess.run(
+                ["fabric", "--list"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if process.returncode != 0:
+                # Fallback: try to list patterns from ~/.config/fabric/patterns
+                patterns_dir = Path.home() / ".config" / "fabric" / "patterns"
+                if patterns_dir.exists():
+                    patterns = [p.name for p in patterns_dir.iterdir() if p.is_dir()]
+                    return {
+                        "patterns": sorted(patterns),
+                        "count": len(patterns),
+                        "source": "filesystem",
+                    }
+                return {
+                    "error": "list_failed",
+                    "message": process.stderr or "Could not list patterns",
+                }
+
+            # Parse output
+            patterns = [
+                line.strip()
+                for line in process.stdout.split("\n")
+                if line.strip() and not line.startswith("#")
+            ]
+
+            return {
+                "patterns": patterns,
+                "count": len(patterns),
+                "source": "fabric --list",
+            }
+
+        except subprocess.TimeoutExpired:
+            return {
+                "error": "timeout",
+                "message": "Listing patterns timed out",
+            }
+        except Exception as e:
+            return {
+                "error": "execution_error",
+                "message": str(e),
+            }
 
     async def run(self) -> None:
         """Run the MCP server."""

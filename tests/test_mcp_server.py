@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from unittest.mock import Mock, MagicMock, patch, AsyncMock
+import shutil
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -533,3 +534,226 @@ class TestToolSchemas:
         # Test check_quota routing
         result = await mcp_server._handle_tool("check_quota", {})
         assert "daily_limit" in result
+
+
+class TestAdvancedAnalysisTools:
+    """Test advanced analysis tools."""
+
+    @pytest.mark.asyncio
+    async def test_find_duplicates_within_playlist(self, mcp_server):
+        """Should find duplicates within a playlist."""
+        # Add duplicate video to mock data
+        mcp_server.cache.get_videos.return_value = [
+            Video(id="video1", playlist_item_id="item1", title="Test Video", channel_title="Channel"),
+            Video(id="video1", playlist_item_id="item2", title="Test Video", channel_title="Channel"),
+            Video(id="video2", playlist_item_id="item3", title="Another Video", channel_title="Channel"),
+        ]
+
+        result = await mcp_server._find_duplicates({
+            "playlist_id": "PL_music",
+        })
+
+        assert "duplicates" in result
+        assert result["scope"] == "PL_music"
+
+    @pytest.mark.asyncio
+    async def test_find_duplicates_across_playlists(self, mcp_server):
+        """Should find duplicates across all playlists."""
+        result = await mcp_server._find_duplicates({})
+
+        assert "duplicates" in result
+        assert result["scope"] == "all_playlists"
+
+    @pytest.mark.asyncio
+    async def test_analyze_playlist(self, mcp_server):
+        """Should analyze playlist statistics."""
+        result = await mcp_server._analyze_playlist({
+            "playlist_id": "PL_music",
+        })
+
+        assert result["playlist_id"] == "PL_music"
+        assert "total_videos" in result
+        assert "unique_channels" in result
+        assert "top_channels" in result
+
+    @pytest.mark.asyncio
+    async def test_copy_videos(self, mcp_server):
+        """Should copy videos from source to target playlist."""
+        mcp_server.api_client.add_video_to_playlist.return_value = "new_item_id"
+
+        result = await mcp_server._copy_videos({
+            "source_playlist_id": "PL_music",
+            "target_playlist_id": "PL_coding",
+            "limit": 2,
+        })
+
+        assert result["success"] is True
+        assert result["copied_count"] == 2
+        assert result["source"] == "PL_music"
+        assert result["target"] == "PL_coding"
+
+    @pytest.mark.asyncio
+    async def test_copy_videos_from_virtual(self, mcp_server):
+        """Should copy videos from virtual playlist to real playlist."""
+        mcp_server.api_client.add_video_to_playlist.return_value = "new_item_id"
+
+        result = await mcp_server._copy_videos({
+            "source_playlist_id": "virtual_watchlater",
+            "target_playlist_id": "PL_music",
+            "limit": 1,
+        })
+
+        assert result["success"] is True
+        assert result["copied_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_copy_videos_specific_ids(self, mcp_server):
+        """Should copy only specified video IDs."""
+        mcp_server.api_client.add_video_to_playlist.return_value = "new_item_id"
+
+        result = await mcp_server._copy_videos({
+            "source_playlist_id": "PL_music",
+            "target_playlist_id": "PL_coding",
+            "video_ids": ["video1"],
+        })
+
+        assert result["success"] is True
+        assert result["copied_count"] == 1
+
+
+class TestTranscriptSearchTools:
+    """Test transcript search and batch tools."""
+
+    @pytest.mark.asyncio
+    async def test_search_transcripts(self, mcp_server):
+        """Should search within transcript content."""
+        # Mock transcript cache
+        mcp_server.cache.get_transcript.return_value = {
+            "transcript_text": b'\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03',  # gzipped
+            "language": "en",
+            "fetch_status": "SUCCESS",
+        }
+
+        with patch("yanger.mcp_server.TranscriptFetcher.decompress_transcript") as mock_decompress:
+            mock_decompress.return_value = "This is a test transcript with some content"
+
+            # Use playlist_id to avoid _get_all_cached_transcript_ids database call
+            result = await mcp_server._search_transcripts({
+                "query": "test",
+                "playlist_id": "PL_music",
+                "limit": 5,
+            })
+
+        assert "results" in result
+        assert result["query"] == "test"
+        assert result["scope"] == "PL_music"
+
+    @pytest.mark.asyncio
+    async def test_batch_fetch_transcripts(self, mcp_server):
+        """Should fetch transcripts for multiple videos."""
+        mcp_server.cache.get_transcript.return_value = None  # Not cached
+
+        result = await mcp_server._batch_fetch_transcripts({
+            "playlist_id": "PL_music",
+            "limit": 2,
+            "skip_cached": True,
+        })
+
+        assert result["playlist_id"] == "PL_music"
+        assert "fetched_count" in result
+        assert "skipped_count" in result
+        assert "failed_count" in result
+
+    @pytest.mark.asyncio
+    async def test_batch_fetch_transcripts_skip_cached(self, mcp_server):
+        """Should skip already cached transcripts."""
+        mcp_server.cache.get_transcript.return_value = {
+            "transcript_text": b"cached",
+            "fetch_status": "SUCCESS",
+        }
+
+        result = await mcp_server._batch_fetch_transcripts({
+            "playlist_id": "PL_music",
+            "limit": 2,
+            "skip_cached": True,
+        })
+
+        assert result["skipped_count"] == 2
+        assert result["fetched_count"] == 0
+
+
+class TestFabricIntegration:
+    """Test Fabric integration tools."""
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_not_installed(self, mcp_server):
+        """Should handle case when Fabric is not installed."""
+        with patch("shutil.which", return_value=None):
+            result = await mcp_server._fabric_analyze({
+                "video_id": "video1",
+                "pattern": "extract_wisdom",
+            })
+
+        assert result["error"] == "fabric_not_installed"
+        assert "install_instructions" in result
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_transcript_unavailable(self, mcp_server):
+        """Should handle unavailable transcript."""
+        mcp_server.transcript_fetcher.fetch_transcript.return_value = (None, "NOT_AVAILABLE")
+        mcp_server.cache.get_transcript.return_value = None
+
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            result = await mcp_server._fabric_analyze({
+                "video_id": "no_transcript",
+                "pattern": "summarize",
+            })
+
+        assert result["error"] == "transcript_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_success(self, mcp_server):
+        """Should successfully analyze transcript with Fabric."""
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="# Summary\n\nThis is a great video about testing.",
+                    stderr="",
+                )
+
+                result = await mcp_server._fabric_analyze({
+                    "video_id": "video1",
+                    "pattern": "summarize",
+                })
+
+        assert result["video_id"] == "video1"
+        assert result["pattern"] == "summarize"
+        assert "Summary" in result["result"]
+
+    @pytest.mark.asyncio
+    async def test_list_fabric_patterns_not_installed(self, mcp_server):
+        """Should handle case when Fabric is not installed."""
+        with patch("shutil.which", return_value=None):
+            result = await mcp_server._list_fabric_patterns({})
+
+        assert result["error"] == "fabric_not_installed"
+        assert "common_patterns" in result
+        assert "extract_wisdom" in result["common_patterns"]
+
+    @pytest.mark.asyncio
+    async def test_list_fabric_patterns_success(self, mcp_server):
+        """Should list available Fabric patterns."""
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="extract_wisdom\nsummarize\nanalyze_claims\n",
+                    stderr="",
+                )
+
+                result = await mcp_server._list_fabric_patterns({})
+
+        assert "patterns" in result
+        assert "extract_wisdom" in result["patterns"]
+        assert result["count"] == 3
