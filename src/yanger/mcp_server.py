@@ -459,6 +459,45 @@ class YangerMCPServer:
                         "properties": {},
                     },
                 ),
+                Tool(
+                    name="fabric_analyze_batch",
+                    description="Apply a Fabric pattern to analyze multiple YouTube video transcripts. "
+                                "Provide either a playlist_id to analyze all videos in a playlist, "
+                                "or a list of video_ids. Returns aggregated results for each video.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "pattern": {
+                                "type": "string",
+                                "description": "The Fabric pattern to apply (e.g., 'extract_wisdom', 'summarize')",
+                            },
+                            "playlist_id": {
+                                "type": "string",
+                                "description": "Analyze all videos in this playlist",
+                            },
+                            "video_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of specific video IDs to analyze",
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Optional: specific model to use with Fabric",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of videos to analyze",
+                                "default": 10,
+                            },
+                            "skip_errors": {
+                                "type": "boolean",
+                                "description": "Continue processing if individual videos fail",
+                                "default": True,
+                            },
+                        },
+                        "required": ["pattern"],
+                    },
+                ),
             ]
 
         @self.server.call_tool()
@@ -484,7 +523,7 @@ class YangerMCPServer:
         # Tools that don't require YouTube API authentication
         no_auth_tools = [
             "get_transcript", "search_transcripts", "batch_fetch_transcripts",
-            "fabric_analyze", "list_fabric_patterns"
+            "fabric_analyze", "list_fabric_patterns", "fabric_analyze_batch"
         ]
 
         if name not in no_auth_tools:
@@ -522,6 +561,7 @@ class YangerMCPServer:
             # Fabric Integration
             "fabric_analyze": self._fabric_analyze,
             "list_fabric_patterns": self._list_fabric_patterns,
+            "fabric_analyze_batch": self._fabric_analyze_batch,
         }
 
         handler = handlers.get(name)
@@ -1364,6 +1404,97 @@ class YangerMCPServer:
                 "error": "execution_error",
                 "message": str(e),
             }
+
+    async def _fabric_analyze_batch(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Apply a Fabric pattern to analyze multiple video transcripts."""
+        pattern = args["pattern"]
+        playlist_id = args.get("playlist_id")
+        video_ids = args.get("video_ids", [])
+        model = args.get("model")
+        limit = args.get("limit", 10)
+        skip_errors = args.get("skip_errors", True)
+
+        # Check if fabric is installed
+        fabric_path = shutil.which("fabric")
+        if not fabric_path:
+            return {
+                "error": "fabric_not_installed",
+                "message": "Fabric is not installed. Install from: https://github.com/danielmiessler/fabric",
+                "install_instructions": "go install github.com/danielmiessler/fabric@latest",
+            }
+
+        # Get video IDs to analyze
+        if playlist_id:
+            # Initialize components if needed
+            if not self.cache:
+                self.cache = PersistentCache()
+
+            # Get videos from playlist
+            if playlist_id.startswith("virtual_"):
+                videos_data = self.cache.get_virtual_videos(playlist_id)
+                video_ids = [v["video_id"] for v in videos_data[:limit]]
+            else:
+                # Need auth for real playlists
+                self._ensure_auth()
+                videos = self.cache.get_videos(playlist_id)
+                if videos is None:
+                    videos = self.api_client.get_playlist_items(playlist_id)
+                video_ids = [v.id for v in videos[:limit]]
+        elif not video_ids:
+            return {
+                "error": "invalid_arguments",
+                "message": "Must provide either playlist_id or video_ids",
+            }
+
+        # Apply limit
+        video_ids = video_ids[:limit]
+
+        # Process each video
+        results = []
+        errors = []
+
+        for video_id in video_ids:
+            try:
+                result = await self._fabric_analyze({
+                    "video_id": video_id,
+                    "pattern": pattern,
+                    "model": model,
+                })
+
+                if "error" in result:
+                    errors.append({
+                        "video_id": video_id,
+                        "error": result["error"],
+                        "message": result.get("message", "Unknown error"),
+                    })
+                    if not skip_errors:
+                        break
+                else:
+                    results.append({
+                        "video_id": video_id,
+                        "pattern": pattern,
+                        "result": result["result"],
+                        "transcript_language": result.get("transcript_language"),
+                    })
+            except Exception as e:
+                errors.append({
+                    "video_id": video_id,
+                    "error": "exception",
+                    "message": str(e),
+                })
+                if not skip_errors:
+                    break
+
+        return {
+            "pattern": pattern,
+            "model": model,
+            "total_videos": len(video_ids),
+            "successful_count": len(results),
+            "error_count": len(errors),
+            "results": results,
+            "errors": errors,
+            "source": playlist_id or "video_ids",
+        }
 
     async def run(self) -> None:
         """Run the MCP server."""

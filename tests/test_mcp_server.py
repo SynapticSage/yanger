@@ -757,3 +757,164 @@ class TestFabricIntegration:
         assert "patterns" in result
         assert "extract_wisdom" in result["patterns"]
         assert result["count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_batch_not_installed(self, mcp_server):
+        """Should handle case when Fabric is not installed for batch."""
+        with patch("shutil.which", return_value=None):
+            result = await mcp_server._fabric_analyze_batch({
+                "pattern": "summarize",
+                "video_ids": ["video1", "video2"],
+            })
+
+        assert result["error"] == "fabric_not_installed"
+        assert "install_instructions" in result
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_batch_no_input(self, mcp_server):
+        """Should require either playlist_id or video_ids."""
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            result = await mcp_server._fabric_analyze_batch({
+                "pattern": "summarize",
+            })
+
+        assert result["error"] == "invalid_arguments"
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_batch_with_video_ids(self, mcp_server):
+        """Should analyze multiple videos by video_ids."""
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="# Analysis for video",
+                    stderr="",
+                )
+
+                result = await mcp_server._fabric_analyze_batch({
+                    "pattern": "extract_wisdom",
+                    "video_ids": ["video1", "video2"],
+                })
+
+        assert result["pattern"] == "extract_wisdom"
+        assert result["total_videos"] == 2
+        assert result["successful_count"] == 2
+        assert result["error_count"] == 0
+        assert len(result["results"]) == 2
+        assert result["source"] == "video_ids"
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_batch_with_playlist(self, mcp_server):
+        """Should analyze all videos in a playlist."""
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="# Wisdom extracted",
+                    stderr="",
+                )
+
+                result = await mcp_server._fabric_analyze_batch({
+                    "pattern": "extract_wisdom",
+                    "playlist_id": "PL_music",
+                    "limit": 2,
+                })
+
+        assert result["pattern"] == "extract_wisdom"
+        assert result["total_videos"] == 2
+        assert result["source"] == "PL_music"
+        assert result["successful_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_batch_with_virtual_playlist(self, mcp_server):
+        """Should analyze videos from virtual playlist."""
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="# Virtual video analysis",
+                    stderr="",
+                )
+
+                result = await mcp_server._fabric_analyze_batch({
+                    "pattern": "summarize",
+                    "playlist_id": "virtual_watchlater",
+                })
+
+        assert result["source"] == "virtual_watchlater"
+        assert result["total_videos"] == 1  # 1 virtual video in mock
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_batch_partial_failures(self, mcp_server):
+        """Should handle partial failures with skip_errors=True."""
+        # Set up first video to have no transcript
+        call_count = [0]
+        original_fetch = mcp_server.transcript_fetcher.fetch_transcript
+
+        def mock_fetch(video_id):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return (None, "NOT_AVAILABLE")
+            return original_fetch(video_id)
+
+        mcp_server.transcript_fetcher.fetch_transcript = mock_fetch
+        mcp_server.cache.get_transcript.return_value = None
+
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="# Success",
+                    stderr="",
+                )
+
+                result = await mcp_server._fabric_analyze_batch({
+                    "pattern": "summarize",
+                    "video_ids": ["video1", "video2"],
+                    "skip_errors": True,
+                })
+
+        assert result["error_count"] == 1
+        assert result["successful_count"] == 1
+        assert len(result["errors"]) == 1
+        assert result["errors"][0]["video_id"] == "video1"
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_batch_stop_on_error(self, mcp_server):
+        """Should stop on first error when skip_errors=False."""
+        mcp_server.transcript_fetcher.fetch_transcript.return_value = (None, "NOT_AVAILABLE")
+        mcp_server.cache.get_transcript.return_value = None
+
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            result = await mcp_server._fabric_analyze_batch({
+                "pattern": "summarize",
+                "video_ids": ["video1", "video2", "video3"],
+                "skip_errors": False,
+            })
+
+        # Should stop after first error
+        assert result["error_count"] == 1
+        assert result["successful_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_batch_with_model(self, mcp_server):
+        """Should pass model parameter to Fabric."""
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="# Analysis with specific model",
+                    stderr="",
+                )
+
+                result = await mcp_server._fabric_analyze_batch({
+                    "pattern": "summarize",
+                    "video_ids": ["video1"],
+                    "model": "gpt-4",
+                })
+
+        assert result["model"] == "gpt-4"
+        # Verify model was passed to subprocess
+        call_args = mock_run.call_args
+        assert "--model" in call_args[0][0]
+        assert "gpt-4" in call_args[0][0]
