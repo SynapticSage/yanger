@@ -35,6 +35,7 @@
 - **Smart Refresh**: Only fetch from API when needed
 - **Quota Management**: Built-in tracking for YouTube API limits
 - **Search & Filter**: Find videos quickly with highlighting
+- **MCP Server**: Claude AI integration for conversational playlist management
 
 ## ⚡ Quick Start
 
@@ -247,6 +248,64 @@ Opens markdown format in `$EDITOR`:
 - Move videos between playlists (cut/paste)
 - Delete videos (remove lines)
 - Rename items (edit text before `<!--`)
+
+### MCP Server (Claude Integration)
+
+Expose yanger's playlist management to Claude and other MCP-compatible AI tools.
+
+**What is MCP?**
+
+[Model Context Protocol](https://modelcontextprotocol.io/) lets AI assistants interact with external tools. With yanger's MCP server, Claude can manage your YouTube playlists conversationally.
+
+**Setup for Claude Code**:
+
+Add to `~/.claude.json`:
+```json
+{
+  "mcpServers": {
+    "yanger": {
+      "command": "yanger",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Available Tools**:
+
+| Tool | Description |
+|------|-------------|
+| `list_playlists` | List all playlists (real and virtual) |
+| `get_playlist` | Get playlist details and video count |
+| `create_playlist` / `delete_playlist` | Manage playlists |
+| `list_videos` | List videos in a playlist |
+| `add_video` / `remove_video` | Add or remove videos |
+| `move_video` | Move video between playlists |
+| `copy_videos` | Copy videos to another playlist |
+| `search_videos` | Search across all playlists |
+| `get_transcript` | Fetch video transcript |
+| `search_transcripts` | Search within transcripts |
+| `find_duplicates` | Find duplicate videos |
+| `analyze_playlist` | Get playlist statistics |
+| `fabric_analyze` | Analyze video with Fabric AI patterns |
+| `check_quota` | Check API quota usage |
+
+**Example Prompts**:
+```
+"Show me my playlists"
+"Find videos about Python in my tutorials playlist"
+"Move the first 5 videos from Watch Later to Programming"
+"Find duplicate videos across all playlists"
+"Summarize this video using Fabric"
+```
+
+**Fabric Integration**:
+
+If [Fabric](https://github.com/danielmiessler/fabric) is installed, yanger can analyze video transcripts with AI patterns:
+```
+"Analyze this video with the extract_wisdom pattern"
+"Summarize all videos in my 'To Review' playlist"
+```
 
 ### Command Logging
 
