@@ -66,13 +66,20 @@ def cli(ctx: click.Context, version: bool, verbose: bool, config_dir: Optional[s
 
 @cli.command()
 @click.option('--no-cache', is_flag=True, help='Disable offline cache')
+@click.option('--simple', is_flag=True, help='Use simple rich-based UI instead of Textual TUI')
 @click.option('--log', type=click.Path(), help='Log keyboard commands and actions to file')
 @click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR'], case_sensitive=False),
               default='INFO', help='Log level for command logging')
 @click.pass_context
-def run(ctx: click.Context, no_cache: bool, log: Optional[str], log_level: str):
+def run(ctx: click.Context, no_cache: bool, simple: bool, log: Optional[str], log_level: str):
     """Run the YouTube Ranger TUI application."""
     try:
+        # Use simple UI if requested
+        if simple:
+            from .simple_ui import main as simple_main
+            simple_main()
+            return
+
         # Import here to avoid circular imports and defer heavy imports
         from .app import YouTubeRangerApp
         
@@ -698,6 +705,22 @@ def fetch_metadata(playlist, batch_size, limit, since, days_ago, dry_run, verbos
         console.print(f"\n[red]Error: {e}[/red]")
         if verbose:
             console.print_exception()
+        sys.exit(1)
+
+
+@cli.command()
+def simple():
+    """Run the simple rich-based UI.
+
+    A menu-driven interface that works in more terminal environments
+    than the full Textual TUI. Useful as a fallback when Textual has issues.
+    """
+    try:
+        from .simple_ui import main as simple_main
+        simple_main()
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print_exception()
         sys.exit(1)
 
 
