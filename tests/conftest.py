@@ -108,21 +108,40 @@ def sample_transcript_data(sample_transcript_segments):
 
 @pytest.fixture
 def mock_youtube_transcript_api():
-    """Provide a mock YouTubeTranscriptApi."""
+    """Provide a mock YouTubeTranscriptApi matching the 1.x interface.
+
+    Uses the real FetchedTranscript/snippet types so tests exercise the actual
+    1.x surface: api.list(...) -> TranscriptList, transcript.fetch() ->
+    FetchedTranscript of snippet objects with .start/.duration/.text attributes
+    (and a working .to_raw_data()).
+    """
+    from youtube_transcript_api._transcripts import (
+        FetchedTranscript,
+        FetchedTranscriptSnippet,
+    )
+
     mock_api = MagicMock()
 
-    # Mock transcript list
-    mock_transcript_list = MagicMock()
+    # 1.x fetch() returns a FetchedTranscript of snippet objects (not dicts)
+    fetched = FetchedTranscript(
+        snippets=[
+            FetchedTranscriptSnippet(text="Hello world", start=0.0, duration=2.5),
+            FetchedTranscriptSnippet(text="This is a test", start=2.5, duration=3.0),
+        ],
+        video_id="test_video_id",
+        language="English",
+        language_code="en",
+        is_generated=False,
+    )
+
     mock_transcript = MagicMock()
     mock_transcript.language_code = "en"
     mock_transcript.is_generated = False
-    mock_transcript.fetch.return_value = [
-        {"start": 0.0, "duration": 2.5, "text": "Hello world"},
-        {"start": 2.5, "duration": 3.0, "text": "This is a test"},
-    ]
+    mock_transcript.fetch.return_value = fetched
 
+    mock_transcript_list = MagicMock()
     mock_transcript_list.find_transcript.return_value = mock_transcript
-    mock_api.list_transcripts.return_value = mock_transcript_list
+    mock_api.list.return_value = mock_transcript_list
 
     return mock_api
 

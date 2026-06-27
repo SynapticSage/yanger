@@ -1,0 +1,16 @@
+{
+  "name": "yanger-takeout-refresh",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Puppeteer routine that attaches to a logged-in Chrome and drives Google Takeout to refresh a user's YouTube history/playlist export for yanger. Credentials are never automated.",
+  "bin": {
+    "yanger-takeout-refresh": "refresh.js"
+  },
+  "scripts": {
+    "refresh": "node refresh.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^23.0.0"
+  }
+}

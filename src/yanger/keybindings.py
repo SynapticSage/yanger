@@ -78,6 +78,7 @@ class KeybindingRegistry:
         
         # Ranger commands (double-key)
         self.register("dd", "Cut selected/marked videos", KeyContext.VIDEO, "Operations")
+        self.register("dD", "Delete selected/marked videos (permanent)", KeyContext.VIDEO, "Operations")
         self.register("yy", "Copy selected/marked videos", KeyContext.VIDEO, "Operations")
         self.register("pp", "Paste videos from clipboard", KeyContext.VIDEO, "Operations")
         
@@ -93,7 +94,7 @@ class KeybindingRegistry:
         
         # Playlist operations
         self.register("gn", "Create new playlist", KeyContext.GLOBAL, "Playlist")
-        self.register("gd", "Delete empty playlist", KeyContext.PLAYLIST, "Playlist", hidden=True)
+        self.register("gd", "Delete playlist", KeyContext.PLAYLIST, "Playlist")
         self.register("cw", "Rename playlist/video", KeyContext.GLOBAL, "Operations")
         self.register("o", "Open sort menu", KeyContext.VIDEO, "Operations")
         self.register("r", "Open in browser", KeyContext.GLOBAL, "Operations")
@@ -211,15 +212,51 @@ class KeybindingRegistry:
 
         self.register_command(
             "transcript",
-            "Manage video transcripts",
-            ":transcript [fetch|export|clear] [options]",
+            "Run your configured transcript command on the current video",
+            ":transcript",
             [
-                ":transcript fetch",
-                ":transcript export ~/transcripts",
-                ":transcript clear"
+                ":transcript",
+                ':set transcript_command "yeet {url} | fabric -sp summarize"',
             ]
         )
-        
+
+        self.register_command(
+            "set",
+            "Set and persist a config value (e.g. transcript_command)",
+            ":set <key> <value>",
+            [
+                ':set transcript_command "summarize {url}"',
+                ':set transcript_command "yeet {url} | fabric -sp summarize"',
+            ]
+        )
+
+        self.register_command(
+            "duplicates",
+            "Find duplicate videos in the current playlist (alias: :dupes)",
+            ":duplicates",
+            [
+                ":duplicates",
+                ":dupes",
+            ]
+        )
+
+        self.register_command(
+            "fetch-metadata",
+            "Fetch titles/metadata for videos in a virtual playlist",
+            ":fetch-metadata",
+            [":fetch-metadata"]
+        )
+
+        self.register_command(
+            "delete",
+            "Delete selected videos or the current playlist",
+            ":delete [videos|playlist]",
+            [
+                ":delete videos",
+                ":delete playlist",
+            ]
+        )
+
     def register(self, key: str, description: str, 
                  context: KeyContext = KeyContext.GLOBAL,
                  category: str = "General",

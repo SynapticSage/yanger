@@ -5,8 +5,9 @@ Shows a summary of changes that will be applied from bulk edit.
 # Created: 2025-09-22
 
 from textual.app import ComposeResult
-from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
+from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual.widgets import Static, Button
+from textual.screen import ModalScreen
 from textual.message import Message
 from textual import events
 
@@ -26,26 +27,22 @@ class BulkEditCancelled(Message):
     pass
 
 
-class BulkEditPreview(Container):
+class BulkEditPreview(ModalScreen):
     """Modal showing preview of bulk edit changes."""
 
     DEFAULT_CSS = """
     BulkEditPreview {
-        layer: modal;
-        dock: top;
+        align: center middle;
+    }
+
+    BulkEditPreview > Vertical {
         width: 80%;
         height: 80%;
         max-width: 100;
         max-height: 40;
-        margin: 2 4;
         background: $surface;
         border: thick $accent;
         padding: 1;
-    }
-
-    BulkEditPreview > Vertical {
-        width: 100%;
-        height: 100%;
     }
 
     BulkEditPreview .header {
@@ -136,7 +133,6 @@ class BulkEditPreview(Container):
     def __init__(self, changes: BulkEditChanges, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.changes = changes
-        self.can_dismiss = True
 
     def compose(self) -> ComposeResult:
         """Build the preview layout."""
@@ -224,27 +220,31 @@ class BulkEditPreview(Container):
                 yield Button("Cancel", variant="error",
                            classes="cancel-button", id="cancel")
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button presses."""
-        if event.button.id == "confirm":
-            await self.post_message(BulkEditConfirmed(self.changes))
-            await self.remove()
-        elif event.button.id == "cancel":
-            await self.post_message(BulkEditCancelled())
-            await self.remove()
-        elif event.button.id == "dry-run":
-            # For dry run, we still send confirmed but app should handle differently
-            self.changes.dry_run = True
-            await self.post_message(BulkEditConfirmed(self.changes))
-            await self.remove()
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses.
 
-    async def on_key(self, event: events.Key) -> None:
+        Post the result message (the app listens via on_bulk_edit_confirmed /
+        on_bulk_edit_cancelled) then dismiss the modal screen.
+        """
+        if event.button.id == "confirm":
+            self.post_message(BulkEditConfirmed(self.changes))
+            self.dismiss(self.changes)
+        elif event.button.id == "cancel":
+            self.post_message(BulkEditCancelled())
+            self.dismiss(None)
+        elif event.button.id == "dry-run":
+            # Dry run still confirms; the app branches on changes.dry_run.
+            self.changes.dry_run = True
+            self.post_message(BulkEditConfirmed(self.changes))
+            self.dismiss(self.changes)
+
+    def on_key(self, event: events.Key) -> None:
         """Handle key events."""
         if event.key == "escape":
-            await self.post_message(BulkEditCancelled())
-            await self.remove()
+            self.post_message(BulkEditCancelled())
+            self.dismiss(None)
             event.stop()
         elif event.key == "enter":
-            await self.post_message(BulkEditConfirmed(self.changes))
-            await self.remove()
+            self.post_message(BulkEditConfirmed(self.changes))
+            self.dismiss(self.changes)
             event.stop()

@@ -18,6 +18,7 @@ import json
 import logging
 import subprocess
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Optional, List
 from dataclasses import asdict
@@ -34,16 +35,22 @@ try:
 except ImportError:
     MCP_AVAILABLE = False
 
-from .auth import YouTubeAuth
+from .auth import YouTubeAuth, resolve_token_file, resolve_client_secrets_file
 from .api_client import YouTubeAPIClient, QuotaExceededError
 from .cache import PersistentCache
 from .core.transcript_fetcher import TranscriptFetcher
+from .core.proxy import ProxySettings as CoreProxySettings
+from .config.settings import load_settings
 from .models import Playlist, Video, PrivacyStatus
 from .duplicates import DuplicateDetector
 from .statistics import PlaylistAnalyzer
 
 
 logger = logging.getLogger(__name__)
+
+# Cap how many transcript characters a single get_transcript call returns so one
+# tool call can't flood the MCP client's context window. 0 disables the cap.
+DEFAULT_TRANSCRIPT_MAX_CHARS = 20000
 
 
 class YangerMCPServer:
@@ -56,20 +63,83 @@ class YangerMCPServer:
         self.cache: Optional[PersistentCache] = None
         self.transcript_fetcher: Optional[TranscriptFetcher] = None
         self._authenticated = False
+        self._settings = None
+        self._proxy_settings = None
 
         # Register tool handlers
         self._register_tools()
 
+    def _load_proxy_settings(self) -> Optional[CoreProxySettings]:
+        """Load proxy settings from configuration."""
+        if self._proxy_settings is not None:
+            return self._proxy_settings
+
+        try:
+            settings = load_settings()
+            self._settings = settings
+
+            # Convert config ProxySettings to core ProxySettings
+            proxy_cfg = settings.transcripts.proxy
+            self._proxy_settings = CoreProxySettings(
+                enabled=proxy_cfg.enabled,
+                type=proxy_cfg.type,
+                http_url=proxy_cfg.http_url,
+                https_url=proxy_cfg.https_url,
+                webshare_username=proxy_cfg.webshare_username,
+                webshare_password=proxy_cfg.webshare_password,
+                webshare_locations=proxy_cfg.webshare_locations,
+            )
+
+            if self._proxy_settings.enabled:
+                logger.info(f"Proxy enabled: {self._proxy_settings.get_display_info()}")
+
+            return self._proxy_settings
+
+        except Exception as e:
+            logger.warning(f"Failed to load proxy settings: {e}")
+            return None
+
     def _ensure_auth(self) -> None:
-        """Ensure YouTube API client is authenticated."""
+        """Ensure YouTube API client is authenticated.
+
+        Resolves token/secret to absolute paths so the server is cwd-independent,
+        and fails fast (rather than launching an interactive browser OAuth flow,
+        which would hang a headless MCP client) when no token is present.
+        """
         if self._authenticated and self.api_client:
             return
 
-        auth = YouTubeAuth()
+        try:
+            settings = self._settings or load_settings()
+            self._settings = settings
+            secrets_cfg = getattr(settings.youtube, "client_secrets_file", None)
+            token_cfg = getattr(settings.youtube, "token_file", None)
+        except Exception as e:
+            logger.warning("Failed to load settings for auth paths: %s", e)
+            secrets_cfg = token_cfg = None
+
+        # Use the shared resolver so this matches exactly where `yanger auth` writes.
+        client_secrets = resolve_client_secrets_file(secrets_cfg)
+        token_file = resolve_token_file(token_cfg)
+
+        # Never trigger the interactive OAuth flow from here: an MCP client has
+        # no console to complete it, so a missing token must surface as an error.
+        if not token_file.exists():
+            raise RuntimeError(
+                f"Not authenticated — run `yanger auth` first (expected token at {token_file})"
+            )
+
+        auth = YouTubeAuth(
+            client_secrets_file=str(client_secrets),
+            token_file=str(token_file),
+        )
         auth.authenticate()
         self.api_client = YouTubeAPIClient(auth)
         self.cache = PersistentCache()
-        self.transcript_fetcher = TranscriptFetcher()
+
+        # Load proxy settings and create transcript fetcher
+        proxy_settings = self._load_proxy_settings()
+        self.transcript_fetcher = TranscriptFetcher(proxy_settings=proxy_settings)
         self._authenticated = True
 
     def _register_tools(self) -> None:
@@ -219,6 +289,11 @@ class YangerMCPServer:
                                 "type": "string",
                                 "description": "The playlist item ID (not the video ID)",
                             },
+                            "playlist_id": {
+                                "type": "string",
+                                "description": "The playlist the item belongs to. Optional, but "
+                                               "enables a targeted cache refresh instead of a full one.",
+                            },
                         },
                         "required": ["playlist_item_id"],
                     },
@@ -240,6 +315,11 @@ class YangerMCPServer:
                             "target_playlist_id": {
                                 "type": "string",
                                 "description": "The target playlist ID",
+                            },
+                            "source_playlist_id": {
+                                "type": "string",
+                                "description": "The source playlist ID. Optional, but lets the "
+                                               "source playlist's cache be refreshed too.",
                             },
                         },
                         "required": ["video_id", "source_playlist_item_id", "target_playlist_id"],
@@ -281,6 +361,13 @@ class YangerMCPServer:
                                 "enum": ["text", "json"],
                                 "description": "Output format: 'text' for plain text, 'json' for timestamps",
                                 "default": "text",
+                            },
+                            "max_chars": {
+                                "type": "integer",
+                                "description": "Max transcript characters to return (text format); "
+                                               "longer transcripts are truncated with a note so the "
+                                               "result can't flood context. Use 0 for no limit.",
+                                "default": DEFAULT_TRANSCRIPT_MAX_CHARS,
                             },
                         },
                         "required": ["video_id"],
@@ -570,6 +657,27 @@ class YangerMCPServer:
 
         return await handler(arguments)
 
+    def _invalidate_cache(self, *playlist_ids: Optional[str],
+                          playlists_list: bool = False) -> None:
+        """Drop stale cache entries after an API mutation.
+
+        The SQLite cache (7-day TTL) is shared with the TUI, so a mutation that
+        isn't reflected here resurfaces as stale data on the next list_* read.
+
+        Args:
+            playlist_ids: Playlists whose video lists changed. None entries are
+                ignored, since some callers only know a source/target lazily.
+            playlists_list: Set when the playlist collection itself changed
+                (create/delete/rename); this also clears every cached video list.
+        """
+        if not self.cache:
+            return
+        if playlists_list:
+            self.cache.invalidate_playlists_cache()
+        for playlist_id in playlist_ids:
+            if playlist_id:
+                self.cache.invalidate_playlist(playlist_id)
+
     # --- Playlist Management ---
 
     async def _list_playlists(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -657,6 +765,9 @@ class YangerMCPServer:
             privacy_status=privacy_status,
         )
 
+        # The playlist collection changed; force list_playlists to refetch.
+        self._invalidate_cache(playlists_list=True)
+
         return {
             "success": True,
             "playlist": {
@@ -674,6 +785,9 @@ class YangerMCPServer:
 
         self.api_client.delete_playlist(playlist_id)
 
+        # Collection changed; this also clears the deleted playlist's videos.
+        self._invalidate_cache(playlist_id, playlists_list=True)
+
         return {
             "success": True,
             "message": f"Deleted playlist {playlist_id}",
@@ -685,6 +799,9 @@ class YangerMCPServer:
         new_title = args["new_title"]
 
         self.api_client.rename_playlist(playlist_id, new_title)
+
+        # The cached title is stale; refetch the playlist collection.
+        self._invalidate_cache(playlist_id, playlists_list=True)
 
         return {
             "success": True,
@@ -746,6 +863,9 @@ class YangerMCPServer:
             position=position,
         )
 
+        # The new video must show up in list_videos for this playlist.
+        self._invalidate_cache(playlist_id)
+
         return {
             "success": True,
             "playlist_item_id": playlist_item_id,
@@ -755,8 +875,16 @@ class YangerMCPServer:
     async def _remove_video(self, args: dict[str, Any]) -> dict[str, Any]:
         """Remove a video from a playlist."""
         playlist_item_id = args["playlist_item_id"]
+        playlist_id = args.get("playlist_id")
 
         self.api_client.remove_video_from_playlist(playlist_item_id)
+
+        # Refresh so the removed video disappears from list_videos. Without a
+        # known playlist we must clear the whole playlists cache to stay correct.
+        if playlist_id:
+            self._invalidate_cache(playlist_id)
+        else:
+            self._invalidate_cache(playlists_list=True)
 
         return {
             "success": True,
@@ -768,6 +896,7 @@ class YangerMCPServer:
         video_id = args["video_id"]
         source_playlist_item_id = args["source_playlist_item_id"]
         target_playlist_id = args["target_playlist_id"]
+        source_playlist_id = args.get("source_playlist_id")
 
         # Create a temporary Video object for the move
         video = Video(
@@ -778,6 +907,9 @@ class YangerMCPServer:
         )
 
         new_item_id = self.api_client.move_video(video, target_playlist_id)
+
+        # Both ends changed; source_playlist_id is optional so may be skipped.
+        self._invalidate_cache(target_playlist_id, source_playlist_id)
 
         return {
             "success": True,
@@ -820,20 +952,43 @@ class YangerMCPServer:
 
     # --- Transcripts ---
 
+    @staticmethod
+    def _truncate_transcript(text: str, max_chars: Optional[int]) -> tuple[str, bool]:
+        """Cap transcript length so one tool call can't flood client context.
+
+        Returns the (possibly truncated) text and whether truncation occurred.
+        A falsy ``max_chars`` (None/0) means no limit.
+        """
+        if max_chars and len(text) > max_chars:
+            omitted = len(text) - max_chars
+            note = f"\n\n[... truncated {omitted} chars; pass a higher max_chars to get more]"
+            return text[:max_chars] + note, True
+        return text, False
+
     async def _get_transcript(self, args: dict[str, Any]) -> dict[str, Any]:
         """Get video transcript."""
         video_id = args["video_id"]
         format_type = args.get("format", "text")
+        max_chars = args.get("max_chars", DEFAULT_TRANSCRIPT_MAX_CHARS)
 
         # Initialize components if needed
         if not self.cache:
             self.cache = PersistentCache()
         if not self.transcript_fetcher:
-            self.transcript_fetcher = TranscriptFetcher()
+            proxy_settings = self._load_proxy_settings()
+            self.transcript_fetcher = TranscriptFetcher(proxy_settings=proxy_settings)
 
         # Check cache first
         cached = self.cache.get_transcript(video_id)
         if cached:
+            # A cached failure (e.g. NOT_AVAILABLE) stores no transcript body, so
+            # surface it instead of json.loads(None) / an empty text dump.
+            if cached.get("fetch_status") != "SUCCESS":
+                return {
+                    "video_id": video_id,
+                    "error": cached.get("fetch_status") or "NOT_AVAILABLE",
+                    "message": "Transcript not available",
+                }
             if format_type == "json":
                 return {
                     "video_id": video_id,
@@ -841,15 +996,16 @@ class YangerMCPServer:
                     "language": cached.get("language"),
                     "cached": True,
                 }
-            else:
-                # Decompress text
-                text = TranscriptFetcher.decompress_transcript(cached.get("transcript_text", b""))
-                return {
-                    "video_id": video_id,
-                    "transcript": text,
-                    "language": cached.get("language"),
-                    "cached": True,
-                }
+            # Decompress text
+            text = TranscriptFetcher.decompress_transcript(cached.get("transcript_text", b""))
+            text, truncated = self._truncate_transcript(text, max_chars)
+            return {
+                "video_id": video_id,
+                "transcript": text,
+                "language": cached.get("language"),
+                "cached": True,
+                "truncated": truncated,
+            }
 
         # Fetch fresh transcript
         transcript, status = self.transcript_fetcher.fetch_transcript(video_id)
@@ -880,13 +1036,16 @@ class YangerMCPServer:
                 "language": transcript.language,
                 "auto_generated": transcript.auto_generated,
             }
-        else:
-            return {
-                "video_id": video_id,
-                "transcript": TranscriptFetcher.format_as_text(transcript),
-                "language": transcript.language,
-                "auto_generated": transcript.auto_generated,
-            }
+        text, truncated = self._truncate_transcript(
+            TranscriptFetcher.format_as_text(transcript), max_chars
+        )
+        return {
+            "video_id": video_id,
+            "transcript": text,
+            "language": transcript.language,
+            "auto_generated": transcript.auto_generated,
+            "truncated": truncated,
+        }
 
     # --- Utilities ---
 
@@ -1094,6 +1253,10 @@ class YangerMCPServer:
             except Exception as e:
                 failed.append({"video": video, "reason": str(e)})
 
+        # Newly copied videos must appear in the target playlist's list_videos.
+        if copied:
+            self._invalidate_cache(target_playlist_id)
+
         return {
             "success": True,
             "copied_count": len(copied),
@@ -1188,7 +1351,8 @@ class YangerMCPServer:
         if not self.cache:
             self.cache = PersistentCache()
         if not self.transcript_fetcher:
-            self.transcript_fetcher = TranscriptFetcher()
+            proxy_settings = self._load_proxy_settings()
+            self.transcript_fetcher = TranscriptFetcher(proxy_settings=proxy_settings)
 
         # Get videos
         if playlist_id.startswith("virtual_"):
@@ -1275,10 +1439,12 @@ class YangerMCPServer:
                 "install_instructions": "go install github.com/danielmiessler/fabric@latest",
             }
 
-        # Get transcript
+        # Get transcript (uncapped: fabric needs the full text, not a
+        # context-capped excerpt, and the output goes to the subprocess).
         transcript_result = await self._get_transcript({
             "video_id": video_id,
             "format": "text",
+            "max_chars": 0,
         })
 
         if "error" in transcript_result:
@@ -1509,8 +1675,10 @@ class YangerMCPServer:
 def main() -> None:
     """Entry point for MCP server."""
     if not MCP_AVAILABLE:
-        print("Error: MCP package not installed.")
-        print("Install with: pip install 'yanger[mcp]'")
+        # stdout is the JSON-RPC channel for the MCP stdio server; diagnostics
+        # must go to stderr to avoid corrupting it.
+        print("Error: MCP package not installed.", file=sys.stderr)
+        print("Install with: pip install 'yanger[mcp]'", file=sys.stderr)
         return
 
     logging.basicConfig(level=logging.INFO)

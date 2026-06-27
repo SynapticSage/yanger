@@ -36,10 +36,10 @@ class TestTranscriptFetcher:
     @patch('yanger.core.transcript_fetcher.TranscriptFetcher.__init__')
     def test_initialization_handles_missing_api_library(self, mock_init):
         """Test graceful handling when youtube-transcript-api not installed."""
-        # Simulate ImportError by setting api to None
+        # Simulate ImportError: api property returns None when lib unavailable
         mock_init.return_value = None
         fetcher = TranscriptFetcher.__new__(TranscriptFetcher)
-        fetcher.api = None
+        fetcher._api_available = False
         fetcher.errors = {}
         fetcher.preferred_languages = ['en']
 
@@ -131,9 +131,14 @@ class TestTranscriptFetcherWithMockAPI:
     """Test TranscriptFetcher with mocked YouTube API."""
 
     def setup_mock_fetcher(self, mock_api, mock_errors=None):
-        """Helper to create fetcher with mocked API."""
+        """Helper to create fetcher with mocked API.
+
+        `api` is a read-only property backed by `_api_instance`, so inject the
+        mock there (and mark the library available) rather than assigning `api`.
+        """
         fetcher = TranscriptFetcher.__new__(TranscriptFetcher)
-        fetcher.api = mock_api
+        fetcher._api_available = True
+        fetcher._api_instance = mock_api
         fetcher.errors = mock_errors or {}
         fetcher.preferred_languages = ['en']
         return fetcher
@@ -154,19 +159,30 @@ class TestTranscriptFetcherWithMockAPI:
 
     def test_fetch_transcript_with_preferred_language(self):
         """Test fetcher tries preferred languages in order."""
+        from youtube_transcript_api._transcripts import (
+            FetchedTranscript,
+            FetchedTranscriptSnippet,
+        )
+
         mock_api = MagicMock()
         mock_transcript_list = MagicMock()
 
-        # Mock Spanish transcript
+        # Mock Spanish transcript (1.x fetch() returns a FetchedTranscript)
         mock_es_transcript = MagicMock()
         mock_es_transcript.language_code = "es"
         mock_es_transcript.is_generated = False
-        mock_es_transcript.fetch.return_value = [
-            {"start": 0.0, "duration": 1.0, "text": "Hola mundo"}
-        ]
+        mock_es_transcript.fetch.return_value = FetchedTranscript(
+            snippets=[
+                FetchedTranscriptSnippet(text="Hola mundo", start=0.0, duration=1.0)
+            ],
+            video_id="test_video",
+            language="Spanish",
+            language_code="es",
+            is_generated=False,
+        )
 
         mock_transcript_list.find_transcript.return_value = mock_es_transcript
-        mock_api.list_transcripts.return_value = mock_transcript_list
+        mock_api.list.return_value = mock_transcript_list
 
         fetcher = self.setup_mock_fetcher(mock_api)
         fetcher.preferred_languages = ['es', 'en']
@@ -180,7 +196,7 @@ class TestTranscriptFetcherWithMockAPI:
     def test_fetch_transcript_no_transcript_found(self, mock_transcript_errors):
         """Test handling when no transcript is found."""
         mock_api = MagicMock()
-        mock_api.list_transcripts.side_effect = mock_transcript_errors['NoTranscriptFound']()
+        mock_api.list.side_effect = mock_transcript_errors['NoTranscriptFound']()
 
         fetcher = self.setup_mock_fetcher(mock_api, mock_transcript_errors)
 
@@ -192,7 +208,7 @@ class TestTranscriptFetcherWithMockAPI:
     def test_fetch_transcript_disabled(self, mock_transcript_errors):
         """Test handling when transcripts are disabled."""
         mock_api = MagicMock()
-        mock_api.list_transcripts.side_effect = mock_transcript_errors['TranscriptsDisabled']()
+        mock_api.list.side_effect = mock_transcript_errors['TranscriptsDisabled']()
 
         fetcher = self.setup_mock_fetcher(mock_api, mock_transcript_errors)
 
@@ -204,7 +220,7 @@ class TestTranscriptFetcherWithMockAPI:
     def test_fetch_transcript_video_unavailable(self, mock_transcript_errors):
         """Test handling when video is unavailable."""
         mock_api = MagicMock()
-        mock_api.list_transcripts.side_effect = mock_transcript_errors['VideoUnavailable']()
+        mock_api.list.side_effect = mock_transcript_errors['VideoUnavailable']()
 
         fetcher = self.setup_mock_fetcher(mock_api, mock_transcript_errors)
 
@@ -216,7 +232,7 @@ class TestTranscriptFetcherWithMockAPI:
     def test_fetch_transcript_generic_error(self):
         """Test handling of unexpected errors."""
         mock_api = MagicMock()
-        mock_api.list_transcripts.side_effect = Exception("Network error")
+        mock_api.list.side_effect = Exception("Network error")
 
         fetcher = self.setup_mock_fetcher(mock_api)
 

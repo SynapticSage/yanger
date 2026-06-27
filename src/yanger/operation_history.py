@@ -81,18 +81,23 @@ class PasteOperation(Operation):
     def execute(self) -> bool:
         """Execute the paste operation."""
         try:
+            # Reset so a redo (execute after undo) starts from a clean slate
+            # instead of accumulating stale item ids from the prior run.
+            self.added_item_ids = []
+
             # Add videos to target playlist
             for video in self.videos:
                 item_id = self.api_client.add_video_to_playlist(
-                    video.id, 
+                    video.id,
                     self.target_playlist_id
                 )
                 self.added_item_ids.append(item_id)
-            
-            # If cut operation, remove from source
+
+            # If cut operation, remove from source. video.playlist_item_id is
+            # kept current by undo (see below), so this is correct on redo too.
             if self.is_cut and self.source_playlist_id:
                 for video in self.videos:
-                    if hasattr(video, 'playlist_item_id'):
+                    if video.playlist_item_id:
                         self.api_client.remove_video_from_playlist(
                             video.playlist_item_id
                         )
@@ -114,14 +119,19 @@ class PasteOperation(Operation):
             # Remove added videos from target
             for item_id in self.added_item_ids:
                 self.api_client.remove_video_from_playlist(item_id)
-            
-            # If cut operation, restore to source
+            self.added_item_ids = []
+
+            # If cut operation, restore to source. Re-adding mints a NEW
+            # playlist item id, so capture it back onto the video — otherwise a
+            # later redo would try to remove the now-invalid original id and
+            # leave the video duplicated in both playlists.
             if self.is_cut and self.source_playlist_id:
                 for video in self.videos:
-                    self.api_client.add_video_to_playlist(
+                    new_item_id = self.api_client.add_video_to_playlist(
                         video.id,
                         self.source_playlist_id
                     )
+                    video.playlist_item_id = new_item_id
             
             self.executed = False
             logger.info(f"Undone: {self.description}")
@@ -306,6 +316,8 @@ class BulkEditOperation(Operation):
             try:
                 self.api_client.update_video_position(
                     reorder.video.playlist_item_id,
+                    reorder.playlist_id,
+                    reorder.video.id,
                     reorder.new_position
                 )
                 self.applied_reorders.append(reorder)
@@ -339,6 +351,8 @@ class BulkEditOperation(Operation):
             try:
                 self.api_client.update_video_position(
                     reorder.video.playlist_item_id,
+                    reorder.playlist_id,
+                    reorder.video.id,
                     reorder.old_position
                 )
                 undo_count += 1
@@ -443,7 +457,7 @@ class DeleteVideosOperation(Operation):
         try:
             # Re-add videos to the playlist
             for video_data in self.deleted_videos_data:
-                self.api_client.add_to_playlist(
+                self.api_client.add_video_to_playlist(
                     video_data['video_id'],
                     self.playlist_id
                 )

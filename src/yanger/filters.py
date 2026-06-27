@@ -6,7 +6,7 @@ multiple criteria, operators, and combinations.
 # Created: 2025-09-13
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Callable, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -357,7 +357,11 @@ class VideoFilter:
                                                    criterion.value)
             
         except Exception as e:
-            logger.error(f"Error applying filter criterion: {e}")
+            # Surface the failing expression: a swallowed error here silently
+            # excludes every video (e.g. the tz naive/aware date comparison bug).
+            logger.warning(
+                f"Error applying filter criterion '{criterion.raw_expression}': {e}"
+            )
             return False
         
         return False
@@ -397,9 +401,19 @@ class VideoFilter:
             return value <= target
         return False
     
+    @staticmethod
+    def _ensure_aware(dt: datetime) -> datetime:
+        """Normalize to a tz-aware UTC datetime so naive and aware dates compare."""
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
     def _apply_date_operator(self, value: datetime, operator: FilterOperator,
                             target: datetime) -> bool:
         """Apply date comparison operator."""
+        # Filter targets are naive (strptime / datetime.now); video dates are
+        # tz-aware (models.py). Normalize both before comparing to avoid
+        # TypeError on offset-naive vs offset-aware datetimes.
+        value = self._ensure_aware(value)
+        target = self._ensure_aware(target)
         if operator == FilterOperator.EQUALS:
             return value.date() == target.date()
         elif operator == FilterOperator.NOT_EQUALS:

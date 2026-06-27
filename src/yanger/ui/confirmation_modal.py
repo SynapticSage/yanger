@@ -156,7 +156,14 @@ class ConfirmationModal(ModalScreen):
             self.dismiss(False)
     
     def on_key(self, event) -> None:
-        """Handle keyboard shortcuts."""
+        """Handle keyboard shortcuts.
+
+        This is a ModalScreen, so consume EVERY key while it is open. Otherwise
+        unhandled keys (q, j/k/g/d, ...) bubble to the app-level bindings and
+        navigation behind the dialog (e.g. 'q' would quit mid-confirmation).
+        Note: the app's priority 'quit' binding is additionally suppressed via
+        App.check_action while a modal is on the screen stack.
+        """
         if event.key == "escape":
             self.dismiss(False)
         elif event.key == "y" and self.dangerous:
@@ -165,6 +172,8 @@ class ConfirmationModal(ModalScreen):
         elif event.key == "n":
             # Allow 'n' for no
             self.dismiss(False)
+        # Consume all keys so nothing leaks to the app while the modal is open
+        event.stop()
     
     def dismiss(self, result: bool) -> None:
         """Dismiss the modal and send result message.

@@ -16,6 +16,7 @@ from pathlib import Path
 from datetime import datetime
 
 from yanger.core.transcript_fetcher import TranscriptFetcher
+from yanger.models import Playlist, PrivacyStatus
 from conftest import assert_db_table_exists, get_db_row_count, get_transcript_from_db
 
 
@@ -409,6 +410,74 @@ class TestClearTranscriptCache:
 
         count2 = test_cache.clear_transcript_cache()
         assert count2 == 0
+
+
+def _empty_playlist(pid="PLempty"):
+    """Build a Playlist whose API item_count is 0 (a genuinely empty playlist)."""
+    return Playlist(
+        id=pid, title="Empty", description="", item_count=0,
+        privacy_status=PrivacyStatus.PRIVATE, channel_id="c", channel_title="ch",
+    )
+
+
+class TestForeignKeysEnabled:
+    """Foreign keys must be ON for every connection, not just init."""
+
+    def test_connect_enables_foreign_keys(self, test_cache):
+        """A fresh connection from _connect has FK enforcement enabled."""
+        with test_cache._connect() as conn:
+            assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+    def test_delete_virtual_playlist_cascades(self, test_cache):
+        """Deleting a virtual playlist cascade-removes its videos (no orphans)."""
+        pid = test_cache.import_virtual_playlist(
+            "VP", [{"video_id": "a"}, {"video_id": "b"}]
+        )
+        assert get_db_row_count(test_cache.db_path, "virtual_videos") == 2
+
+        test_cache.delete_virtual_playlist(pid)
+        # Cascade only fires when foreign_keys is ON for this connection too.
+        assert get_db_row_count(test_cache.db_path, "virtual_videos") == 0
+
+
+class TestGetVideosEmptyCache:
+    """Empty-but-cached playlists are a cache hit ([]), not a miss (None)."""
+
+    def test_empty_cached_playlist_returns_empty_list(self, test_cache):
+        """item_count == 0 playlist returns [] so it isn't re-fetched forever."""
+        test_cache.set_playlists([_empty_playlist()])
+
+        result = test_cache.get_videos("PLempty")
+        assert result == []
+        assert result is not None
+
+    def test_not_yet_fetched_playlist_returns_none(self, test_cache, sample_playlist):
+        """Non-empty playlist with no cached videos is a miss (triggers fetch)."""
+        # sample_playlist.item_count == 10 but no videos cached yet.
+        test_cache.set_playlists([sample_playlist])
+        assert test_cache.get_videos(sample_playlist.id) is None
+
+    def test_set_playlists_refresh_preserves_cached_videos(
+        self, test_cache, sample_playlist, sample_video
+    ):
+        """Upsert (not REPLACE) keeps videos when the playlist list is refreshed."""
+        test_cache.set_playlists([sample_playlist])
+        test_cache.set_videos(sample_playlist.id, [sample_video])
+        assert len(test_cache.get_videos(sample_playlist.id)) == 1
+
+        # Re-running set_playlists must NOT cascade-delete the cached videos.
+        test_cache.set_playlists([sample_playlist])
+        cached = test_cache.get_videos(sample_playlist.id)
+        assert cached is not None
+        assert len(cached) == 1
+
+    def test_get_virtual_videos_empty_returns_list_not_none(self, test_cache):
+        """Virtual playlists are imported wholesale, so get_virtual_videos always
+        returns a list ([] when empty) — there is no None-miss path to fix here."""
+        pid = test_cache.import_virtual_playlist("EmptyVP", [])
+        assert test_cache.get_virtual_videos(pid) == []
+        # And an unknown id is also [] (never None), so callers never re-import.
+        assert test_cache.get_virtual_videos("does-not-exist") == []
 
 
 class TestTranscriptCacheIntegration:

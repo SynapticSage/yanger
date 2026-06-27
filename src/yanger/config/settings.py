@@ -4,11 +4,14 @@ Handles loading and merging configuration from multiple sources.
 """
 # Created: 2025-08-03
 
+import logging
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 import yaml
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,6 +79,18 @@ class CacheSettings:
 
 
 @dataclass
+class ProxySettings:
+    """Proxy settings for transcript fetching."""
+    enabled: bool = False
+    type: str = "generic"  # "generic" or "webshare"
+    http_url: str = ""  # For generic: http://user:pass@proxy:8080
+    https_url: str = ""  # For generic: https://user:pass@proxy:8080
+    webshare_username: str = ""  # For webshare
+    webshare_password: str = ""  # For webshare
+    webshare_locations: list = field(default_factory=list)  # e.g., ["us", "de"]
+
+
+@dataclass
 class TranscriptSettings:
     """Transcript caching settings."""
     enabled: bool = True
@@ -86,6 +101,10 @@ class TranscriptSettings:
     export_txt: bool = True  # Export plain text files
     export_json: bool = True  # Export JSON files with timestamps
     languages: list = field(default_factory=lambda: ["en"])  # Preferred languages
+    proxy: ProxySettings = field(default_factory=ProxySettings)  # Proxy configuration
+    # External shell command run by `:transcript` against the current video.
+    # Supports {url}/{id} placeholders; empty = unset (see resolve_transcript_command).
+    transcript_command: str = ""
 
 
 @dataclass
@@ -136,7 +155,12 @@ class Settings:
         # Update transcript settings
         if 'transcripts' in data:
             for key, value in data['transcripts'].items():
-                if hasattr(settings.transcripts, key):
+                if key == 'proxy' and isinstance(value, dict):
+                    # Handle nested proxy settings
+                    for pkey, pvalue in value.items():
+                        if hasattr(settings.transcripts.proxy, pkey):
+                            setattr(settings.transcripts.proxy, pkey, pvalue)
+                elif hasattr(settings.transcripts, key):
                     setattr(settings.transcripts, key, value)
 
         # Update YouTube settings
@@ -175,12 +199,19 @@ def load_settings(config_dir: Optional[Path] = None) -> Settings:
     Returns:
         Merged Settings object
     """
+    # Load .env files so env-var overrides below (and resolve_transcript_command)
+    # see them. User config .env wins over a project-local .env; neither overrides
+    # variables already exported in the shell (load_dotenv default).
+    from dotenv import load_dotenv
+    load_dotenv(Path.home() / ".config" / "yanger" / ".env")
+    load_dotenv()
+
     settings = Settings()
-    
+
     # Determine config directory
     if config_dir is None:
         config_dir = Path.home() / ".config" / "yanger"
-    
+
     # Load system default config
     default_config_path = Path(__file__).parent.parent.parent.parent / "config" / "default_config.yaml"
     if default_config_path.exists():
@@ -190,8 +221,9 @@ def load_settings(config_dir: Optional[Path] = None) -> Settings:
                 if data:
                     settings = Settings.from_dict(data)
         except Exception as e:
-            print(f"Warning: Failed to load default config: {e}")
-    
+            # Route to stderr via logging: stdout is the MCP JSON-RPC channel.
+            logger.warning(f"Failed to load default config: {e}")
+
     # Load user config
     user_config_path = config_dir / "config.yaml"
     if user_config_path.exists():
@@ -202,15 +234,18 @@ def load_settings(config_dir: Optional[Path] = None) -> Settings:
                     user_settings = Settings.from_dict(data)
                     settings.merge(user_settings)
         except Exception as e:
-            print(f"Warning: Failed to load user config: {e}")
-    
+            logger.warning(f"Failed to load user config: {e}")
+
     # Override with environment variables
     if api_key := os.environ.get('YOUTUBE_API_KEY'):
         settings.youtube.api_key = api_key
-    
+
     if cache_dir := os.environ.get('YANGER_CACHE_DIR'):
         settings.cache.directory = cache_dir
-    
+
+    if transcript_cmd := os.environ.get('YANGER_TRANSCRIPT_COMMAND'):
+        settings.transcripts.transcript_command = transcript_cmd
+
     return settings
 
 
@@ -228,15 +263,57 @@ def save_settings(settings: Settings, config_dir: Optional[Path] = None) -> None
     config_dir.mkdir(parents=True, exist_ok=True)
     
     # Convert to dictionary
+    transcript_data = dict(vars(settings.transcripts))
+    # Handle nested proxy settings
+    if hasattr(settings.transcripts, 'proxy'):
+        transcript_data['proxy'] = vars(settings.transcripts.proxy)
+
     data = {
         'ui': vars(settings.ui),
         'keybindings': vars(settings.keybindings),
         'cache': vars(settings.cache),
-        'transcripts': vars(settings.transcripts),
+        'transcripts': transcript_data,
         'youtube': vars(settings.youtube)
     }
     
     # Save to file
     config_path = config_dir / "config.yaml"
+    with open(config_path, 'w') as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+
+# Maps a `:set` key to the config-file section it is stored under.
+_USER_SETTING_SECTIONS = {
+    "transcript_command": "transcripts",
+}
+
+
+def save_user_setting(key: str, value: Any, config_dir: Optional[Path] = None) -> None:
+    """Persist a single setting to the user config YAML, merging (not overwriting).
+
+    Used by the runtime `:set` command so a one-off tweak doesn't rewrite every
+    default. Known keys (e.g. transcript_command) are stored under their section
+    so they load back correctly.
+    """
+    if config_dir is None:
+        config_dir = Path.home() / ".config" / "yanger"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+
+    data: Dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning(f"Could not read user config for update: {e}")
+            data = {}
+
+    section = _USER_SETTING_SECTIONS.get(key)
+    if section:
+        data.setdefault(section, {})[key] = value
+    else:
+        data[key] = value
+
     with open(config_path, 'w') as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)

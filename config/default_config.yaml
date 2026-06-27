@@ -61,6 +61,13 @@ transcripts:
   export_txt: true # Export plain text transcript files
   export_json: true # Export JSON files with timestamps and metadata
   languages: ["en"] # Preferred transcript languages (in priority order)
+  # External shell command run by `:transcript` on the current video. Supports
+  # {url} and {id} placeholders (if neither is present the video URL is appended).
+  # Empty = unset. Can also be set via the YANGER_TRANSCRIPT_COMMAND env var or
+  # at runtime with `:set transcript_command "..."`. Examples:
+  #   transcript_command: "summarize {url}"
+  #   transcript_command: "yeet {url} | fabric -sp summarize"
+  transcript_command: ""
 
 youtube:
   client_secrets_file: "config/client_secret.json"

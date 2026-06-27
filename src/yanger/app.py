@@ -30,7 +30,12 @@ from .ui.confirmation_modal import ConfirmationModal, ConfirmationResult
 from .ui.bulkedit_preview import BulkEditPreview, BulkEditConfirmed, BulkEditCancelled
 from .cache import PersistentCache
 from .keybindings import registry
-from .config.settings import load_settings
+from .config.settings import load_settings, save_user_setting
+from .core.transcript_command import (
+    build_command,
+    resolve_transcript_command,
+    run_transcript_command,
+)
 from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation, BulkEditOperation
 from .command_logger import CommandLogger
 from .export import PlaylistExporter
@@ -54,7 +59,9 @@ class YouTubeRangerApp(App):
         Binding(":", "command_mode", "Command"),
         Binding("/", "search", "Search"),
         Binding("r", "open_in_browser", "Open in Browser"),
-        Binding("u", "undo", "Undo"),
+        # 'u' is intentionally NOT a binding: it's a ranger-style prefix handled
+        # in on_key (uv = unmark all, uV = visual unmark, bare u = undo). A
+        # binding would fire undo before the follow-up key, making uv/uV unreachable.
         Binding("U", "redo", "Redo"),
         Binding("ctrl+r", "refresh", "Refresh"),
         Binding("ctrl+shift+r", "refresh_all", "Refresh All"),
@@ -115,6 +122,8 @@ class YouTubeRangerApp(App):
         # Ranger command state
         self._pending_command: Optional[str] = None
         self._pending_sort: bool = False
+        self._pending_u: bool = False  # 'u' prefix: awaiting v/V (unmark) or timeout->undo
+        self._pending_u_timer = None
         
         # UI components
         self.miller_view: Optional[MillerView] = None
@@ -426,9 +435,15 @@ class YouTubeRangerApp(App):
             playlist: Playlist to load videos for
             force_refresh: Force refresh from API even if cached
         """
+        # Track the selected playlist for ALL types up-front. Every branch below
+        # (virtual / WL / HL / cached) returns early, so setting it here is the
+        # only place guaranteed to run — otherwise gd/:export/:stats/open-in-browser
+        # would act on the previously-selected real playlist (delete-wrong-playlist).
+        self.current_playlist = playlist
+
         if not self.api_client:
             return
-            
+
         try:
             # Check if this is a virtual playlist
             if playlist.is_virtual:
@@ -513,10 +528,9 @@ class YouTubeRangerApp(App):
                 if self.miller_view:
                     await self.miller_view.set_videos([])
                 return
-            
-            # Update current playlist
-            self.current_playlist = playlist
-            
+
+            # (current_playlist already set at the top of this method)
+
             # Check cache first (unless force refresh)
             if not force_refresh:
                 cached_videos = self._cache.get_videos(playlist.id)
@@ -595,6 +609,18 @@ class YouTubeRangerApp(App):
             logger.error(f"Error loading videos: {e}")
             self.notify(f"Failed to load videos: {e}", severity="error")
     
+    def check_action(self, action: str, parameters):  # type: ignore[override]
+        """Gate global bindings while a modal/pushed screen is open.
+
+        The 'quit' binding is priority=True, so Textual fires it BEFORE the key
+        is forwarded to the active screen — meaning a child modal's event.stop()
+        cannot block it. Disable 'quit' whenever a screen is pushed on top of the
+        base screen so 'q' can't quit the app mid-confirmation.
+        """
+        if action == "quit" and len(self.screen_stack) > 1:
+            return False
+        return True
+
     def action_quit(self) -> None:
         """Quit the application."""
         if self.command_logger:
@@ -1165,6 +1191,25 @@ class YouTubeRangerApp(App):
                     self.status_bar.update_status("", "")
             self._pending_command = None
             event.stop()
+        # Resolve a pending 'u' prefix: uv = unmark all, uV = visual unmark,
+        # any other key = the bare 'u' was an undo (then this key is consumed).
+        elif self._pending_u:
+            self._cancel_pending_u_timer()
+            self._pending_u = False
+            if self.status_bar:
+                self.status_bar.update_status("", "")
+            video_column = self.miller_view.video_column if self.miller_view else None
+            if event.key == 'v' and video_column:
+                video_column.unselect_all()
+                self.post_message(MarksChanged(0))
+                self.notify("Unmarked all videos", timeout=2)
+            elif event.key == 'V' and video_column:
+                if not video_column.visual_mode:
+                    video_column.enter_visual_mode(unmark_mode=True)
+            else:
+                # Bare 'u' resolved by a different key -> undo
+                self.action_undo()
+            event.stop()
         # Check for single 'g' - wait for second key for 'gn' (new playlist) or 'gd' (delete playlist)
         elif event.key == 'g' and not getattr(self, '_pending_g', False):
             self._pending_g = True
@@ -1209,6 +1254,15 @@ class YouTubeRangerApp(App):
                     self.status_bar.update_status("", "")
             self._pending_c = False
             event.stop()
+        # Check for single 'u' - ranger prefix: wait briefly for v/V (unmark),
+        # otherwise (timeout or another key) it resolves to a plain undo.
+        elif event.key == 'u':
+            self._pending_u = True
+            self._cancel_pending_u_timer()
+            self._pending_u_timer = self.set_timer(0.4, self._resolve_bare_undo)
+            if self.status_bar:
+                self.status_bar.update_status("Press 'v':unmark all 'V':visual unmark (or wait for undo)", "")
+            event.stop()
         # Check for 'B' - bulk edit
         elif event.key == 'B':
             await self.execute_bulkedit()
@@ -1221,7 +1275,22 @@ class YouTubeRangerApp(App):
         elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'up', 'down', 'left', 'right', 'G', 'enter', 'space', 'd', 'y', 'p', 'n', 'N', 'v', 'V', 'escape', 'o', 'pageup', 'pagedown']:
             await self.miller_view.handle_key(event.key)
             event.stop()
-    
+
+    def _cancel_pending_u_timer(self) -> None:
+        """Stop any in-flight 'u'-prefix timer."""
+        if self._pending_u_timer is not None:
+            self._pending_u_timer.stop()
+            self._pending_u_timer = None
+
+    def _resolve_bare_undo(self) -> None:
+        """Timer callback: a 'u' with no follow-up key resolves to a plain undo."""
+        if self._pending_u:
+            self._pending_u = False
+            self._pending_u_timer = None
+            if self.status_bar:
+                self.status_bar.update_status("", "")
+            self.action_undo()
+
     def on_playlist_selected(self, message: PlaylistSelected) -> None:
         """Handle playlist selection message."""
         # Create task to handle async operation
@@ -1591,7 +1660,7 @@ class YouTubeRangerApp(App):
             if self.status_bar and self.current_playlist:
                 self.status_bar.update_status(
                     f"{len(self._clipboard)} in clipboard (cut)",
-                    f"{self.api_client.get_quota_remaining()}/10000"
+                    f"{self.api_client.get_quota_remaining()}/10000" if self.api_client else ""
                 )
                 
         elif command == 'y':  # Copy (yank)
@@ -1619,7 +1688,7 @@ class YouTubeRangerApp(App):
             if self.status_bar:
                 self.status_bar.update_status(
                     f"{len(self._clipboard)} in clipboard (copy)",
-                    f"{self.api_client.get_quota_remaining()}/10000"
+                    f"{self.api_client.get_quota_remaining()}/10000" if self.api_client else ""
                 )
                 
         elif command == 'p':  # Paste
@@ -1630,7 +1699,11 @@ class YouTubeRangerApp(App):
             if not self.current_playlist:
                 self.notify("No playlist selected", severity="warning")
                 return
-                
+
+            if not self.api_client:
+                self.notify("Cannot paste in offline mode", severity="warning")
+                return
+
             # Check quota
             operation_cost = 50 * len(self._clipboard)  # Each insert costs 50
             if self._clipboard.get_operation_type() == "cut":
@@ -2040,22 +2113,14 @@ class YouTubeRangerApp(App):
             dry_run = "--dry-run" in args if args else False
             self.call_later(self.execute_bulkedit, dry_run=dry_run)
 
-        elif cmd_name == "stats":
-            if self.current_playlist and self.current_videos:
-                total_duration = sum(v.duration or 0 for v in self.current_videos)
-                total_views = sum(v.view_count or 0 for v in self.current_videos)
-                avg_duration = total_duration / len(self.current_videos) if self.current_videos else 0
-                
-                stats_text = f"Playlist Statistics\n"
-                stats_text += f"Videos: {len(self.current_videos)}\n"
-                stats_text += f"Total Duration: {total_duration // 3600}h {(total_duration % 3600) // 60}m\n"
-                stats_text += f"Average Duration: {avg_duration // 60:.1f}m\n"
-                stats_text += f"Total Views: {total_views:,}\n"
-                
-                self.notify(stats_text, timeout=10)
-            else:
-                self.notify("No playlist selected", severity="warning")
-                
+        elif cmd_name == "transcript":
+            # Run the user-configured external transcript command on current video
+            self.call_later(self.run_transcript_for_current_video)
+
+        elif cmd_name == "set":
+            # Update a setting at runtime (and persist it to the user config)
+            self.handle_set_command(args)
+
         else:
             # Unknown command
             self.notify(f"Unknown command: {cmd_name}", severity="error")
@@ -2065,6 +2130,76 @@ class YouTubeRangerApp(App):
         # Just hide the command input
         if self.command_input:
             self.command_input.hide()
+
+    async def run_transcript_for_current_video(self) -> None:
+        """Run the user-configured transcript command on the current video.
+
+        Resolves the command (`:set` > env > YAML), substitutes {url}/{id}, then
+        runs it inside `with self.suspend():` so streaming tools (e.g. fabric)
+        render directly in the terminal. Errors surface on the status bar.
+        """
+        if not self.current_video:
+            self._notify_status("No video selected", error=True)
+            return
+
+        template = resolve_transcript_command(self.settings)
+        if not template:
+            self._notify_status(
+                'No transcript command configured. Set one with '
+                ':set transcript_command "yeet {url} | fabric -sp summarize"  (or .env)',
+                error=True,
+            )
+            return
+
+        cmd = build_command(template, self.current_video)
+        try:
+            with self.suspend():
+                exit_code = await asyncio.to_thread(run_transcript_command, cmd)
+        except Exception as e:
+            logger.error(f"Transcript command failed: {e}")
+            self._notify_status(f"Transcript command error: {e}", error=True)
+            return
+        finally:
+            # Redraw the TUI after the external program returns.
+            self.refresh()
+
+        if exit_code == 0:
+            self._notify_status("Transcript command finished")
+        else:
+            self._notify_status(f"Transcript command exited with code {exit_code}", error=True)
+
+    def handle_set_command(self, args: List[str]) -> None:
+        """Handle `:set <key> <value>` - update in-memory settings and persist.
+
+        Extensible by design; only transcript_command is wired today.
+        """
+        if len(args) < 2:
+            self._notify_status(
+                'Usage: :set <key> <value>  e.g. :set transcript_command "summarize {url}"',
+                error=True,
+            )
+            return
+
+        key = args[0]
+        value = " ".join(args[1:])  # parse_command already strips matched quotes
+
+        if key == "transcript_command":
+            self.settings.transcripts.transcript_command = value
+            try:
+                save_user_setting("transcript_command", value, self.config_dir)
+            except Exception as e:
+                logger.error(f"Failed to persist transcript_command: {e}")
+                self._notify_status(f"Set in memory, but failed to persist: {e}", error=True)
+                return
+            self._notify_status("Set transcript_command (persisted to user config)")
+        else:
+            self._notify_status(f"Unknown setting: {key}", error=True)
+
+    def _notify_status(self, message: str, error: bool = False) -> None:
+        """Show a message on both the toast and the status bar."""
+        self.notify(message, severity="error" if error else "information", timeout=5)
+        if self.status_bar:
+            self.status_bar.update_status(message, "")
 
     async def execute_bulkedit(self, dry_run: bool = False) -> None:
         """Execute bulk edit functionality."""

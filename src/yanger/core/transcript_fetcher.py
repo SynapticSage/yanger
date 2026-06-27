@@ -1,15 +1,20 @@
 """Transcript fetching and processing for YouTube videos.
 
 Handles fetching, compression, and formatting of video transcripts.
+Supports proxy configuration to work around YouTube IP blocking.
 """
 # Created: 2025-11-07
+# Modified: 2025-12-30 - Added proxy support
 
 import gzip
 import json
 import logging
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, asdict
 from datetime import datetime
+
+if TYPE_CHECKING:
+    from .proxy import ProxySettings
 
 logger = logging.getLogger(__name__)
 
@@ -48,32 +53,61 @@ class TranscriptData:
 class TranscriptFetcher:
     """Fetches and processes YouTube video transcripts."""
 
-    def __init__(self, preferred_languages: Optional[List[str]] = None):
+    def __init__(
+        self,
+        preferred_languages: Optional[List[str]] = None,
+        proxy_settings: Optional["ProxySettings"] = None,
+    ):
         """Initialize transcript fetcher.
 
         Args:
             preferred_languages: List of preferred language codes (e.g., ['en', 'es'])
+            proxy_settings: Optional proxy configuration for bypassing IP blocks
         """
         self.preferred_languages = preferred_languages or ['en']
+        self.proxy_settings = proxy_settings
+        self._api_instance = None
 
         # Import youtube_transcript_api here to fail gracefully
         try:
-            from youtube_transcript_api import YouTubeTranscriptApi
             from youtube_transcript_api._errors import (
                 TranscriptsDisabled,
                 NoTranscriptFound,
                 VideoUnavailable
             )
-            self.api = YouTubeTranscriptApi
             self.errors = {
                 'TranscriptsDisabled': TranscriptsDisabled,
                 'NoTranscriptFound': NoTranscriptFound,
                 'VideoUnavailable': VideoUnavailable
             }
+            self._api_available = True
         except ImportError:
             logger.error("youtube-transcript-api not installed. Install with: pip install youtube-transcript-api")
-            self.api = None
+            self._api_available = False
             self.errors = {}
+
+    @property
+    def api(self):
+        """Lazy-load the API instance with proxy configuration."""
+        if not self._api_available:
+            return None
+
+        if self._api_instance is None:
+            from .proxy import create_transcript_api
+            self._api_instance = create_transcript_api(self.proxy_settings)
+            if self.proxy_settings and self.proxy_settings.enabled:
+                logger.info(f"Transcript API initialized with proxy: {self.proxy_settings.get_display_info()}")
+
+        return self._api_instance
+
+    def update_proxy_settings(self, proxy_settings: Optional["ProxySettings"]) -> None:
+        """Update proxy settings and recreate API instance.
+
+        Args:
+            proxy_settings: New proxy configuration
+        """
+        self.proxy_settings = proxy_settings
+        self._api_instance = None  # Force recreation on next access
 
     def fetch_transcript(self, video_id: str) -> Tuple[Optional[TranscriptData], str]:
         """Fetch transcript for a video.
@@ -83,14 +117,15 @@ class TranscriptFetcher:
 
         Returns:
             Tuple of (TranscriptData, status) where status is:
-                'SUCCESS', 'NOT_AVAILABLE', 'ERROR'
+                'SUCCESS', 'NOT_AVAILABLE', 'ERROR', 'IP_BLOCKED'
         """
         if not self.api:
             return None, 'ERROR'
 
         try:
             # Try to get transcript in preferred languages
-            transcript_list = self.api.list_transcripts(video_id)
+            # 1.x API: instance.list(video_id) (was list_transcripts in 0.x)
+            transcript_list = self.api.list(video_id)
 
             # Try preferred languages first
             transcript = None
@@ -117,17 +152,17 @@ class TranscriptFetcher:
             if not transcript:
                 return None, 'NOT_AVAILABLE'
 
-            # Fetch the transcript data
+            # Fetch the transcript data (1.x returns a FetchedTranscript of snippet objects)
             transcript_data = transcript.fetch()
 
-            # Convert to our format
+            # 1.x snippets expose .start/.duration/.text as attributes, not dict keys
             segments = [
                 TranscriptSegment(
-                    start=entry['start'],
-                    duration=entry['duration'],
-                    text=entry['text']
+                    start=snippet.start,
+                    duration=snippet.duration,
+                    text=snippet.text
                 )
-                for entry in transcript_data
+                for snippet in transcript_data
             ]
 
             result = TranscriptData(
@@ -144,6 +179,11 @@ class TranscriptFetcher:
         except Exception as e:
             error_name = type(e).__name__
             error_str = str(e).lower()
+
+            # IP blocking detection (RequestBlocked, IpBlocked)
+            if error_name in ['RequestBlocked', 'IpBlocked'] or 'blocking requests' in error_str:
+                logger.warning(f"YouTube is blocking requests for video {video_id}. Consider using a proxy.")
+                return None, 'IP_BLOCKED'
 
             # Known "not available" cases
             if error_name == 'TranscriptsDisabled':

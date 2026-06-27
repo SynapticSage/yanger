@@ -172,6 +172,38 @@ class TestMCPServerInitialization:
         assert server._authenticated is False
 
 
+class TestEnsureAuth:
+    """Test authentication path resolution and fail-fast behavior."""
+
+    def test_fails_fast_without_token(self, tmp_path, monkeypatch):
+        """A missing token must raise, never launch the interactive OAuth flow."""
+        # Anchor config resolution at an empty home so no token exists.
+        monkeypatch.setattr("yanger.mcp_server.Path.home", lambda: tmp_path)
+        server = YangerMCPServer()
+
+        with pytest.raises(RuntimeError, match="Not authenticated"):
+            server._ensure_auth()
+
+    def test_uses_absolute_cwd_independent_paths(self, tmp_path, monkeypatch):
+        """Token/secret handed to YouTubeAuth must be absolute, not cwd-relative."""
+        monkeypatch.setattr("yanger.mcp_server.Path.home", lambda: tmp_path)
+        token = tmp_path / ".config" / "yanger" / "token.json"
+        token.parent.mkdir(parents=True, exist_ok=True)
+        token.write_text("{}")
+
+        with patch("yanger.mcp_server.YouTubeAuth") as MockAuth, \
+             patch("yanger.mcp_server.YouTubeAPIClient"), \
+             patch("yanger.mcp_server.PersistentCache"), \
+             patch("yanger.mcp_server.TranscriptFetcher"):
+            server = YangerMCPServer()
+            server._ensure_auth()
+
+        _, kwargs = MockAuth.call_args
+        assert kwargs["token_file"] == str(token)
+        assert Path(kwargs["client_secrets_file"]).is_absolute()
+        assert server._authenticated is True
+
+
 class TestListTools:
     """Test tool listing."""
 
@@ -260,6 +292,8 @@ class TestPlaylistTools:
         assert result["success"] is True
         assert result["playlist"]["title"] == "New Playlist"
         mcp_server.api_client.create_playlist.assert_called_once()
+        # Cache must be invalidated so list_playlists shows the new playlist.
+        mcp_server.cache.invalidate_playlists_cache.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_delete_playlist(self, mcp_server):
@@ -268,6 +302,7 @@ class TestPlaylistTools:
 
         assert result["success"] is True
         mcp_server.api_client.delete_playlist.assert_called_once_with("PL_delete")
+        mcp_server.cache.invalidate_playlists_cache.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_rename_playlist(self, mcp_server):
@@ -279,6 +314,7 @@ class TestPlaylistTools:
 
         assert result["success"] is True
         mcp_server.api_client.rename_playlist.assert_called_once_with("PL_music", "My Music")
+        mcp_server.cache.invalidate_playlists_cache.assert_called_once()
 
 
 class TestVideoTools:
@@ -318,6 +354,8 @@ class TestVideoTools:
 
         assert result["success"] is True
         assert result["playlist_item_id"] == "new_item_id"
+        # The target playlist's video cache must be refreshed.
+        mcp_server.cache.invalidate_playlist.assert_called_once_with("PL_music")
 
     @pytest.mark.asyncio
     async def test_add_video_with_position(self, mcp_server):
@@ -345,6 +383,20 @@ class TestVideoTools:
 
         assert result["success"] is True
         mcp_server.api_client.remove_video_from_playlist.assert_called_once_with("item_to_remove")
+        # Without a known playlist_id, fall back to a full playlists invalidation.
+        mcp_server.cache.invalidate_playlists_cache.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_remove_video_targeted(self, mcp_server):
+        """Should do a targeted invalidation when playlist_id is supplied."""
+        result = await mcp_server._remove_video({
+            "playlist_item_id": "item_to_remove",
+            "playlist_id": "PL_music",
+        })
+
+        assert result["success"] is True
+        mcp_server.cache.invalidate_playlist.assert_called_once_with("PL_music")
+        mcp_server.cache.invalidate_playlists_cache.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_move_video(self, mcp_server):
@@ -355,10 +407,14 @@ class TestVideoTools:
             "video_id": "video1",
             "source_playlist_item_id": "item1",
             "target_playlist_id": "PL_coding",
+            "source_playlist_id": "PL_music",
         })
 
         assert result["success"] is True
         assert result["new_playlist_item_id"] == "new_item_id"
+        # Both source and target playlist caches must be refreshed.
+        invalidated = {c.args[0] for c in mcp_server.cache.invalidate_playlist.call_args_list}
+        assert invalidated == {"PL_coding", "PL_music"}
 
     @pytest.mark.asyncio
     async def test_search_videos(self, mcp_server):
@@ -420,6 +476,7 @@ class TestTranscriptTool:
             "transcript_json": '{"segments": []}',
             "language": "en",
             "auto_generated": False,
+            "fetch_status": "SUCCESS",
         }
 
         # Need to mock decompress for cached transcripts
@@ -432,6 +489,43 @@ class TestTranscriptTool:
             })
 
         assert result["cached"] is True
+
+    @pytest.mark.asyncio
+    async def test_get_transcript_cached_not_available(self, mcp_server):
+        """A cached failure must return an error, not decompress/json.loads None."""
+        mcp_server.cache.get_transcript.return_value = {
+            "video_id": "no_transcript_video",
+            "transcript_text": None,
+            "transcript_json": None,
+            "language": None,
+            "auto_generated": False,
+            "fetch_status": "NOT_AVAILABLE",
+        }
+
+        # json format previously crashed on json.loads(None); now it errors cleanly.
+        result = await mcp_server._get_transcript({
+            "video_id": "no_transcript_video",
+            "format": "json",
+        })
+
+        assert result["error"] == "NOT_AVAILABLE"
+        assert "transcript" not in result
+
+    @pytest.mark.asyncio
+    async def test_get_transcript_truncated(self, mcp_server):
+        """Long transcripts should be truncated to max_chars with a note."""
+        long_text = "word " * 1000  # 5000 chars
+        with patch("yanger.mcp_server.TranscriptFetcher.format_as_text", return_value=long_text):
+            result = await mcp_server._get_transcript({
+                "video_id": "video1",
+                "format": "text",
+                "max_chars": 100,
+            })
+
+        assert result["truncated"] is True
+        assert "truncated" in result["transcript"]
+        # Body is capped at max_chars (plus the appended note).
+        assert result["transcript"].startswith(long_text[:100])
 
     @pytest.mark.asyncio
     async def test_get_transcript_not_available(self, mcp_server):
@@ -591,6 +685,8 @@ class TestAdvancedAnalysisTools:
         assert result["copied_count"] == 2
         assert result["source"] == "PL_music"
         assert result["target"] == "PL_coding"
+        # The target playlist's cache must be refreshed after copying.
+        mcp_server.cache.invalidate_playlist.assert_called_once_with("PL_coding")
 
     @pytest.mark.asyncio
     async def test_copy_videos_from_virtual(self, mcp_server):

@@ -6,6 +6,7 @@ Allows editing playlist structure in a text editor using markdown format.
 
 import os
 import re
+import shlex
 import tempfile
 import subprocess
 from dataclasses import dataclass, field
@@ -16,6 +17,26 @@ import logging
 from .models import Playlist, Video
 
 logger = logging.getLogger(__name__)
+
+# Parse-coverage guard thresholds (fix #2): the executor deletes first, so we
+# refuse to infer mass deletions from a parse we don't fully understand. A
+# reindent / smart-quote / wrapped line that fails the strict patterns would
+# otherwise read as "user removed these videos" and wipe them out.
+MAX_DELETION_FRACTION = 0.5
+MIN_VIDEOS_FOR_DELETION_GUARD = 10
+
+
+class BulkEditError(Exception):
+    """Base error for bulk edit failures surfaced to the user."""
+
+
+class BulkEditParseError(BulkEditError):
+    """Raised when the edited markdown cannot be parsed safely.
+
+    Aborts the apply instead of inferring destructive intent (deletions) from a
+    parse failure. Callers (app.py ``execute_bulkedit``) already wrap bulk edit
+    in try/except and notify the user with the message.
+    """
 
 
 @dataclass
@@ -150,41 +171,43 @@ class BulkEditParser:
         """
         changes = BulkEditChanges()
 
-        # Build lookup maps
+        # Build lookup maps.
         playlists_by_id = {p.id: p for p in original_playlists}
-        all_videos = {}  # video_id -> (Video, original_playlist_id)
+
+        # Key every original occurrence by its UNIQUE playlist_item_id, not the
+        # bare video id (fix #1). The same video can legitimately live in
+        # several playlists; each appearance has its own item id. Keying by
+        # video.id let the second occurrence clobber the first, fabricating a
+        # cross-playlist move that deleted the user's other copy even on a no-op.
+        occ_by_item = {}  # playlist_item_id -> (Video, original_playlist_id)
         for playlist_id, videos in original_videos_by_playlist.items():
             for video in videos:
-                all_videos[video.id] = (video, playlist_id)
+                occ_by_item[video.playlist_item_id] = (video, playlist_id)
 
-        # Parse edited structure
-        edited_structure = {}  # playlist_id -> list of (video_id, new_title, position)
+        # Parse edited structure, tracking each surviving line by its item id.
+        edited_structure = {}  # playlist_id -> list of item_ids (in edited order)
         current_playlist_id = None
-        current_position = 0
-        edited_playlist_titles = {}  # playlist_id -> new_title
+        parsed_item_ids = set()    # guards against a copy-pasted (duplicate) line
+        unmatched_lines = []       # content lines matching NEITHER pattern (fix #2)
 
-        lines = content.split('\n')
-        for line in lines:
-            # Skip empty lines and comments
-            if not line.strip() or line.strip().startswith('#'):
+        for line in content.split('\n'):
+            stripped = line.strip()
+            # Skip blank lines and comments / instructions.
+            if not stripped or stripped.startswith('#'):
                 continue
 
-            # Check for playlist line
+            # Playlist header line.
             playlist_match = self.PLAYLIST_PATTERN.match(line)
             if playlist_match:
                 new_title = playlist_match.group(1)
                 playlist_id = playlist_match.group(2)
                 current_playlist_id = playlist_id
-                current_position = 0
+                edited_structure.setdefault(playlist_id, [])
 
-                if playlist_id not in edited_structure:
-                    edited_structure[playlist_id] = []
-
-                # Check for playlist rename
+                # Playlist rename.
                 if playlist_id in playlists_by_id:
                     original_title = playlists_by_id[playlist_id].title
                     if new_title != original_title:
-                        edited_playlist_titles[playlist_id] = new_title
                         changes.renames.append(ItemRename(
                             item_type='playlist',
                             item_id=playlist_id,
@@ -193,73 +216,106 @@ class BulkEditParser:
                         ))
                 continue
 
-            # Check for video line
+            # Video line. Must sit under a playlist and carry a known item id.
             video_match = self.VIDEO_PATTERN.match(line)
             if video_match and current_playlist_id:
                 new_title = video_match.group(1)
-                video_id = video_match.group(2)
                 item_id = video_match.group(3)
 
-                if video_id in all_videos:
-                    video, original_playlist_id = all_videos[video_id]
-
-                    # Check for video rename
-                    if new_title != video.title:
-                        changes.renames.append(ItemRename(
-                            item_type='video',
-                            item_id=video_id,
-                            old_name=video.title,
-                            new_name=new_title
-                        ))
-
-                    # Track video in new structure
-                    edited_structure[current_playlist_id].append(
-                        (video_id, current_position)
-                    )
-                    current_position += 1
-
-        # Detect moves and reorders
-        seen_videos = set()
-
-        for playlist_id, video_positions in edited_structure.items():
-            for video_id, new_pos in video_positions:
-                if video_id in seen_videos:
-                    # Skip duplicate (shouldn't happen in valid edit)
-                    logger.warning(f"Duplicate video {video_id} in edited structure")
+                if item_id not in occ_by_item:
+                    # Unknown / garbled item id: don't guess, let the guard see it.
+                    unmatched_lines.append(line)
+                    continue
+                if item_id in parsed_item_ids:
+                    logger.warning(f"Duplicate item {item_id} in edited structure; skipping")
                     continue
 
-                seen_videos.add(video_id)
-                video, original_playlist_id = all_videos[video_id]
+                parsed_item_ids.add(item_id)
+                video, _orig_pl = occ_by_item[item_id]
 
-                if playlist_id != original_playlist_id:
-                    # Video moved to different playlist
+                # Video rename.
+                if new_title != video.title:
+                    changes.renames.append(ItemRename(
+                        item_type='video',
+                        item_id=video.id,
+                        old_name=video.title,
+                        new_name=new_title
+                    ))
+
+                edited_structure[current_playlist_id].append(item_id)
+                continue
+
+            # Any other non-blank, non-comment line failed to parse.
+            unmatched_lines.append(line)
+
+        # Parse-coverage guard #1 (fix #2): if we couldn't account for a line,
+        # abort rather than read its absence as "delete these videos".
+        if unmatched_lines:
+            sample = unmatched_lines[0].strip()[:60]
+            raise BulkEditParseError(
+                f"Bulk edit aborted: {len(unmatched_lines)} line(s) could not be parsed "
+                f"(e.g. {sample!r}). Refusing to apply, since unparsed lines would be "
+                f"treated as deletions. Re-edit without reindenting or altering the "
+                f"<!-- id:...,item:... --> markers."
+            )
+
+        # Detect moves and reorders, occurrence by occurrence.
+        seen_items = set()
+        for playlist_id, edited_item_ids in edited_structure.items():
+            # Stayers keep their original playlist; movers-in came from elsewhere.
+            stayer_set = {iid for iid in edited_item_ids
+                          if occ_by_item[iid][1] == playlist_id}
+
+            # Original order of the survivors only (deleted / moved-away items
+            # dropped) so a single deletion doesn't cascade into a reorder for
+            # every following video (fix #5).
+            orig_rel = {
+                v.playlist_item_id: i
+                for i, v in enumerate(
+                    vp for vp in original_videos_by_playlist.get(playlist_id, [])
+                    if vp.playlist_item_id in stayer_set
+                )
+            }
+            new_rel = {iid: i for i, iid in enumerate(
+                iid for iid in edited_item_ids if iid in stayer_set
+            )}
+
+            for abs_pos, item_id in enumerate(edited_item_ids):
+                seen_items.add(item_id)
+                video, original_playlist_id = occ_by_item[item_id]
+
+                if original_playlist_id != playlist_id:
+                    # Moved to a different playlist.
                     changes.moves.append(VideoMove(
                         video=video,
                         source_playlist_id=original_playlist_id,
                         target_playlist_id=playlist_id,
-                        new_position=new_pos
+                        new_position=abs_pos
                     ))
-                else:
-                    # Check if reordered within same playlist
-                    original_videos = original_videos_by_playlist.get(playlist_id, [])
-                    original_pos = None
-                    for i, orig_video in enumerate(original_videos):
-                        if orig_video.id == video_id:
-                            original_pos = i
-                            break
+                elif orig_rel[item_id] != new_rel[item_id]:
+                    # Stayed, but its rank among surviving siblings changed.
+                    changes.reorders.append(VideoReorder(
+                        video=video,
+                        playlist_id=playlist_id,
+                        old_position=orig_rel[item_id],
+                        new_position=new_rel[item_id]
+                    ))
 
-                    if original_pos is not None and original_pos != new_pos:
-                        changes.reorders.append(VideoReorder(
-                            video=video,
-                            playlist_id=playlist_id,
-                            old_position=original_pos,
-                            new_position=new_pos
-                        ))
-
-        # Detect deletions
-        for video_id, (video, playlist_id) in all_videos.items():
-            if video_id not in seen_videos:
+        # Detect deletions: any original occurrence not seen in the edit.
+        for item_id, (video, playlist_id) in occ_by_item.items():
+            if item_id not in seen_items:
                 changes.deletions.append((video, playlist_id))
+
+        # Parse-coverage guard #2 (fix #2): a suspiciously large deletion ratio
+        # on a non-trivial library is more likely a parse glitch than intent.
+        total_original = len(occ_by_item)
+        if (total_original >= MIN_VIDEOS_FOR_DELETION_GUARD
+                and len(changes.deletions) > total_original * MAX_DELETION_FRACTION):
+            raise BulkEditParseError(
+                f"Bulk edit aborted: {len(changes.deletions)} of {total_original} videos "
+                f"would be deleted (> {int(MAX_DELETION_FRACTION * 100)}%). This looks like a "
+                f"parse error, not intent. If deliberate, delete fewer videos per edit."
+            )
 
         return changes
 
@@ -295,11 +351,12 @@ class BulkEditExecutor:
         if dry_run:
             logger.info("DRY RUN - No changes will be made")
 
+        # The api_client methods below are SYNCHRONOUS, so they are not awaited.
         # Process deletions first
         for video, playlist_id in changes.deletions:
             try:
                 if not dry_run:
-                    await self.api_client.remove_from_playlist(
+                    self.api_client.remove_video_from_playlist(
                         video.playlist_item_id
                     )
                 results['success'].append(
@@ -315,13 +372,13 @@ class BulkEditExecutor:
             try:
                 if not dry_run:
                     # Add to target playlist
-                    await self.api_client.add_video_to_playlist(
+                    self.api_client.add_video_to_playlist(
                         move.video.id,
                         move.target_playlist_id,
                         position=move.new_position
                     )
                     # Remove from source playlist
-                    await self.api_client.remove_from_playlist(
+                    self.api_client.remove_video_from_playlist(
                         move.video.playlist_item_id
                     )
                 results['success'].append(
@@ -336,8 +393,10 @@ class BulkEditExecutor:
         for reorder in sorted(changes.reorders, key=lambda r: r.new_position):
             try:
                 if not dry_run:
-                    await self.api_client.update_video_position(
+                    self.api_client.update_video_position(
                         reorder.video.playlist_item_id,
+                        reorder.playlist_id,
+                        reorder.video.id,
                         reorder.new_position
                     )
                 results['success'].append(
@@ -390,11 +449,18 @@ class BulkEditor:
             temp_path = f.name
 
         try:
-            # Get editor from environment or use default
+            # Get editor from environment or use default.
             editor = os.environ.get('EDITOR', 'vim')
 
-            # Launch editor
-            result = subprocess.run([editor, temp_path])
+            # shlex.split so EDITOR values carrying flags (e.g. "code --wait")
+            # are launched as command + args instead of one bogus executable.
+            try:
+                result = subprocess.run(shlex.split(editor) + [temp_path])
+            except FileNotFoundError as e:
+                raise BulkEditError(
+                    f"Could not launch editor '{editor}': {e}. "
+                    f"Set $EDITOR to an installed editor."
+                ) from e
 
             if result.returncode == 0:
                 # Read edited content
@@ -409,7 +475,7 @@ class BulkEditor:
             # Clean up temp file
             try:
                 os.unlink(temp_path)
-            except:
+            except OSError:
                 pass
 
     async def bulk_edit(self, playlists: List[Playlist],
@@ -435,13 +501,10 @@ class BulkEditor:
             # Cancelled or no changes
             return BulkEditChanges(), {}
 
-        # Parse changes
+        # Parse changes. Parsing only -- the app shows BulkEditPreview and then
+        # applies via BulkEditOperation on confirm, so executing here too would
+        # double-apply every change (and the second pass would fail on already
+        # deleted items). Execution is the caller's responsibility.
         changes = self.parser.parse(edited, playlists, videos_by_playlist)
 
-        if changes.is_empty():
-            return changes, {}
-
-        # Execute changes
-        results = await self.executor.execute(changes, dry_run=dry_run)
-
-        return changes, results
+        return changes, {}

@@ -102,35 +102,44 @@ class StatusBar(Widget):
             self.left_widget.update(display_text)
             
     def update_status(self, status: str, quota: str = "") -> None:
-        """Update status message and quota info."""
+        """Update status message and quota info.
+
+        Callers pass quota as "<remaining>/<total>" (the value from
+        api_client.get_quota_remaining()). We surface how much is LEFT and
+        colour by how much has been USED, so a fresh session reads green
+        ("Quota left: 10,000") rather than a misleading critical red.
+        """
         self.status = status
         self.quota = quota
-        
+
         if self.center_widget:
             self.center_widget.update(status)
-            
+
         if self.right_widget and quota:
-            # Parse quota to add warning colors
+            display = f"Quota: {quota}"
+            # Parse "remaining/total" to add warning colours based on usage
             if "/" in quota:
-                used, total = quota.split("/")
+                remaining, total = quota.split("/")
                 try:
-                    used_int = int(used)
+                    remaining_int = int(remaining)
                     total_int = int(total)
-                    percentage = (used_int / total_int) * 100
-                    
-                    if percentage >= 90:
+                    used_pct = ((total_int - remaining_int) / total_int) * 100 if total_int else 0
+
+                    if used_pct >= 90:
                         self.right_widget.add_class("quota-critical")
                         self.right_widget.remove_class("quota-warning")
-                    elif percentage >= 75:
+                    elif used_pct >= 75:
                         self.right_widget.add_class("quota-warning")
                         self.right_widget.remove_class("quota-critical")
                     else:
                         self.right_widget.remove_class("quota-warning")
                         self.right_widget.remove_class("quota-critical")
+
+                    display = f"Quota left: {remaining_int:,}"
                 except ValueError:
                     pass
-                    
-            self.right_widget.update(f"Quota: {quota}")
+
+            self.right_widget.update(display)
             
     def update_hints(self, custom_hints: Optional[str] = None) -> None:
         """Update keyboard hints based on current mode.

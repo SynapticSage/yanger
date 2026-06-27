@@ -32,6 +32,7 @@ class YouTubeAPIClient:
         'playlists.list': 1,
         'playlistItems.list': 1,
         'videos.list': 1,
+        'videos.update': 50,
         'playlists.insert': 50,
         'playlists.update': 50,
         'playlists.delete': 50,
@@ -266,7 +267,47 @@ class YouTubeAPIClient:
             if e.resp.status == 403 and 'quotaExceeded' in str(e):
                 raise QuotaExceededError("YouTube API quota exceeded")
             raise
-    
+
+    def update_video_position(self,
+                             playlist_item_id: str,
+                             playlist_id: str,
+                             video_id: str,
+                             new_position: int) -> None:
+        """Update the position of a video within a playlist.
+
+        Args:
+            playlist_item_id: ID of the playlist item to reposition
+            playlist_id: ID of the playlist containing the item
+            video_id: ID of the video referenced by the item
+            new_position: New zero-based position within the playlist
+        """
+        try:
+            self._track_quota('playlistItems.update')
+
+            # playlistItems.update requires the full snippet (playlistId +
+            # resourceId), not just the new position, so YouTube can identify
+            # which item to move and where.
+            self.youtube.playlistItems().update(
+                part='snippet',
+                body={
+                    'id': playlist_item_id,
+                    'snippet': {
+                        'playlistId': playlist_id,
+                        'resourceId': {
+                            'kind': 'youtube#video',
+                            'videoId': video_id
+                        },
+                        'position': new_position
+                    }
+                }
+            ).execute()
+
+        except HttpError as e:
+            logger.error(f"Error updating video position: {e}")
+            if e.resp.status == 403 and 'quotaExceeded' in str(e):
+                raise QuotaExceededError("YouTube API quota exceeded")
+            raise
+
     def remove_video_from_playlist(self, playlist_item_id: str) -> None:
         """Remove a video from a playlist.
         

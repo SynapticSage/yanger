@@ -5,7 +5,12 @@ Main entry point for the application.
 # Created: 2025-08-03
 
 import sys
+import json
+import time
+import shutil
 import logging
+import subprocess
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -14,7 +19,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from . import __version__
-from .auth import YouTubeAuth
+from .auth import YouTubeAuth, resolve_token_file, config_dir
 from .api_client import YouTubeAPIClient
 from .cache import PersistentCache
 from .takeout import TakeoutParser
@@ -100,18 +105,24 @@ def run(ctx: click.Context, no_cache: bool, log: Optional[str], log_level: str):
 
 
 @cli.command()
-@click.option('--client-secrets', type=click.Path(exists=True),
-              default='config/client_secret.json',
-              help='Path to OAuth2 client secrets file')
+@click.option('--client-secrets', type=click.Path(),
+              default=None,
+              help='Path to OAuth2 client secrets file (default: ~/.config/yanger/client_secret.json)')
 @click.option('--token-file', type=click.Path(),
-              default='token.json',
-              help='Path to store authentication token')
+              default=None,
+              help='Path to store authentication token (default: ~/.config/yanger/token.json)')
 def auth(client_secrets: str, token_file: str):
     """Setup or test YouTube API authentication."""
     console.print("[yellow]YouTube API Authentication Setup[/yellow]\n")
-    
+
+    # Always WRITE the token to the canonical, cwd-independent location so the
+    # MCP server (which may run from any directory) can find it. Reads elsewhere
+    # still fall back to a legacy ./token.json for existing setups.
+    if not token_file:
+        token_file = str(config_dir() / "token.json")
+
     try:
-        # Create auth handler
+        # Create auth handler (client_secrets=None resolves via the shared helper)
         auth_handler = YouTubeAuth(
             client_secrets_file=client_secrets,
             token_file=token_file
@@ -125,7 +136,9 @@ def auth(client_secrets: str, token_file: str):
         console.print("\nTesting authentication...")
         if auth_handler.test_authentication():
             console.print("\n[green]✓[/green] Authentication successful!")
-            console.print(f"Token saved to: {token_file}")
+            # Report the RESOLVED path (the same one `yanger mcp` reads), not the
+            # raw option value, so the documented auth->mcp flow is unambiguous.
+            console.print(f"Token saved to: {auth_handler.token_file}")
             console.print("\nYou're ready to use YouTube Ranger!")
         else:
             console.print("\n[red]✗[/red] Authentication test failed.")
@@ -137,7 +150,8 @@ def auth(client_secrets: str, token_file: str):
         console.print("1. Go to https://console.cloud.google.com/")
         console.print("2. Create a project and enable YouTube Data API v3")
         console.print("3. Create OAuth 2.0 credentials (Desktop type)")
-        console.print("4. Download and save as: config/client_secret.json")
+        console.print("4. Download and save as: ~/.config/yanger/client_secret.json")
+        console.print("   (a ./config/client_secret.json in the repo also works)")
         sys.exit(1)
     except Exception as e:
         console.print(f"\n[red]Error:[/red] {e}")
@@ -156,12 +170,13 @@ def reset(reset_token: bool, reset_cache: bool, reset_config: bool):
         return
     
     if reset_token:
-        token_file = Path('token.json')
+        # Use the shared resolver so we remove the token that auth/mcp actually use.
+        token_file = resolve_token_file()
         if token_file.exists():
             token_file.unlink()
-            console.print("[green]✓[/green] Removed authentication token")
+            console.print(f"[green]✓[/green] Removed authentication token ({token_file})")
         else:
-            console.print("No token file found")
+            console.print(f"No token file found ({token_file})")
     
     if reset_cache:
         cache_dir = Path('.yanger_cache')
@@ -366,8 +381,198 @@ def takeout(paths, merge, verbose):
         console.print("\n[dim]Tip: Run 'yanger dedupe-virtual' to remove any duplicate playlists.[/dim]")
 
 
+# --- Takeout refresh (Puppeteer-assisted) -----------------------------------
+# The routine lives in scripts/takeout-refresh/ (Node). It attaches to a Chrome
+# the user is already logged into and drives Google Takeout — we never automate
+# credentials, which keeps us on Google's sanctioned data-portability path.
+
+REFRESH_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "takeout-refresh"
+
+
+def _devtools_up(port: int) -> bool:
+    """Return True if a Chrome DevTools endpoint is reachable on `port`."""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=2
+        ) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _find_chrome() -> Optional[str]:
+    """Locate a Chrome/Chromium binary (macOS app bundles first, then PATH)."""
+    candidates = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ]
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _launch_chrome(port: int, profile_dir: Path) -> bool:
+    """Launch Chrome with a debug port on a DEDICATED profile.
+
+    Chrome 136+ ignores --remote-debugging-port on the *default* profile, so we
+    point at an isolated user-data-dir (also keeps it apart from normal browsing).
+    Returns True once the DevTools endpoint comes up.
+    """
+    chrome = _find_chrome()
+    if not chrome:
+        console.print("[red]Could not find Google Chrome.[/red] Start it manually with:")
+        console.print(
+            f"  [dim]<chrome> --remote-debugging-port={port} "
+            f"--user-data-dir={profile_dir} https://takeout.google.com/[/dim]"
+        )
+        return False
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    console.print(
+        f"[cyan]Launching Chrome[/cyan] (debug port {port}, profile {profile_dir})"
+    )
+    console.print("[dim]First run: sign into Google in the new window.[/dim]")
+    subprocess.Popen(
+        [
+            chrome,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "https://takeout.google.com/",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for _ in range(30):
+        if _devtools_up(port):
+            return True
+        time.sleep(1)
+    return False
+
+
+def _ensure_node_deps() -> bool:
+    """Install the routine's npm deps on first run. Returns True when ready."""
+    if not (REFRESH_SCRIPT / "refresh.js").exists():
+        console.print(f"[red]Refresh routine not found at {REFRESH_SCRIPT}[/red]")
+        return False
+    if (REFRESH_SCRIPT / "node_modules").exists():
+        return True
+    if not shutil.which("npm"):
+        console.print("[red]npm not found.[/red] Install Node.js to use `yanger refresh`.")
+        return False
+    console.print("[cyan]Installing routine dependencies (first run)…[/cyan]")
+    return subprocess.run(["npm", "install"], cwd=REFRESH_SCRIPT).returncode == 0
+
+
+def _last_json_line(text: str) -> Optional[dict]:
+    """Parse the final JSON object the Node routine prints on stdout."""
+    for line in reversed((text or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
 @cli.command()
-@click.option('--format', '-f', type=click.Choice(['json', 'csv', 'yaml']), 
+@click.option('--debug-port', default=9222, show_default=True,
+              help='Chrome remote-debugging port to attach to.')
+@click.option('--profile-dir', type=click.Path(), default=None,
+              help='Dedicated Chrome profile (default: ~/.yanger/chrome-profile).')
+@click.option('--download-dir', type=click.Path(), default=None,
+              help='Where Takeout zips land (default: ~/.yanger/takeout-downloads).')
+@click.option('--start-chrome/--no-start-chrome', default=True,
+              help='Launch Chrome with the debug port if not already running.')
+@click.option('--wait-minutes', default=20, show_default=True,
+              help='How long to watch for the export download (0 = configure only).')
+@click.option('--merge/--replace', default=True,
+              help='Merge with existing virtual playlists when importing.')
+@click.option('-v', '--verbose', is_flag=True, help='Show detailed progress.')
+@click.pass_context
+def refresh(ctx, debug_port, profile_dir, download_dir, start_chrome,
+            wait_minutes, merge, verbose):
+    """Refresh YouTube data by driving Google Takeout in your own browser.
+
+    Attaches to a Chrome started with --remote-debugging-port, pre-configures a
+    YouTube-only export, waits for you to click "Create export", then downloads
+    and imports the result. Your credentials are never automated — you stay
+    signed into your own session (Google's sanctioned Takeout path).
+
+    Examples:
+        yanger refresh
+        yanger refresh --wait-minutes 0     # configure now, import later
+    """
+    if verbose:
+        setup_logging(verbose=True)
+
+    profile = Path(profile_dir) if profile_dir else Path.home() / ".yanger" / "chrome-profile"
+    downloads = Path(download_dir) if download_dir else Path.home() / ".yanger" / "takeout-downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+
+    console.print("[bold cyan]Takeout Refresh[/bold cyan]")
+
+    # 1. Ensure a debuggable Chrome is reachable.
+    if _devtools_up(debug_port):
+        console.print(f"[green]Attached[/green] to Chrome on port {debug_port}")
+    elif start_chrome:
+        if not _launch_chrome(debug_port, profile):
+            console.print("[red]Chrome debug endpoint never came up.[/red]")
+            sys.exit(1)
+    else:
+        console.print(f"[red]No Chrome DevTools endpoint on port {debug_port}.[/red]")
+        console.print("Start Chrome with --remote-debugging-port, or drop --no-start-chrome.")
+        sys.exit(1)
+
+    # 2. Ensure the Node routine can run.
+    if not shutil.which("node"):
+        console.print("[red]node not found.[/red] Install Node.js to use `yanger refresh`.")
+        sys.exit(1)
+    if not _ensure_node_deps():
+        sys.exit(1)
+
+    # 3. Drive the browser. stdout is captured for the JSON result; stderr/stdin
+    #    stay attached to the terminal so the routine can prompt the user live.
+    cmd = [
+        "node", str(REFRESH_SCRIPT / "refresh.js"),
+        "--browser-url", f"http://127.0.0.1:{debug_port}",
+        "--download-dir", str(downloads),
+        "--wait-minutes", str(wait_minutes),
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+    result = _last_json_line(proc.stdout)
+    status = result.get("status") if result else None
+
+    # 4. Act on the routine's outcome.
+    if status == "downloaded":
+        zip_path = result["zipPath"]
+        console.print(f"\n[green]Downloaded:[/green] {zip_path}")
+        console.print("[cyan]Importing into yanger…[/cyan]\n")
+        ctx.invoke(takeout, paths=(zip_path,), merge=merge, verbose=verbose)
+    elif status == "configured":
+        console.print("\n[yellow]Export submitted.[/yellow] Google will email a download link.")
+        console.print("Click it in the same Chrome window, then run:")
+        console.print(f"  [dim]yanger takeout {downloads}/<takeout-file>.zip[/dim]")
+    elif status == "timeout":
+        console.print("\n[yellow]Timed out waiting for the export.[/yellow] It may still be "
+                      "generating — re-run `yanger refresh`, or import later with `yanger takeout`.")
+    elif status == "aborted":
+        console.print("\n[yellow]Aborted.[/yellow]")
+    else:
+        msg = result.get("message") if result else "no result from routine"
+        console.print(f"\n[red]Refresh failed:[/red] {msg}")
+        sys.exit(1)
+
+
+@cli.command()
+@click.option('--format', '-f', type=click.Choice(['json', 'csv', 'yaml']),
               default='json', help='Export format')
 @click.option('--output', '-o', type=click.Path(), help='Output file path')
 @click.option('--include-virtual/--no-virtual', default=True, 
@@ -699,6 +904,159 @@ def fetch_metadata(playlist, batch_size, limit, since, days_ago, dry_run, verbos
         if verbose:
             console.print_exception()
         sys.exit(1)
+
+
+@cli.group()
+def proxy():
+    """Manage proxy settings for transcript fetching.
+
+    YouTube may block transcript requests from certain IPs.
+    Configure a proxy to work around these blocks.
+    """
+    pass
+
+
+@proxy.command(name='status')
+def proxy_status():
+    """Show current proxy configuration."""
+    from .config.settings import load_settings
+    from .core.proxy import ProxySettings as CoreProxySettings
+
+    settings = load_settings()
+    proxy_cfg = settings.transcripts.proxy
+
+    console.print("\n[bold]Proxy Configuration[/bold]")
+    console.print("-" * 40)
+    console.print(f"Enabled: {'[green]Yes[/green]' if proxy_cfg.enabled else '[yellow]No[/yellow]'}")
+    console.print(f"Type: {proxy_cfg.type}")
+
+    if proxy_cfg.type == "webshare":
+        console.print(f"Webshare User: {proxy_cfg.webshare_username or '[dim]not set[/dim]'}")
+        console.print(f"Webshare Pass: {'***' if proxy_cfg.webshare_password else '[dim]not set[/dim]'}")
+        if proxy_cfg.webshare_locations:
+            console.print(f"Locations: {', '.join(proxy_cfg.webshare_locations)}")
+    else:
+        console.print(f"HTTP URL: {proxy_cfg.http_url or '[dim]not set[/dim]'}")
+        # Mask password in HTTPS URL
+        https_display = proxy_cfg.https_url
+        if https_display and '@' in https_display:
+            parts = https_display.split('@')
+            https_display = f"***@{parts[-1]}"
+        console.print(f"HTTPS URL: {https_display or '[dim]not set[/dim]'}")
+
+    console.print("\n[dim]Environment variables:[/dim]")
+    console.print("  YANGER_PROXY_URL, YANGER_PROXY_HTTP, YANGER_PROXY_HTTPS")
+    console.print("  YANGER_WEBSHARE_USER, YANGER_WEBSHARE_PASS")
+
+
+@proxy.command(name='test')
+@click.option('--video-id', '-v', default='dQw4w9WgXcQ',
+              help='Video ID to test with (default: Rick Astley)')
+def proxy_test(video_id: str):
+    """Test proxy connection by fetching a transcript."""
+    from .config.settings import load_settings
+    from .core.proxy import ProxySettings as CoreProxySettings, test_proxy_connection
+
+    console.print("\n[bold]Testing Proxy Connection[/bold]")
+    console.print("-" * 40)
+
+    settings = load_settings()
+    proxy_cfg = settings.transcripts.proxy
+
+    # Convert to core ProxySettings
+    core_proxy = CoreProxySettings(
+        enabled=proxy_cfg.enabled,
+        type=proxy_cfg.type,
+        http_url=proxy_cfg.http_url,
+        https_url=proxy_cfg.https_url,
+        webshare_username=proxy_cfg.webshare_username,
+        webshare_password=proxy_cfg.webshare_password,
+        webshare_locations=proxy_cfg.webshare_locations,
+    )
+
+    console.print(f"Proxy: {core_proxy.get_display_info()}")
+    console.print(f"Test video: {video_id}")
+    console.print()
+
+    with console.status("Fetching transcript..."):
+        result = test_proxy_connection(core_proxy, video_id)
+
+    if result["success"]:
+        console.print(f"[green]SUCCESS[/green] - Fetched {result['transcript_length']} segments")
+    else:
+        console.print(f"[red]FAILED[/red] - {result['error']}")
+
+        if "blocking" in str(result.get("error", "")).lower():
+            console.print("\n[yellow]YouTube is blocking requests.[/yellow]")
+            console.print("Try configuring a proxy with: yanger proxy set --help")
+
+
+@proxy.command(name='set')
+@click.option('--type', 'proxy_type', type=click.Choice(['generic', 'webshare']),
+              help='Proxy type')
+@click.option('--url', 'https_url', help='HTTPS proxy URL (generic type)')
+@click.option('--http-url', help='HTTP proxy URL (generic type)')
+@click.option('--webshare-user', help='Webshare username')
+@click.option('--webshare-pass', help='Webshare password')
+@click.option('--locations', help='Webshare IP locations (comma-separated, e.g., us,de)')
+@click.option('--enable/--disable', default=None, help='Enable or disable proxy')
+def proxy_set(proxy_type, https_url, http_url, webshare_user, webshare_pass, locations, enable):
+    """Configure proxy settings.
+
+    Examples:
+
+        # Set generic HTTPS proxy
+        yanger proxy set --type generic --url https://user:pass@proxy:8080 --enable
+
+        # Set Webshare rotating proxy
+        yanger proxy set --type webshare --webshare-user myuser --webshare-pass mypass --enable
+
+        # Disable proxy
+        yanger proxy set --disable
+    """
+    from .config.settings import load_settings, save_settings
+
+    settings = load_settings()
+    proxy_cfg = settings.transcripts.proxy
+    changed = False
+
+    if enable is not None:
+        proxy_cfg.enabled = enable
+        changed = True
+
+    if proxy_type:
+        proxy_cfg.type = proxy_type
+        changed = True
+
+    if https_url:
+        proxy_cfg.https_url = https_url
+        proxy_cfg.type = "generic"
+        changed = True
+
+    if http_url:
+        proxy_cfg.http_url = http_url
+        changed = True
+
+    if webshare_user:
+        proxy_cfg.webshare_username = webshare_user
+        proxy_cfg.type = "webshare"
+        changed = True
+
+    if webshare_pass:
+        proxy_cfg.webshare_password = webshare_pass
+        changed = True
+
+    if locations:
+        proxy_cfg.webshare_locations = [loc.strip() for loc in locations.split(',')]
+        changed = True
+
+    if changed:
+        save_settings(settings)
+        console.print("[green]Proxy settings updated.[/green]")
+        console.print(f"Enabled: {proxy_cfg.enabled}")
+        console.print(f"Type: {proxy_cfg.type}")
+    else:
+        console.print("[yellow]No changes made.[/yellow] Use --help for options.")
 
 
 @cli.command()

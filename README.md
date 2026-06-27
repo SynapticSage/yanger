@@ -130,7 +130,8 @@ Press `:` for tab-completed commands:
 :quota                   # Show API quota usage
 :stats                   # Playlist statistics
 :bulkedit [--dry-run]    # Bulk edit in external editor
-:transcript <action>     # Manage transcripts
+:transcript              # Run your transcript command on the current video
+:set <key> <value>       # Set & persist a config value (e.g. transcript_command)
 ```
 
 ## ⚙️ Configuration
@@ -155,6 +156,42 @@ transcripts:
   export_txt: true
   export_json: true
   languages: ["en"]                  # Preferred languages
+  transcript_command: ""             # External command run by :transcript (see below)
+```
+
+### Transcript command
+
+`:transcript` runs a shell command of your choosing against the currently
+selected video, so you can pipe it into a summarizer, downloader, or an LLM. The
+command runs in a suspended terminal, so streaming tools render live.
+
+Set it any of these ways (highest precedence first):
+
+```vim
+:set transcript_command "yeet {url} | fabric -sp summarize"   # runtime, persisted to user config
+```
+
+```bash
+# environment variable (e.g. in ~/.config/yanger/.env or project .env — see .env.example)
+export YANGER_TRANSCRIPT_COMMAND="summarize {url}"
+```
+
+```yaml
+# ~/.config/yanger/config.yaml
+transcripts:
+  transcript_command: "yt-dlp --write-auto-subs --skip-download --sub-langs en {url}"
+```
+
+Placeholders: `{url}` → `https://www.youtube.com/watch?v=<id>`, `{id}` → the raw
+video id. Both are shell-quoted before substitution. If neither placeholder
+appears, the video URL is appended automatically (so `summarize` becomes
+`summarize <url>`). Example recipes:
+
+```bash
+summarize {url}
+yeet {url}
+yt-dlp --write-auto-subs --skip-download --sub-langs en {url}
+yeet {url} | fabric -sp summarize      # transcript -> LLM with any prompt
 ```
 
 ### Cache Behavior
@@ -174,7 +211,9 @@ Fetch and display video transcripts with automatic caching.
 **Fetch Transcripts**:
 - Press `gt` to fetch transcript for current video
 - Press `gT` to toggle auto-fetch mode
-- Use `:transcript fetch` in command mode
+
+> Note: `:transcript` (command mode) is separate — it runs your configured
+> external command on the current video (see [Transcript command](#transcript-command)).
 
 **View Transcripts**:
 - Automatically displayed at bottom of preview pane
@@ -185,9 +224,6 @@ Fetch and display video transcripts with automatic caching.
 ```bash
 # Export current video
 Press 'ge'
-
-# Command mode
-:transcript export ~/my-transcripts
 ```
 
 **Formats**:
@@ -257,19 +293,95 @@ Expose yanger's playlist management to Claude and other MCP-compatible AI tools.
 
 [Model Context Protocol](https://modelcontextprotocol.io/) lets AI assistants interact with external tools. With yanger's MCP server, Claude can manage your YouTube playlists conversationally.
 
-**Setup for Claude Code**:
+#### Claude Code Setup
 
-Add to `~/.claude.json`:
+**Prerequisites:**
+```bash
+# Ensure yanger is installed globally and accessible
+pip install -e .  # or pip install yanger
+
+# Verify installation
+yanger --version
+
+# Authenticate with YouTube (required before MCP use)
+yanger auth
+```
+
+> The token is stored at `~/.config/yanger/token.json` (a cwd-independent location),
+> which is exactly where the MCP server looks for it. The server **fails fast** with a
+> clear "run `yanger auth`" message if the token is missing — it never launches a
+> browser OAuth prompt (which a headless MCP client could not complete).
+
+**Configuration:**
+
+Add to your Claude Code settings (`~/.claude.json`):
 ```json
 {
   "mcpServers": {
     "yanger": {
+      "type": "stdio",
+      "command": "yanger",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}
+```
+
+**Per-project configuration** (in project's `.claude/settings.json`):
+```json
+{
+  "mcpServers": {
+    "yanger": {
+      "type": "stdio",
       "command": "yanger",
       "args": ["mcp"]
     }
   }
 }
 ```
+
+**Verify MCP is working:**
+```bash
+# Start Claude Code and ask:
+# "List my YouTube playlists using yanger"
+```
+
+#### OpenAI Codex / ChatGPT Setup
+
+For OpenAI's Codex or custom MCP clients:
+
+```bash
+# Start the MCP server manually (for testing)
+yanger mcp
+
+# The server communicates via stdio (stdin/stdout)
+# Input: JSON-RPC 2.0 requests
+# Output: JSON-RPC 2.0 responses
+```
+
+**MCP Client Configuration:**
+```python
+# Python example using mcp library
+from mcp import ClientSession, StdioServerParameters
+import asyncio
+
+async def connect_yanger():
+    server_params = StdioServerParameters(
+        command="yanger",
+        args=["mcp"]
+    )
+    # Connect and use tools...
+```
+
+#### Troubleshooting MCP
+
+| Issue | Solution |
+|-------|----------|
+| "Connection closed" | Run `yanger auth` to authenticate first |
+| "Not authenticated — run `yanger auth`" | Token missing at `~/.config/yanger/token.json`; run `yanger auth` (it writes there) |
+| Tools not appearing | Verify `yanger mcp` runs without errors |
+| Transcript errors | YouTube may be rate-limiting your IP |
 
 **Available Tools**:
 

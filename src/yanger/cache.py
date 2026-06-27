@@ -63,16 +63,24 @@ class PersistentCache:
             
         logger.info(f"Initialized persistent cache at {self.db_path}")
     
+    def _connect(self) -> sqlite3.Connection:
+        """Open a SQLite connection with foreign keys enforced.
+
+        SQLite enforces foreign keys per-connection (default OFF), so every
+        connection in this module must opt in or ON DELETE CASCADE silently
+        no-ops (leaking orphaned videos / virtual_videos rows).
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
     def db_connection(self):
         """Get a database connection context manager."""
-        return sqlite3.connect(self.db_path)
-        
+        return self._connect()
+
     def _init_database(self) -> None:
         """Initialize SQLite database with schema."""
-        with sqlite3.connect(self.db_path) as conn:
-            # Enable foreign keys
-            conn.execute("PRAGMA foreign_keys = ON")
-            
+        with self._connect() as conn:
             # Create tables
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS cache_metadata (
@@ -192,7 +200,7 @@ class PersistentCache:
         Returns:
             List of playlists if cached and fresh, None if cache is empty or expired
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             
             # First check if we have any playlists and when they were cached
@@ -245,13 +253,24 @@ class PersistentCache:
         Args:
             playlists: List of playlists to cache
         """
-        with sqlite3.connect(self.db_path) as conn:
-            # Use REPLACE to update existing or insert new
+        with self._connect() as conn:
+            # Upsert in place rather than INSERT OR REPLACE: with foreign keys ON,
+            # REPLACE deletes the existing row first, which CASCADE-deletes that
+            # playlist's cached videos. ON CONFLICT DO UPDATE keeps the row (and its
+            # videos) so a plain playlist-list refresh doesn't wipe the video cache.
             for playlist in playlists:
                 conn.execute("""
-                    INSERT OR REPLACE INTO playlists 
+                    INSERT INTO playlists
                     (id, title, description, item_count, privacy_status, channel_id, channel_title, cached_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(id) DO UPDATE SET
+                        title=excluded.title,
+                        description=excluded.description,
+                        item_count=excluded.item_count,
+                        privacy_status=excluded.privacy_status,
+                        channel_id=excluded.channel_id,
+                        channel_title=excluded.channel_title,
+                        cached_at=CURRENT_TIMESTAMP
                 """, (
                     playlist.id,
                     playlist.title,
@@ -274,17 +293,18 @@ class PersistentCache:
         Returns:
             List of videos if cached and fresh, None otherwise
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             
             # Check if playlist exists and is not expired
             cursor = conn.execute("""
-                SELECT cached_at FROM playlists WHERE id = ?
+                SELECT cached_at, item_count FROM playlists WHERE id = ?
             """, (playlist_id,))
-            
+
             row = cursor.fetchone()
             if row is None:
                 return None
+            playlist_item_count = row['item_count'] or 0
                 
             # Check if expired
             cached_at = datetime.fromisoformat(row['cached_at'])
@@ -301,8 +321,17 @@ class PersistentCache:
             
             rows = cursor.fetchall()
             if not rows:
+                # Empty result: distinguish a genuinely-empty cached playlist from
+                # one whose videos were never fetched. set_playlists writes a
+                # metadata-only row (cached_at fresh, item_count from the API) with
+                # zero video rows, so we lean on item_count: 0 means a real empty
+                # playlist -> return [] (a hit, no re-fetch); >0 means videos are
+                # simply not cached yet -> return None (a miss) to trigger a fetch.
+                if playlist_item_count == 0:
+                    logger.debug(f"Cache hit: playlist {playlist_id} is empty")
+                    return []
                 return None
-                
+
             # Update access stats
             conn.execute("""
                 UPDATE playlists 
@@ -337,7 +366,7 @@ class PersistentCache:
             playlist_id: ID of the playlist
             videos: List of videos to cache
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             # Delete existing videos for this playlist
             conn.execute("DELETE FROM videos WHERE playlist_id = ?", (playlist_id,))
             
@@ -378,7 +407,7 @@ class PersistentCache:
         Args:
             playlist_id: ID of the playlist to invalidate
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             # Delete videos first (cascade should handle this, but be explicit)
             conn.execute("DELETE FROM videos WHERE playlist_id = ?", (playlist_id,))
             # Delete playlist
@@ -392,7 +421,7 @@ class PersistentCache:
         This forces a fresh fetch from the API on the next load_playlists call.
         Useful after operations that modify the playlist list itself (create, rename, delete).
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             # Delete all playlist entries but keep virtual playlists
             conn.execute("DELETE FROM playlists")
             conn.execute("DELETE FROM videos")
@@ -401,7 +430,7 @@ class PersistentCache:
             
     def clear(self) -> None:
         """Clear entire cache."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("DELETE FROM videos")
             conn.execute("DELETE FROM playlists")
             conn.commit()
@@ -415,7 +444,7 @@ class PersistentCache:
         """
         cutoff_date = datetime.now() - timedelta(days=self.ttl_days)
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             # Get count before deletion
             cursor = conn.execute(
                 "SELECT COUNT(*) FROM playlists WHERE cached_at < ?",
@@ -441,7 +470,7 @@ class PersistentCache:
         Returns:
             Dictionary with cache stats
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             stats = {}
             
             # Count playlists
@@ -490,7 +519,7 @@ class PersistentCache:
         import uuid
         playlist_id = str(uuid.uuid4())
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             # Insert playlist
             conn.execute("""
                 INSERT INTO virtual_playlists (id, title, description, source, video_count)
@@ -538,7 +567,7 @@ class PersistentCache:
         if existing:
             playlist_id = existing['id']
             
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 if merge:
                     # Get existing video IDs to avoid duplicates
                     cursor = conn.execute("""
@@ -627,7 +656,7 @@ class PersistentCache:
         Returns:
             List of playlist dictionaries
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
                 SELECT * FROM virtual_playlists 
@@ -657,7 +686,7 @@ class PersistentCache:
         Returns:
             Playlist dictionary or None
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
                 SELECT * FROM virtual_playlists
@@ -686,7 +715,7 @@ class PersistentCache:
         Returns:
             List of video dictionaries
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
                 SELECT * FROM virtual_videos
@@ -715,7 +744,7 @@ class PersistentCache:
         Returns:
             True if deleted
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             # Videos will be deleted automatically due to CASCADE
             result = conn.execute(
                 "DELETE FROM virtual_playlists WHERE id = ?",
@@ -738,7 +767,7 @@ class PersistentCache:
         Returns:
             True if updated
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             # First check if we need to add columns for new metadata
             cursor = conn.execute("PRAGMA table_info(virtual_videos)")
             columns = [col[1] for col in cursor.fetchall()]
@@ -788,7 +817,7 @@ class PersistentCache:
         Returns:
             List of video IDs that need metadata
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             query = """
                 SELECT DISTINCT video_id 
                 FROM virtual_videos 
@@ -819,7 +848,7 @@ class PersistentCache:
         Returns:
             Number of duplicates removed
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             # Find duplicates (same title)
             cursor = conn.execute("""
                 SELECT title, COUNT(*) as count, MIN(imported_at) as oldest
@@ -902,7 +931,7 @@ class PersistentCache:
         Returns:
             True if playlist is cached and not expired
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute("""
                 SELECT cached_at FROM playlists WHERE id = ?
             """, (playlist_id,))
@@ -929,7 +958,7 @@ class PersistentCache:
         Returns:
             Dictionary with transcript data or None if not cached
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
                 SELECT * FROM video_transcripts WHERE video_id = ?
@@ -962,7 +991,7 @@ class PersistentCache:
             auto_generated: Whether transcript is auto-generated
             fetch_status: 'SUCCESS', 'NOT_AVAILABLE', or 'ERROR'
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO video_transcripts
                 (video_id, transcript_text, transcript_json, language,
@@ -1031,7 +1060,7 @@ class PersistentCache:
         Returns:
             Status string ('SUCCESS', 'NOT_AVAILABLE', 'ERROR') or None if not cached
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute("""
                 SELECT fetch_status FROM video_transcripts WHERE video_id = ?
             """, (video_id,))
@@ -1045,7 +1074,7 @@ class PersistentCache:
         Returns:
             Number of transcripts cleared
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM video_transcripts")
             count = cursor.fetchone()[0]
 
