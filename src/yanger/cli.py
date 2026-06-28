@@ -243,23 +243,42 @@ def main():
 
 
 @cli.command()
-@click.argument('paths', nargs=-1, required=True, type=click.Path(exists=True))
+@click.argument('paths', nargs=-1, required=False, type=click.Path(exists=True))
 @click.option('--merge/--replace', default=True, help='Merge with existing virtual playlists')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress')
-def takeout(paths, merge, verbose):
+@click.pass_context
+def takeout(ctx, paths, merge, verbose):
     """Import YouTube data from Google Takeout.
-    
-    Accepts multiple paths (zip files or directories).
+
+    Accepts multiple paths (zip files or directories). With no paths given,
+    offers to fetch a fresh export through your browser via `yanger sync`.
     Creates virtual playlists for Watch Later and History.
-    
+
     Examples:
         yanger takeout ~/Downloads/takeout.zip
         yanger takeout Takeout-1/ Takeout-2/ --merge
+        yanger takeout                       # no file → guided download
     """
     if verbose:
         setup_logging(verbose=True)
-    
+
     console.print("[bold cyan]YouTube Takeout Importer[/bold cyan]")
+
+    # No artifacts provided → hand off to the guided browser download flow so the
+    # user never hits a bare "Missing argument" error and a dead end.
+    if not paths:
+        console.print("No takeout files provided.\n")
+        if click.confirm(
+            "Fetch a fresh export now through your browser (yanger sync)?",
+            default=True,
+        ):
+            ctx.invoke(sync, merge=merge, verbose=verbose)
+        else:
+            console.print("\nProvide a Takeout zip or folder, e.g.:")
+            console.print("  [dim]yanger takeout ~/Downloads/takeout.zip[/dim]")
+            console.print("Or run [dim]yanger sync[/dim] to download one interactively.")
+        return
+
     console.print(f"Processing {len(paths)} takeout file(s)...\n")
     console.print(f"Mode: {'Merge with existing' if merge else 'Replace existing'}")
     
@@ -381,12 +400,12 @@ def takeout(paths, merge, verbose):
         console.print("\n[dim]Tip: Run 'yanger dedupe-virtual' to remove any duplicate playlists.[/dim]")
 
 
-# --- Takeout refresh (Puppeteer-assisted) -----------------------------------
+# --- YouTube data sync (Puppeteer-assisted Takeout) -------------------------
 # The routine lives in scripts/takeout-refresh/ (Node). It attaches to a Chrome
 # the user is already logged into and drives Google Takeout — we never automate
 # credentials, which keeps us on Google's sanctioned data-portability path.
 
-REFRESH_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "takeout-refresh"
+SYNC_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "takeout-refresh"
 
 
 def _devtools_up(port: int) -> bool:
@@ -458,16 +477,16 @@ def _launch_chrome(port: int, profile_dir: Path) -> bool:
 
 def _ensure_node_deps() -> bool:
     """Install the routine's npm deps on first run. Returns True when ready."""
-    if not (REFRESH_SCRIPT / "refresh.js").exists():
-        console.print(f"[red]Refresh routine not found at {REFRESH_SCRIPT}[/red]")
+    if not (SYNC_SCRIPT / "refresh.js").exists():
+        console.print(f"[red]Sync routine not found at {SYNC_SCRIPT}[/red]")
         return False
-    if (REFRESH_SCRIPT / "node_modules").exists():
+    if (SYNC_SCRIPT / "node_modules").exists():
         return True
     if not shutil.which("npm"):
-        console.print("[red]npm not found.[/red] Install Node.js to use `yanger refresh`.")
+        console.print("[red]npm not found.[/red] Install Node.js to use `yanger sync`.")
         return False
     console.print("[cyan]Installing routine dependencies (first run)…[/cyan]")
-    return subprocess.run(["npm", "install"], cwd=REFRESH_SCRIPT).returncode == 0
+    return subprocess.run(["npm", "install"], cwd=SYNC_SCRIPT).returncode == 0
 
 
 def _last_json_line(text: str) -> Optional[dict]:
@@ -480,6 +499,31 @@ def _last_json_line(text: str) -> Optional[dict]:
             except json.JSONDecodeError:
                 continue
     return None
+
+
+def _print_finish_later(downloads: Path) -> None:
+    """Explain how to finish the import from the email link.
+
+    Google generates the export asynchronously and it routinely takes longer
+    than we're willing to block the terminal — so a timeout is expected, not a
+    failure. These instructions make the email link a first-class resume path.
+    """
+    console.print(
+        "\n[bold]The export is still being generated on Google's side.[/bold] "
+        "This is normal — it can take from a few minutes to several hours, so you "
+        "do not need to keep this open."
+    )
+    console.print(
+        "\nWhen the [bold]“Your Google data is ready”[/bold] email arrives "
+        "(the link stays valid ~1 week):"
+    )
+    console.print("  1. Open it and click [bold]Download your files[/bold]; save the zip anywhere.")
+    console.print("  2. Finish the import by pointing yanger at that zip:")
+    console.print("       [dim]yanger takeout ~/Downloads/takeout-XXXXXXXX.zip[/dim]")
+    console.print(
+        f"\n[dim]Tip: if you save it into {downloads}, a later "
+        f"`yanger sync` will auto-detect it.[/dim]"
+    )
 
 
 @cli.command()
@@ -497,18 +541,19 @@ def _last_json_line(text: str) -> Optional[dict]:
               help='Merge with existing virtual playlists when importing.')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress.')
 @click.pass_context
-def refresh(ctx, debug_port, profile_dir, download_dir, start_chrome,
-            wait_minutes, merge, verbose):
-    """Refresh YouTube data by driving Google Takeout in your own browser.
+def sync(ctx, debug_port, profile_dir, download_dir, start_chrome,
+         wait_minutes, merge, verbose):
+    """Sync your YouTube data (history, playlists, Watch Later) from Google Takeout.
 
-    Attaches to a Chrome started with --remote-debugging-port, pre-configures a
-    YouTube-only export, waits for you to click "Create export", then downloads
-    and imports the result. Your credentials are never automated — you stay
-    signed into your own session (Google's sanctioned Takeout path).
+    Brings your local copy up to date by driving Google Takeout in your own
+    browser: attaches to a Chrome started with --remote-debugging-port,
+    pre-configures a YouTube-only export, waits for you to click "Create export",
+    then downloads and imports the result. Your credentials are never automated —
+    you stay signed into your own session (Google's sanctioned Takeout path).
 
     Examples:
-        yanger refresh
-        yanger refresh --wait-minutes 0     # configure now, import later
+        yanger sync
+        yanger sync --wait-minutes 0     # configure now, import later
     """
     if verbose:
         setup_logging(verbose=True)
@@ -517,7 +562,7 @@ def refresh(ctx, debug_port, profile_dir, download_dir, start_chrome,
     downloads = Path(download_dir) if download_dir else Path.home() / ".yanger" / "takeout-downloads"
     downloads.mkdir(parents=True, exist_ok=True)
 
-    console.print("[bold cyan]Takeout Refresh[/bold cyan]")
+    console.print("[bold cyan]YouTube Data Sync[/bold cyan]")
 
     # 1. Ensure a debuggable Chrome is reachable.
     if _devtools_up(debug_port):
@@ -533,7 +578,7 @@ def refresh(ctx, debug_port, profile_dir, download_dir, start_chrome,
 
     # 2. Ensure the Node routine can run.
     if not shutil.which("node"):
-        console.print("[red]node not found.[/red] Install Node.js to use `yanger refresh`.")
+        console.print("[red]node not found.[/red] Install Node.js to use `yanger sync`.")
         sys.exit(1)
     if not _ensure_node_deps():
         sys.exit(1)
@@ -541,7 +586,7 @@ def refresh(ctx, debug_port, profile_dir, download_dir, start_chrome,
     # 3. Drive the browser. stdout is captured for the JSON result; stderr/stdin
     #    stay attached to the terminal so the routine can prompt the user live.
     cmd = [
-        "node", str(REFRESH_SCRIPT / "refresh.js"),
+        "node", str(SYNC_SCRIPT / "refresh.js"),
         "--browser-url", f"http://127.0.0.1:{debug_port}",
         "--download-dir", str(downloads),
         "--wait-minutes", str(wait_minutes),
@@ -557,17 +602,16 @@ def refresh(ctx, debug_port, profile_dir, download_dir, start_chrome,
         console.print("[cyan]Importing into yanger…[/cyan]\n")
         ctx.invoke(takeout, paths=(zip_path,), merge=merge, verbose=verbose)
     elif status == "configured":
-        console.print("\n[yellow]Export submitted.[/yellow] Google will email a download link.")
-        console.print("Click it in the same Chrome window, then run:")
-        console.print(f"  [dim]yanger takeout {downloads}/<takeout-file>.zip[/dim]")
+        console.print("\n[green]Export request submitted.[/green]")
+        _print_finish_later(downloads)
     elif status == "timeout":
-        console.print("\n[yellow]Timed out waiting for the export.[/yellow] It may still be "
-                      "generating — re-run `yanger refresh`, or import later with `yanger takeout`.")
+        console.print("\n[yellow]Stopped waiting — the export wasn't ready in time.[/yellow]")
+        _print_finish_later(downloads)
     elif status == "aborted":
         console.print("\n[yellow]Aborted.[/yellow]")
     else:
         msg = result.get("message") if result else "no result from routine"
-        console.print(f"\n[red]Refresh failed:[/red] {msg}")
+        console.print(f"\n[red]Sync failed:[/red] {msg}")
         sys.exit(1)
 
 

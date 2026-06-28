@@ -1,6 +1,7 @@
-# Takeout refresh routine
+# Takeout sync routine
 
-A Puppeteer routine that makes it painless to grab a **fresh** Google Takeout
+The browser worker behind the `yanger sync` command. A Puppeteer routine that
+makes it painless to grab a **fresh** Google Takeout
 export of your YouTube history + playlists, then feed it into yanger.
 
 It is **human-in-the-loop by design**:
@@ -19,8 +20,16 @@ You almost never call this directly — use the Python wrapper, which launches
 Chrome with the right flags, runs this routine, and imports the result:
 
 ```bash
-yanger refresh
+yanger sync
 ```
+
+`yanger takeout` with **no file argument** also drops you into this flow
+(it asks first, then runs `yanger sync`), so users never hit a dead end.
+
+If the export isn't ready before the wait elapses, that's expected for large
+accounts — the routine exits and the wrapper tells you to finish from the
+"Your Google data is ready" email: download the zip and run
+`yanger takeout ~/Downloads/takeout-XXXX.zip`.
 
 ## Running the routine directly
 
@@ -74,4 +83,4 @@ Other statuses: `configured`, `timeout`, `aborted`, `error`.
   handles the download.
 - **Want zero scripting?** Takeout also offers native **scheduled exports**
   (every 2 months for a year, delivered to Drive). That's the lowest-maintenance
-  "refresh" if you don't need on-demand data.
+  way to keep your data current if you don't need on-demand sync.

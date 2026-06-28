@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * yanger Takeout refresh routine.
+ * yanger Takeout sync routine (the `yanger sync` command's browser worker).
  *
  * Attaches to an ALREADY-RUNNING, ALREADY-LOGGED-IN Chrome (via its
  * remote-debugging port) and drives Google Takeout to create a fresh
@@ -250,9 +250,9 @@ async function main() {
 
     if (configureOnly) {
       log(
-        "Configure-only mode: skipping download wait. Google will email a link;",
+        "Configure-only mode: not waiting for the download. Google will email a",
       );
-      log("run `yanger refresh --download` (or re-run) once it's ready.");
+      log("link when ready; import it later with `yanger takeout <zip>`.");
       emit({ status: "configured" });
       return;
     }
@@ -270,7 +270,8 @@ async function main() {
       log(`✓ Got export: ${zipPath}`);
       emit({ status: "downloaded", zipPath });
     } else {
-      log("Timed out waiting for the export download.");
+      log("Stopped waiting — the export isn't ready yet. Large exports often");
+      log("take longer than this; Google will email a link when it's done.");
       emit({ status: "timeout" });
     }
   } finally {
