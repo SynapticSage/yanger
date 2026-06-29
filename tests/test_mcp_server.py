@@ -5,7 +5,9 @@ Tests the MCP tool handlers with mocked YouTube API and cache.
 # Created: 2025-12-25
 
 import pytest
+import asyncio
 import json
+import threading
 from pathlib import Path
 from datetime import datetime
 from unittest.mock import Mock, MagicMock, patch, AsyncMock
@@ -21,7 +23,7 @@ from yanger.core.transcript_fetcher import TranscriptData, TranscriptSegment
 # Skip all tests if MCP is not installed
 pytest.importorskip("mcp")
 
-from yanger.mcp_server import YangerMCPServer, MCP_AVAILABLE
+from yanger.mcp_server import YangerMCPServer, MCP_AVAILABLE, FABRIC_BATCH_CONCURRENCY
 
 
 @pytest.fixture
@@ -943,13 +945,13 @@ class TestFabricIntegration:
     @pytest.mark.asyncio
     async def test_fabric_analyze_batch_partial_failures(self, mcp_server):
         """Should handle partial failures with skip_errors=True."""
-        # Set up first video to have no transcript
-        call_count = [0]
+        # Key the failure off the video_id, not call order: with bounded-
+        # concurrency fan-out the videos are fetched in parallel worker threads,
+        # so a call-counter would race. "video1" always fails, "video2" succeeds.
         original_fetch = mcp_server.transcript_fetcher.fetch_transcript
 
         def mock_fetch(video_id):
-            call_count[0] += 1
-            if call_count[0] == 1:
+            if video_id == "video1":
                 return (None, "NOT_AVAILABLE")
             return original_fetch(video_id)
 
@@ -1014,3 +1016,65 @@ class TestFabricIntegration:
         call_args = mock_run.call_args
         assert "--model" in call_args[0][0]
         assert "gpt-4" in call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_fabric_analyze_batch_bounded_concurrency(self, mcp_server):
+        """Batch fan-out must cap concurrent Fabric runs at FABRIC_BATCH_CONCURRENCY.
+
+        Each Fabric call is a heavy external subprocess, so the batch runs them
+        with bounded concurrency rather than fully serially or unbounded.
+        """
+        in_flight = 0
+        max_in_flight = 0
+
+        async def fake_analyze(args):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.01)  # hold the slot so overlap is observable
+            in_flight -= 1
+            return {
+                "video_id": args["video_id"],
+                "pattern": args["pattern"],
+                "result": "ok",
+                "transcript_language": "en",
+            }
+
+        # Replace the per-video analyzer with the instrumented coroutine.
+        mcp_server._fabric_analyze = fake_analyze
+
+        video_ids = [f"v{i}" for i in range(FABRIC_BATCH_CONCURRENCY * 3)]
+        with patch("shutil.which", return_value="/usr/bin/fabric"):
+            result = await mcp_server._fabric_analyze_batch({
+                "pattern": "summarize",
+                "video_ids": video_ids,
+                "limit": len(video_ids),
+                "skip_errors": True,
+            })
+
+        assert result["successful_count"] == len(video_ids)
+        # Never more than the cap in flight, but genuinely concurrent (>1).
+        assert max_in_flight <= FABRIC_BATCH_CONCURRENCY
+        assert max_in_flight > 1
+
+
+class TestEventLoopOffloading:
+    """Blocking work must run off the asyncio event loop via asyncio.to_thread."""
+
+    @pytest.mark.asyncio
+    async def test_blocking_cache_read_runs_in_worker_thread(self, mcp_server):
+        """A synchronous cache call inside an async handler must not run on the
+        event-loop thread — it should be offloaded with asyncio.to_thread."""
+        loop_thread = threading.current_thread()
+        seen = {}
+
+        def record_thread():
+            seen["thread"] = threading.current_thread()
+            return []  # empty cache hit; no API fallback needed
+
+        mcp_server.cache.get_playlists.side_effect = record_thread
+
+        await mcp_server._list_playlists({"include_virtual": False})
+
+        assert "thread" in seen
+        assert seen["thread"] is not loop_thread

@@ -52,6 +52,11 @@ logger = logging.getLogger(__name__)
 # tool call can't flood the MCP client's context window. 0 disables the cap.
 DEFAULT_TRANSCRIPT_MAX_CHARS = 20000
 
+# Max Fabric subprocesses to run at once in fabric_analyze_batch. Each Fabric call
+# is a separate external process (up to 120s); bounding concurrency keeps the
+# batch responsive without spawning an unbounded swarm of LLM subprocesses.
+FABRIC_BATCH_CONCURRENCY = 4
+
 
 class YangerMCPServer:
     """MCP server wrapping yanger's YouTube playlist functionality."""
@@ -614,7 +619,9 @@ class YangerMCPServer:
         ]
 
         if name not in no_auth_tools:
-            self._ensure_auth()
+            # First-call auth does a blocking OAuth token refresh + client/cache
+            # construction; keep it off the event loop.
+            await asyncio.to_thread(self._ensure_auth)
 
         handlers = {
             # Playlist Management
@@ -684,13 +691,14 @@ class YangerMCPServer:
         """List all playlists."""
         include_virtual = args.get("include_virtual", False)
 
-        # Try cache first
-        playlists = self.cache.get_playlists()
+        # Try cache first. SQLite/network work is offloaded to a worker thread so
+        # it never blocks the asyncio event loop (stdio reads, pings, cancel).
+        playlists = await asyncio.to_thread(self.cache.get_playlists)
 
         if playlists is None:
             # Fetch from API
-            playlists = self.api_client.get_playlists()
-            self.cache.set_playlists(playlists)
+            playlists = await asyncio.to_thread(self.api_client.get_playlists)
+            await asyncio.to_thread(self.cache.set_playlists, playlists)
 
         result = []
         for p in playlists:
@@ -705,7 +713,7 @@ class YangerMCPServer:
 
         # Add virtual playlists if requested
         if include_virtual:
-            virtual = self.cache.get_virtual_playlists()
+            virtual = await asyncio.to_thread(self.cache.get_virtual_playlists)
             for vp in virtual:
                 result.append({
                     "id": vp["id"],
@@ -725,7 +733,7 @@ class YangerMCPServer:
 
         # Check if virtual playlist
         if playlist_id.startswith("virtual_"):
-            virtual = self.cache.get_virtual_playlists()
+            virtual = await asyncio.to_thread(self.cache.get_virtual_playlists)
             for vp in virtual:
                 if vp["id"] == playlist_id:
                     return {
@@ -739,7 +747,7 @@ class YangerMCPServer:
             raise ValueError(f"Virtual playlist not found: {playlist_id}")
 
         # Fetch from API (playlists.list with id parameter)
-        playlists = self.api_client.get_playlists()
+        playlists = await asyncio.to_thread(self.api_client.get_playlists)
         for p in playlists:
             if p.id == playlist_id:
                 return {
@@ -759,14 +767,15 @@ class YangerMCPServer:
         description = args.get("description", "")
         privacy_status = args.get("privacy_status", "private")
 
-        playlist = self.api_client.create_playlist(
+        playlist = await asyncio.to_thread(
+            self.api_client.create_playlist,
             title=title,
             description=description,
             privacy_status=privacy_status,
         )
 
         # The playlist collection changed; force list_playlists to refetch.
-        self._invalidate_cache(playlists_list=True)
+        await asyncio.to_thread(self._invalidate_cache, playlists_list=True)
 
         return {
             "success": True,
@@ -783,10 +792,10 @@ class YangerMCPServer:
         """Delete a playlist."""
         playlist_id = args["playlist_id"]
 
-        self.api_client.delete_playlist(playlist_id)
+        await asyncio.to_thread(self.api_client.delete_playlist, playlist_id)
 
         # Collection changed; this also clears the deleted playlist's videos.
-        self._invalidate_cache(playlist_id, playlists_list=True)
+        await asyncio.to_thread(self._invalidate_cache, playlist_id, playlists_list=True)
 
         return {
             "success": True,
@@ -798,10 +807,10 @@ class YangerMCPServer:
         playlist_id = args["playlist_id"]
         new_title = args["new_title"]
 
-        self.api_client.rename_playlist(playlist_id, new_title)
+        await asyncio.to_thread(self.api_client.rename_playlist, playlist_id, new_title)
 
         # The cached title is stale; refetch the playlist collection.
-        self._invalidate_cache(playlist_id, playlists_list=True)
+        await asyncio.to_thread(self._invalidate_cache, playlist_id, playlists_list=True)
 
         return {
             "success": True,
@@ -817,7 +826,7 @@ class YangerMCPServer:
 
         # Check if virtual playlist
         if playlist_id.startswith("virtual_"):
-            videos = self.cache.get_virtual_videos(playlist_id)
+            videos = await asyncio.to_thread(self.cache.get_virtual_videos, playlist_id)
             result = []
             for v in videos[:limit]:
                 result.append({
@@ -830,12 +839,12 @@ class YangerMCPServer:
             return {"videos": result, "count": len(result), "playlist_id": playlist_id}
 
         # Try cache first
-        videos = self.cache.get_videos(playlist_id)
+        videos = await asyncio.to_thread(self.cache.get_videos, playlist_id)
 
         if videos is None:
             # Fetch from API
-            videos = self.api_client.get_playlist_items(playlist_id)
-            self.cache.set_videos(playlist_id, videos)
+            videos = await asyncio.to_thread(self.api_client.get_playlist_items, playlist_id)
+            await asyncio.to_thread(self.cache.set_videos, playlist_id, videos)
 
         result = []
         for v in videos[:limit]:
@@ -857,14 +866,15 @@ class YangerMCPServer:
         playlist_id = args["playlist_id"]
         position = args.get("position")
 
-        playlist_item_id = self.api_client.add_video_to_playlist(
+        playlist_item_id = await asyncio.to_thread(
+            self.api_client.add_video_to_playlist,
             video_id=video_id,
             playlist_id=playlist_id,
             position=position,
         )
 
         # The new video must show up in list_videos for this playlist.
-        self._invalidate_cache(playlist_id)
+        await asyncio.to_thread(self._invalidate_cache, playlist_id)
 
         return {
             "success": True,
@@ -877,14 +887,14 @@ class YangerMCPServer:
         playlist_item_id = args["playlist_item_id"]
         playlist_id = args.get("playlist_id")
 
-        self.api_client.remove_video_from_playlist(playlist_item_id)
+        await asyncio.to_thread(self.api_client.remove_video_from_playlist, playlist_item_id)
 
         # Refresh so the removed video disappears from list_videos. Without a
         # known playlist we must clear the whole playlists cache to stay correct.
         if playlist_id:
-            self._invalidate_cache(playlist_id)
+            await asyncio.to_thread(self._invalidate_cache, playlist_id)
         else:
-            self._invalidate_cache(playlists_list=True)
+            await asyncio.to_thread(self._invalidate_cache, playlists_list=True)
 
         return {
             "success": True,
@@ -906,10 +916,10 @@ class YangerMCPServer:
             channel_title="",
         )
 
-        new_item_id = self.api_client.move_video(video, target_playlist_id)
+        new_item_id = await asyncio.to_thread(self.api_client.move_video, video, target_playlist_id)
 
         # Both ends changed; source_playlist_id is optional so may be skipped.
-        self._invalidate_cache(target_playlist_id, source_playlist_id)
+        await asyncio.to_thread(self._invalidate_cache, target_playlist_id, source_playlist_id)
 
         return {
             "success": True,
@@ -922,6 +932,14 @@ class YangerMCPServer:
         query = args["query"].lower()
         limit = args.get("limit", 20)
 
+        # The whole scan is one SQLite read per playlist; run it off the event
+        # loop so a large cache can't block stdio/cancellation.
+        results = await asyncio.to_thread(self._search_videos_blocking, query, limit)
+
+        return {"results": results, "count": len(results), "query": query}
+
+    def _search_videos_blocking(self, query: str, limit: int) -> List[dict[str, Any]]:
+        """Synchronous cache scan for _search_videos (runs in a worker thread)."""
         results = []
 
         # Search in cached playlists
@@ -948,7 +966,7 @@ class YangerMCPServer:
             if len(results) >= limit:
                 break
 
-        return {"results": results, "count": len(results), "query": query}
+        return results
 
     # --- Transcripts ---
 
@@ -978,8 +996,8 @@ class YangerMCPServer:
             proxy_settings = self._load_proxy_settings()
             self.transcript_fetcher = TranscriptFetcher(proxy_settings=proxy_settings)
 
-        # Check cache first
-        cached = self.cache.get_transcript(video_id)
+        # Check cache first (SQLite read offloaded off the event loop)
+        cached = await asyncio.to_thread(self.cache.get_transcript, video_id)
         if cached:
             # A cached failure (e.g. NOT_AVAILABLE) stores no transcript body, so
             # surface it instead of json.loads(None) / an empty text dump.
@@ -1007,8 +1025,10 @@ class YangerMCPServer:
                 "truncated": truncated,
             }
 
-        # Fetch fresh transcript
-        transcript, status = self.transcript_fetcher.fetch_transcript(video_id)
+        # Fetch fresh transcript (network I/O — must not block the event loop)
+        transcript, status = await asyncio.to_thread(
+            self.transcript_fetcher.fetch_transcript, video_id
+        )
 
         if transcript is None:
             return {
@@ -1017,8 +1037,9 @@ class YangerMCPServer:
                 "message": "Transcript not available for this video",
             }
 
-        # Cache it
-        self.cache.cache_transcript(
+        # Cache it (SQLite write offloaded off the event loop)
+        await asyncio.to_thread(
+            self.cache.cache_transcript,
             video_id=video_id,
             transcript_text=TranscriptFetcher.compress_transcript(
                 TranscriptFetcher.format_as_text(transcript)
@@ -1064,9 +1085,9 @@ class YangerMCPServer:
 
         if playlist_id:
             # Stats for specific playlist
-            videos = self.cache.get_videos(playlist_id)
+            videos = await asyncio.to_thread(self.cache.get_videos, playlist_id)
             if videos is None:
-                videos = self.api_client.get_playlist_items(playlist_id)
+                videos = await asyncio.to_thread(self.api_client.get_playlist_items, playlist_id)
 
             return {
                 "playlist_id": playlist_id,
@@ -1075,11 +1096,11 @@ class YangerMCPServer:
             }
 
         # Overall stats
-        playlists = self.cache.get_playlists()
+        playlists = await asyncio.to_thread(self.cache.get_playlists)
         if playlists is None:
-            playlists = self.api_client.get_playlists()
+            playlists = await asyncio.to_thread(self.api_client.get_playlists)
 
-        virtual = self.cache.get_virtual_playlists()
+        virtual = await asyncio.to_thread(self.cache.get_virtual_playlists)
 
         total_videos = sum(p.item_count for p in playlists)
         total_virtual_videos = sum(vp.get("video_count", 0) for vp in virtual)
@@ -1099,6 +1120,20 @@ class YangerMCPServer:
         playlist_id = args.get("playlist_id")
         include_fuzzy = args.get("include_fuzzy", False)
 
+        # Cache reads plus CPU-bound fuzzy matching — run off the event loop.
+        results = await asyncio.to_thread(
+            self._find_duplicates_blocking, playlist_id, include_fuzzy
+        )
+
+        return {
+            "duplicates": results,
+            "count": len(results),
+            "scope": playlist_id or "all_playlists",
+        }
+
+    def _find_duplicates_blocking(self, playlist_id: Optional[str],
+                                  include_fuzzy: bool) -> List[dict[str, Any]]:
+        """Synchronous duplicate detection for _find_duplicates (worker thread)."""
         detector = DuplicateDetector(fuzzy_threshold=0.85 if include_fuzzy else 1.0)
 
         if playlist_id:
@@ -1149,16 +1184,17 @@ class YangerMCPServer:
                 ],
             })
 
-        return {
-            "duplicates": results,
-            "count": len(results),
-            "scope": playlist_id or "all_playlists",
-        }
+        return results
 
     async def _analyze_playlist(self, args: dict[str, Any]) -> dict[str, Any]:
         """Get comprehensive playlist analytics."""
         playlist_id = args["playlist_id"]
 
+        # Cache/API reads plus CPU-bound analysis — run off the event loop.
+        return await asyncio.to_thread(self._analyze_playlist_blocking, playlist_id)
+
+    def _analyze_playlist_blocking(self, playlist_id: str) -> dict[str, Any]:
+        """Synchronous playlist analysis for _analyze_playlist (worker thread)."""
         # Get videos
         if playlist_id.startswith("virtual_"):
             videos_data = self.cache.get_virtual_videos(playlist_id)
@@ -1211,6 +1247,16 @@ class YangerMCPServer:
         video_ids = args.get("video_ids")
         limit = args.get("limit", 50)
 
+        # Reads, the per-video API add loop, and cache invalidation are all
+        # blocking; run the whole copy off the event loop in one worker thread.
+        return await asyncio.to_thread(
+            self._copy_videos_blocking,
+            source_playlist_id, target_playlist_id, video_ids, limit,
+        )
+
+    def _copy_videos_blocking(self, source_playlist_id: str, target_playlist_id: str,
+                              video_ids: Optional[List[str]], limit: int) -> dict[str, Any]:
+        """Synchronous copy loop for _copy_videos (runs in a worker thread)."""
         # Get source videos
         if source_playlist_id.startswith("virtual_"):
             videos_data = self.cache.get_virtual_videos(source_playlist_id)
@@ -1274,6 +1320,21 @@ class YangerMCPServer:
         playlist_id = args.get("playlist_id")
         limit = args.get("limit", 10)
 
+        # Cache reads plus gzip decompression of each transcript — offload it all.
+        results = await asyncio.to_thread(
+            self._search_transcripts_blocking, query, playlist_id, limit
+        )
+
+        return {
+            "results": results,
+            "count": len(results),
+            "query": query,
+            "scope": playlist_id or "all_cached",
+        }
+
+    def _search_transcripts_blocking(self, query: str, playlist_id: Optional[str],
+                                     limit: int) -> List[dict[str, Any]]:
+        """Synchronous transcript search for _search_transcripts (worker thread)."""
         # Initialize components if needed
         if not self.cache:
             self.cache = PersistentCache()
@@ -1325,12 +1386,7 @@ class YangerMCPServer:
                 logger.debug(f"Error searching transcript {video_id}: {e}")
                 continue
 
-        return {
-            "results": results,
-            "count": len(results),
-            "query": query,
-            "scope": playlist_id or "all_cached",
-        }
+        return results
 
     def _get_all_cached_transcript_ids(self) -> List[str]:
         """Get all video IDs that have cached transcripts."""
@@ -1347,6 +1403,15 @@ class YangerMCPServer:
         limit = args.get("limit", 50)
         skip_cached = args.get("skip_cached", True)
 
+        # Auth, list fetch, and a per-video network fetch + SQLite write loop are
+        # all blocking; run the whole batch off the event loop.
+        return await asyncio.to_thread(
+            self._batch_fetch_transcripts_blocking, playlist_id, limit, skip_cached
+        )
+
+    def _batch_fetch_transcripts_blocking(self, playlist_id: str, limit: int,
+                                          skip_cached: bool) -> dict[str, Any]:
+        """Synchronous batch transcript fetch (runs in a worker thread)."""
         # Initialize components if needed
         if not self.cache:
             self.cache = PersistentCache()
@@ -1462,8 +1527,10 @@ class YangerMCPServer:
             cmd.extend(["--model", model])
 
         try:
-            # Run fabric with transcript as input
-            process = subprocess.run(
+            # Run fabric with transcript as input. The subprocess (up to 120s)
+            # runs in a worker thread so it never blocks the asyncio event loop.
+            process = await asyncio.to_thread(
+                subprocess.run,
                 cmd,
                 input=transcript_text,
                 capture_output=True,
@@ -1524,8 +1591,9 @@ class YangerMCPServer:
             }
 
         try:
-            # Run fabric --list to get patterns
-            process = subprocess.run(
+            # Run fabric --list to get patterns (subprocess off the event loop)
+            process = await asyncio.to_thread(
+                subprocess.run,
                 ["fabric", "--list"],
                 capture_output=True,
                 text=True,
@@ -1595,16 +1663,16 @@ class YangerMCPServer:
             if not self.cache:
                 self.cache = PersistentCache()
 
-            # Get videos from playlist
+            # Get videos from playlist (blocking reads offloaded off the loop)
             if playlist_id.startswith("virtual_"):
-                videos_data = self.cache.get_virtual_videos(playlist_id)
+                videos_data = await asyncio.to_thread(self.cache.get_virtual_videos, playlist_id)
                 video_ids = [v["video_id"] for v in videos_data[:limit]]
             else:
                 # Need auth for real playlists
-                self._ensure_auth()
-                videos = self.cache.get_videos(playlist_id)
+                await asyncio.to_thread(self._ensure_auth)
+                videos = await asyncio.to_thread(self.cache.get_videos, playlist_id)
                 if videos is None:
-                    videos = self.api_client.get_playlist_items(playlist_id)
+                    videos = await asyncio.to_thread(self.api_client.get_playlist_items, playlist_id)
                 video_ids = [v.id for v in videos[:limit]]
         elif not video_ids:
             return {
@@ -1615,40 +1683,67 @@ class YangerMCPServer:
         # Apply limit
         video_ids = video_ids[:limit]
 
-        # Process each video
+        # Process each video. Each _fabric_analyze is an independent ~120s Fabric
+        # subprocess (offloaded internally via to_thread), so fan them out with
+        # bounded concurrency rather than fully serially — a batch no longer
+        # freezes the server for minutes, without spawning an unbounded swarm.
         results = []
         errors = []
 
-        for video_id in video_ids:
-            try:
-                result = await self._fabric_analyze({
-                    "video_id": video_id,
-                    "pattern": pattern,
-                    "model": model,
-                })
-
-                if "error" in result:
-                    errors.append({
-                        "video_id": video_id,
-                        "error": result["error"],
-                        "message": result.get("message", "Unknown error"),
-                    })
-                    if not skip_errors:
-                        break
-                else:
-                    results.append({
-                        "video_id": video_id,
-                        "pattern": pattern,
-                        "result": result["result"],
-                        "transcript_language": result.get("transcript_language"),
-                    })
-            except Exception as e:
+        def _record(video_id: str, result: Any) -> bool:
+            """Sort one analyze result into results/errors. Returns True on error."""
+            if isinstance(result, Exception):
                 errors.append({
                     "video_id": video_id,
                     "error": "exception",
-                    "message": str(e),
+                    "message": str(result),
                 })
-                if not skip_errors:
+                return True
+            if "error" in result:
+                errors.append({
+                    "video_id": video_id,
+                    "error": result["error"],
+                    "message": result.get("message", "Unknown error"),
+                })
+                return True
+            results.append({
+                "video_id": video_id,
+                "pattern": pattern,
+                "result": result["result"],
+                "transcript_language": result.get("transcript_language"),
+            })
+            return False
+
+        if skip_errors:
+            # Fan out under a semaphore; gather preserves input ordering.
+            semaphore = asyncio.Semaphore(FABRIC_BATCH_CONCURRENCY)
+
+            async def analyze_one(video_id: str) -> dict[str, Any]:
+                async with semaphore:
+                    return await self._fabric_analyze({
+                        "video_id": video_id,
+                        "pattern": pattern,
+                        "model": model,
+                    })
+
+            analyses = await asyncio.gather(
+                *(analyze_one(vid) for vid in video_ids),
+                return_exceptions=True,
+            )
+            for video_id, result in zip(video_ids, analyses):
+                _record(video_id, result)
+        else:
+            # Fail-fast mode: stop at the first failure, so process serially.
+            for video_id in video_ids:
+                try:
+                    result: Any = await self._fabric_analyze({
+                        "video_id": video_id,
+                        "pattern": pattern,
+                        "model": model,
+                    })
+                except Exception as e:
+                    result = e
+                if _record(video_id, result):
                     break
 
         return {

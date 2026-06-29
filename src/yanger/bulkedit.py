@@ -478,10 +478,16 @@ class BulkEditor:
             except OSError:
                 pass
 
-    async def bulk_edit(self, playlists: List[Playlist],
-                       videos_by_playlist: Dict[str, List[Video]],
-                       dry_run: bool = False) -> Tuple[BulkEditChanges, Dict[str, any]]:
+    def bulk_edit(self, playlists: List[Playlist],
+                  videos_by_playlist: Dict[str, List[Video]],
+                  dry_run: bool = False) -> Tuple[BulkEditChanges, Dict[str, any]]:
         """Perform bulk edit operation.
+
+        Synchronous by design: this only generates markdown, launches a blocking
+        external editor, and parses the result -- it does NO async API I/O. The
+        caller (app.py execute_bulkedit) runs it in a worker thread under
+        ``app.suspend()`` so the editor owns the terminal and the event loop
+        doesn't freeze.
 
         Args:
             playlists: List of playlists

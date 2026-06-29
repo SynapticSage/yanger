@@ -441,11 +441,11 @@ class YouTubeRangerApp(App):
         # would act on the previously-selected real playlist (delete-wrong-playlist).
         self.current_playlist = playlist
 
-        if not self.api_client:
-            return
-
         try:
-            # Check if this is a virtual playlist
+            # Virtual playlists are served entirely from the local cache (Takeout
+            # imports etc.) and need NO api_client. Handle them BEFORE the
+            # api_client guard below: offline mode is the ONLY mode they're shown
+            # in, so gating them on api_client made them always render 0 videos.
             if playlist.is_virtual:
                 # Load videos from virtual playlist database
                 if playlist.id.startswith("virtual_"):
@@ -506,9 +506,13 @@ class YouTubeRangerApp(App):
                     
                     self.notify(f"Loaded {len(self.current_videos)} videos from {playlist.title}", timeout=2)
                     return
-            
+
+            # Everything past here needs the live API; offline mode stops here.
+            if not self.api_client:
+                return
+
             # Check if this is a restricted special playlist
-            elif playlist.id == "WL":
+            if playlist.id == "WL":
                 self.notify(
                     "Watch Later playlist is restricted by YouTube API since 2016. Cannot retrieve videos.",
                     severity="warning",
@@ -2237,13 +2241,29 @@ class YouTubeRangerApp(App):
 
             videos_by_playlist[playlist.id] = videos
 
-        # Execute bulk edit
+        # Execute bulk edit. The external editor (vim/etc.) needs the raw
+        # terminal, so suspend the TUI and run the whole parse-and-return step
+        # off the event loop in a worker thread -- mirrors the :transcript
+        # handler (run_transcript_for_current_video). bulk_edit is synchronous.
         try:
-            changes, results = await self.bulk_editor.bulk_edit(
-                self.playlists,
-                videos_by_playlist,
-                dry_run=dry_run
-            )
+            try:
+                with self.suspend():
+                    changes, results = await asyncio.to_thread(
+                        self.bulk_editor.bulk_edit,
+                        self.playlists,
+                        videos_by_playlist,
+                        dry_run=dry_run,
+                    )
+            finally:
+                # Redraw the TUI after the editor returns (even if parsing
+                # raised), mirroring the transcript handler's finally-refresh.
+                self.refresh()
+
+            # Propagate the CLI --dry-run flag onto changes so the confirm
+            # handler (on_bulk_edit_confirmed) honors it. Without this, only the
+            # preview's "Dry Run" button set the flag and `:bulkedit --dry-run`
+            # would apply REAL mutations on Apply.
+            changes.dry_run = dry_run
 
             if changes.is_empty():
                 self.notify("No changes made", timeout=2)
