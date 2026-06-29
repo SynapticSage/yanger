@@ -113,6 +113,9 @@ class YouTubeRangerApp(App):
         self.current_playlist: Optional[Playlist] = None
         self.current_videos: List[Video] = []
         self.current_video: Optional[Video] = None
+        # Runtime override from `:set transcript_command` — must beat the env var
+        # (precedence: :set > YANGER_TRANSCRIPT_COMMAND > YAML).
+        self._transcript_command_override: Optional[str] = None
         self.unfiltered_videos: List[Video] = []  # Original videos before filtering
         self.playlists_loaded: bool = False  # Track if playlists have been loaded
         
@@ -2146,7 +2149,9 @@ class YouTubeRangerApp(App):
             self._notify_status("No video selected", error=True)
             return
 
-        template = resolve_transcript_command(self.settings)
+        template = resolve_transcript_command(
+            self.settings, runtime_override=self._transcript_command_override
+        )
         if not template:
             self._notify_status(
                 'No transcript command configured. Set one with '
@@ -2189,6 +2194,9 @@ class YouTubeRangerApp(App):
 
         if key == "transcript_command":
             self.settings.transcripts.transcript_command = value
+            # Also record as the runtime override so it takes precedence over an
+            # exported YANGER_TRANSCRIPT_COMMAND for the rest of this session.
+            self._transcript_command_override = value
             try:
                 save_user_setting("transcript_command", value, self.config_dir)
             except Exception as e:
@@ -2224,17 +2232,17 @@ class YouTubeRangerApp(App):
                 continue  # Skip virtual playlists
 
             # Try to get cached videos first
-            videos = self._cache.get_playlist_videos(playlist.id)
+            videos = self._cache.get_videos(playlist.id)
 
             if not videos and self.api_client:
                 # Fetch from API if not cached
                 try:
                     videos = await asyncio.to_thread(
-                        self.api_client.get_playlist_videos,
+                        self.api_client.get_playlist_items,
                         playlist.id
                     )
                     # Cache the fetched videos
-                    self._cache.cache_playlist(playlist, videos)
+                    self._cache.set_videos(playlist.id, videos)
                 except Exception as e:
                     logger.warning(f"Failed to fetch videos for playlist {playlist.title}: {e}")
                     videos = []

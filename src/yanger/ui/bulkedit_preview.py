@@ -243,8 +243,9 @@ class BulkEditPreview(ModalScreen):
         if event.key == "escape":
             self.post_message(BulkEditCancelled())
             self.dismiss(None)
-            event.stop()
         elif event.key == "enter":
             self.post_message(BulkEditConfirmed(self.changes))
             self.dismiss(self.changes)
-            event.stop()
+        # Consume EVERY key while this modal is open so nothing (dd/dD/B/nav)
+        # leaks to the miller view behind it — same guard as ConfirmationModal.
+        event.stop()

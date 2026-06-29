@@ -367,9 +367,19 @@ class PersistentCache:
             videos: List of videos to cache
         """
         with self._connect() as conn:
+            # Ensure the parent playlist row exists. With foreign_keys=ON, inserting
+            # into `videos` requires a matching `playlists` row; callers like the MCP
+            # server cache videos without first priming the playlists table (and
+            # invalidate_playlists_cache DELETEs all rows), so without this stub the
+            # insert raises IntegrityError. A later set_playlists() upsert corrects it.
+            conn.execute(
+                "INSERT OR IGNORE INTO playlists (id, title, item_count) VALUES (?, ?, ?)",
+                (playlist_id, playlist_id, len(videos)),
+            )
+
             # Delete existing videos for this playlist
             conn.execute("DELETE FROM videos WHERE playlist_id = ?", (playlist_id,))
-            
+
             # Insert new videos
             for video in videos:
                 conn.execute("""

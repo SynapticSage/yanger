@@ -70,8 +70,10 @@ transcripts:
   transcript_command: ""
 
 youtube:
-  client_secrets_file: "config/client_secret.json"
-  token_file: "token.json"
+  # Leave empty to auto-resolve to ~/.config/yanger/{client_secret,token}.json
+  # (with legacy ./config fallbacks). Set an absolute path to override.
+  client_secrets_file: ""
+  token_file: ""
   max_results_per_page: 50
   quota_warning_threshold: 7500 # 75%
   quota_critical_threshold: 9000 # 90%

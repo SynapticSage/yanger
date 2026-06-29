@@ -57,6 +57,12 @@ DEFAULT_TRANSCRIPT_MAX_CHARS = 20000
 # batch responsive without spawning an unbounded swarm of LLM subprocesses.
 FABRIC_BATCH_CONCURRENCY = 4
 
+# Only these transcript failure statuses are permanent and safe to cache. Transient
+# failures (IP_BLOCKED, ERROR/ERROR:...) must NOT be cached: caching them would make
+# skip_cached and get_transcript skip the video forever, so a proxy configured AFTER
+# a block could never recover it. Leaving them uncached lets a later run retry.
+TERMINAL_TRANSCRIPT_STATUSES = frozenset({"NOT_AVAILABLE"})
+
 
 class YangerMCPServer:
     """MCP server wrapping yanger's YouTube playlist functionality."""
@@ -1463,15 +1469,18 @@ class YangerMCPServer:
                     "language": transcript.language,
                 })
             else:
-                # Cache the failure status to avoid retrying
-                self.cache.cache_transcript(
-                    video_id=video_id,
-                    transcript_text=None,
-                    transcript_json=None,
-                    language=None,
-                    auto_generated=False,
-                    fetch_status=status,
-                )
+                # Cache ONLY terminal failures (NOT_AVAILABLE). Transient failures
+                # (IP_BLOCKED / ERROR) are left uncached so a later run — e.g. after
+                # the user configures a proxy — can retry them.
+                if status in TERMINAL_TRANSCRIPT_STATUSES:
+                    self.cache.cache_transcript(
+                        video_id=video_id,
+                        transcript_text=None,
+                        transcript_json=None,
+                        language=None,
+                        auto_generated=False,
+                        fetch_status=status,
+                    )
                 failed.append({
                     "video_id": video_id,
                     "reason": status,

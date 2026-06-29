@@ -179,8 +179,12 @@ class TestEnsureAuth:
 
     def test_fails_fast_without_token(self, tmp_path, monkeypatch):
         """A missing token must raise, never launch the interactive OAuth flow."""
-        # Anchor config resolution at an empty home so no token exists.
+        # Anchor config resolution at an empty home AND run from an empty cwd, so
+        # neither the canonical (~/.config) nor the legacy (./token.json) path
+        # resolves to an existing token (the repo root has a real token.json).
         monkeypatch.setattr("yanger.mcp_server.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("yanger.auth.Path.home", classmethod(lambda cls: tmp_path))
+        monkeypatch.chdir(tmp_path)
         server = YangerMCPServer()
 
         with pytest.raises(RuntimeError, match="Not authenticated"):
@@ -1078,3 +1082,33 @@ class TestEventLoopOffloading:
 
         assert "thread" in seen
         assert seen["thread"] is not loop_thread
+
+
+class TestTransientTranscriptCaching:
+    """Transient transcript failures must NOT be cached (so they can be retried).
+
+    Regression: _batch_fetch_transcripts_blocking cached EVERY non-success status,
+    including IP_BLOCKED/ERROR. skip_cached + get_transcript then skipped those
+    videos forever, so a proxy configured AFTER a block could never recover them.
+    Only terminal NOT_AVAILABLE should be cached.
+    """
+
+    def test_only_terminal_failures_cached(self, mcp_server):
+        mcp_server.cache.get_virtual_videos = MagicMock(
+            return_value=[{"video_id": "vBlocked"}, {"video_id": "vGone"}]
+        )
+        mcp_server.cache.get_transcript = MagicMock(return_value=None)  # nothing cached yet
+        mcp_server.cache.cache_transcript = MagicMock()
+
+        def fetch(video_id):
+            return (None, "IP_BLOCKED") if video_id == "vBlocked" else (None, "NOT_AVAILABLE")
+
+        mcp_server.transcript_fetcher.fetch_transcript = MagicMock(side_effect=fetch)
+
+        result = mcp_server._batch_fetch_transcripts_blocking(
+            "virtual_x", limit=10, skip_cached=True
+        )
+
+        cached_ids = {c.kwargs["video_id"] for c in mcp_server.cache.cache_transcript.call_args_list}
+        assert cached_ids == {"vGone"}, "transient IP_BLOCKED must not be cached"
+        assert result["failed_count"] == 2
