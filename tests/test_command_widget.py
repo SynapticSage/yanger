@@ -144,12 +144,15 @@ class CommandTestApp(App):
 # and the synchronous executor.)
 # ---------------------------------------------------------------------------
 import asyncio
+import contextlib
+import types
 from unittest.mock import MagicMock
 
 import pytest
 
 from yanger.models import Playlist, Video
 from yanger.bulkedit import (
+    BulkEditor,
     BulkEditGenerator,
     BulkEditParser,
     BulkEditExecutor,
@@ -158,6 +161,8 @@ from yanger.bulkedit import (
     VideoMove,
     VideoReorder,
 )
+import yanger.app as yanger_app
+from yanger.app import YouTubeRangerApp
 
 
 def _video(vid, item, title="Title", playlist_id=None):
@@ -294,6 +299,137 @@ def test_executor_uses_sync_client_methods():
     client.update_video_position.assert_called_once_with("id_reo", "p2", "vr", 1)
     assert not client.remove_from_playlist.called  # the old, wrong name
     assert results["failed"] == []
+
+
+def test_bulk_editor_bulk_edit_is_synchronous(monkeypatch):
+    """bulk_edit() is now a plain sync function returning (changes, {}).
+
+    app.py runs it via asyncio.to_thread under suspend(); a coroutine here would
+    break that contract. Monkeypatch launch_editor so no real $EDITOR is spawned.
+    """
+    p = _playlist("p", "PL")
+    vids = [_video("v0", "i0", "T0", "p"), _video("v1", "i1", "T1", "p")]
+    vbp = {"p": vids}
+
+    editor = BulkEditor(api_client=MagicMock())
+    # Simulate the user deleting the second video in their editor.
+    edited = "\n".join([_pl_line("p", "PL"), _vid_line("v0", "i0", "T0")])
+    monkeypatch.setattr(editor, "launch_editor", lambda content: edited)
+
+    result = editor.bulk_edit([p], vbp)
+    assert not asyncio.iscoroutine(result), "bulk_edit must be synchronous"
+    changes, results = result
+    assert [d[0].playlist_item_id for d in changes.deletions] == ["i1"]
+    assert results == {}
+
+
+class _SuspendTracker:
+    """Stand-in for App.suspend(): records whether code runs inside the CM."""
+
+    def __init__(self):
+        self.active = False
+        self.entered = False
+
+    def __call__(self):
+        @contextlib.contextmanager
+        def cm():
+            self.active = True
+            self.entered = True
+            try:
+                yield
+            finally:
+                self.active = False
+
+        return cm()
+
+
+def test_execute_bulkedit_propagates_dry_run_under_suspend(monkeypatch):
+    """`:bulkedit --dry-run` must flow onto `changes` AND run under suspend().
+
+    Regression: execute_bulkedit set only preview.dry_run, so the CLI flag never
+    reached on_bulk_edit_confirmed -> Apply did REAL mutations. It also ran the
+    blocking editor on the event loop. We assert dry_run lands on `changes` and
+    that bulk_edit executes inside suspend() (i.e. off the event loop).
+    """
+    pushed = {}
+
+    class StubPreview:
+        def __init__(self, changes):
+            self.changes = changes
+            self.dry_run = False
+
+    monkeypatch.setattr(yanger_app, "BulkEditPreview", StubPreview)
+
+    suspend = _SuspendTracker()
+    changes = BulkEditChanges(deletions=[(_video("vd", "i_del", "Del", "p1"), "p1")])
+
+    def fake_bulk_edit(playlists, videos_by_playlist, dry_run=False):
+        # Must be running inside suspend() (and on a worker thread via to_thread).
+        assert suspend.active, "bulk_edit ran outside app.suspend()"
+        return changes, {}
+
+    fake_self = types.SimpleNamespace(
+        bulk_editor=types.SimpleNamespace(bulk_edit=fake_bulk_edit),
+        playlists=[_playlist("p1", "PL1")],
+        api_client=None,
+        _cache=types.SimpleNamespace(get_videos=lambda pid: [], set_videos=lambda pid, v: None),
+        suspend=suspend,
+        refresh=MagicMock(),
+        notify=MagicMock(),
+        push_screen=lambda preview: pushed.setdefault("preview", preview),
+    )
+
+    asyncio.run(YouTubeRangerApp.execute_bulkedit(fake_self, dry_run=True))
+
+    assert suspend.entered, "execute_bulkedit did not suspend the TUI"
+    assert changes.dry_run is True, "CLI --dry-run not propagated onto changes"
+    assert pushed["preview"].dry_run is True
+    fake_self.refresh.assert_called_once()
+
+
+def test_execute_bulkedit_collects_via_real_cache_methods(monkeypatch):
+    """execute_bulkedit must use get_videos/get_playlist_items/set_videos.
+
+    Regression: it called self._cache.get_playlist_videos / api_client.get_playlist_videos
+    / self._cache.cache_playlist — none of which exist — so 'B'/:bulkedit raised
+    AttributeError on the first real playlist, before the editor ever opened. The
+    fake cache below deliberately provides ONLY the real method names, so the old
+    code would AttributeError here.
+    """
+    cached_video = _video("vc", "i_c", "Cached", "p1")
+
+    class StubPreview:
+        def __init__(self, changes):
+            self.changes = changes
+            self.dry_run = False
+
+    monkeypatch.setattr(yanger_app, "BulkEditPreview", StubPreview)
+    suspend = _SuspendTracker()
+    seen = {}
+
+    def fake_bulk_edit(playlists, videos_by_playlist, dry_run=False):
+        seen["videos_by_playlist"] = videos_by_playlist
+        return BulkEditChanges(), {}
+
+    fake_self = types.SimpleNamespace(
+        bulk_editor=types.SimpleNamespace(bulk_edit=fake_bulk_edit),
+        playlists=[_playlist("p1", "PL1")],
+        api_client=None,
+        # Only the REAL method names — get_playlist_videos/cache_playlist absent on purpose.
+        _cache=types.SimpleNamespace(
+            get_videos=lambda pid: [cached_video],
+            set_videos=lambda pid, v: None,
+        ),
+        suspend=suspend,
+        refresh=MagicMock(),
+        notify=MagicMock(),
+        push_screen=lambda preview: None,
+    )
+
+    asyncio.run(YouTubeRangerApp.execute_bulkedit(fake_self, dry_run=False))
+
+    # The cached video flowed through get_videos into bulk_edit's input.
+    assert seen["videos_by_playlist"] == {"p1": [cached_video]}
 
 
 if __name__ == "__main__":

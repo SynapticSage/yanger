@@ -16,7 +16,7 @@ from pathlib import Path
 from datetime import datetime
 
 from yanger.core.transcript_fetcher import TranscriptFetcher
-from yanger.models import Playlist, PrivacyStatus
+from yanger.models import Playlist, PrivacyStatus, Video
 from conftest import assert_db_table_exists, get_db_row_count, get_transcript_from_db
 
 
@@ -547,3 +547,35 @@ class TestTranscriptCacheIntegration:
         assert test_cache.get_transcript("video_1") is not None
         assert test_cache.get_transcript("video_2") is not None
         assert test_cache.get_transcript("video_3") is not None
+
+
+class TestSetVideosForeignKey:
+    """Regression: set_videos must work for a playlist not yet in the cache.
+
+    PRAGMA foreign_keys=ON (now enabled on every connection) means inserting into
+    the videos table requires a parent playlists row. MCP list_videos caches videos
+    without first priming the playlists table (and invalidate_playlists_cache DELETEs
+    all rows), so set_videos must self-insert a stub parent or it raises IntegrityError.
+    """
+
+    def _video(self):
+        return Video(id="v1", playlist_item_id="pi1", title="T", channel_title="C")
+
+    def test_set_videos_for_uncached_playlist_does_not_raise(self, test_cache):
+        # 'PL_new' was never passed to set_playlists.
+        test_cache.set_videos("PL_new", [self._video()])
+        got = test_cache.get_videos("PL_new")
+        assert got is not None and len(got) == 1 and got[0].id == "v1"
+
+    def test_set_videos_empty_uncached_playlist_returns_empty(self, test_cache):
+        # Stub parent gets item_count=0, so the empty-vs-unfetched discriminator
+        # reports a real (empty) hit rather than a miss.
+        test_cache.set_videos("PL_empty", [])
+        assert test_cache.get_videos("PL_empty") == []
+
+    def test_later_set_playlists_preserves_videos(self, test_cache):
+        # The stub parent must survive (upsert, not REPLACE) so videos aren't wiped.
+        test_cache.set_videos("PL_x", [self._video()])
+        test_cache.set_playlists([Playlist(id="PL_x", title="Real Title")])
+        got = test_cache.get_videos("PL_x")
+        assert got is not None and len(got) == 1

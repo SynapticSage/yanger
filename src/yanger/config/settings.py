@@ -110,8 +110,11 @@ class TranscriptSettings:
 @dataclass
 class YouTubeSettings:
     """YouTube API settings."""
-    client_secrets_file: str = "config/client_secret.json"
-    token_file: str = "token.json"
+    # Empty = let auth.resolve_*_file() pick the canonical ~/.config/yanger
+    # location (with legacy fallbacks). A non-empty value here would be treated
+    # as an explicit override and bypass that single-source resolution.
+    client_secrets_file: str = ""
+    token_file: str = ""
     max_results_per_page: int = 50
     quota_warning_threshold: int = 7500  # Show warning at 75%
     quota_critical_threshold: int = 9000  # Show critical at 90%
