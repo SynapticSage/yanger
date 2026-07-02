@@ -18,11 +18,26 @@ the headline custom-command registry — cheaper and safer to build.
 
 ---
 
+## Discovered during /loop (follow-ups)
+
+- **Bulk-edit renames are silently dropped but reported as done.** (Surfaced by the 0.8
+  arch review.) The live apply path `operation_history.BulkEditOperation.execute` never
+  iterates `changes.renames`, yet the preview renders a "Renames" section, `summary()` counts
+  them, and the success toast says "Bulk edit completed" — so a user who renames an item in the
+  bulk editor is told it worked while nothing happened. (YouTube API can't rename playlist
+  *items*; playlist/video title renames go through `cw`.) *Fix: either drop renames from the
+  bulk-edit preview/summary, or surface them as an explicit "not applied (unsupported)" result.
+  Small · UX-correctness.*
+
 ## Changelog
 
 Completed items land here (newest first) with the commit that shipped them. Full
 per-run detail lives in the gitignored `journal/`.
 
+- **Tier 0 · 0.1/0.2/0.7/0.8/0.11 — docs + UX + dead-code.** README `sync`/`proxy` sections;
+  `.env.example` proxy vars; `gR` refresh-all alias (dropped the undeliverable Ctrl+Shift+R
+  binding); deleted dead `BulkEditExecutor` (coverage repointed to `BulkEditOperation`);
+  `colorscheme` → Textual native `App.theme` (floor `textual>=0.86`). +6 tests. 0.12 deferred.
 - **Tier 0 · 0.4/0.9 — None-title crash fixes + non-zero exit codes.** `Video.__post_init__`
   coerces None title/channel/description → "" (fixes duplicates/statistics/export + two MCP paths);
   `proxy test` and `fetch-metadata` now `sys.exit(1)` on error. +9 tests.
@@ -131,18 +146,27 @@ skill + chaining + prompts = Med / strategic.
 
 | # | Item | Why | Evidence |
 |---|---|---|---|
-| 0.1 | README: document `sync` + `proxy` | Marquee CLI features undocumented | `cli.py:544,954` |
-| 0.2 | `.env.example`: add proxy vars | `proxy status` advertises them | `cli.py:991` |
+| ✅ 0.1 | README: document `sync` + `proxy` | Marquee CLI features undocumented | `cli.py:544,954` |
+| ✅ 0.2 | `.env.example`: add proxy vars | `proxy status` advertises them | `cli.py:991` |
 | ✅ 0.3 | `yanger reset`: fix wrong paths + add confirm | Silently no-ops on real cache/config; unguarded destructive | `cli.py:166,182,193` |
 | ✅ 0.4 | `None`-title/description crash fixes | Crashes duplicates/statistics/`export --csv` on pre-metadata videos | duplicates/statistics/export |
 | ✅ 0.5 | `journal_mode=WAL` + `busy_timeout` in `_connect()` | MCP off-loop writes made `database is locked` reachable | `cache.py:66-75` |
 | ✅ 0.6 | `-v/--verbose` → `ctx.obj` | Group sets it but `run` never sees it (dead flag) | `cli.py:50,102` |
-| 0.7 | `Ctrl+Shift+R` → reachable key (e.g. `gR`) | Terminals can't deliver the chord; binding is dead | `keybindings.py`/README |
-| 0.8 | Delete dead `BulkEditExecutor` + repoint its test | False-confidence duplicate apply path | `bulkedit.py:323,434` |
+| ✅ 0.7 | `Ctrl+Shift+R` → reachable key (e.g. `gR`) | Terminals can't deliver the chord; binding is dead | `keybindings.py`/README |
+| ✅ 0.8 | Delete dead `BulkEditExecutor` + repoint its test | False-confidence duplicate apply path | `bulkedit.py:323,434` |
 | ✅ 0.9 | `fetch-metadata` / `proxy test` non-zero exit on error | Exit 0 breaks scripting/CI | `cli.py` |
 | ✅ 0.10 | Bump `youtube-transcript-api` pin `>=1.2` | Pin (`>=0.6.2`) lags shipped 1.x code | `pyproject.toml` |
-| 0.11 | Wire `colorscheme` → Textual native themes (bump Textual 6.5→8.x) | Closes dead `colorscheme` string; free `ctrl+p` "Change theme" | `config/settings.py:20`, `app.py:51` |
-| 0.12 | Status-bar contextual hint line | Discoverability (the CLAUDE.md mock shows it) | `ui/status_bar.py` |
+| ✅ 0.11 | Wire `colorscheme` → Textual native themes | Closes dead `colorscheme` string; free `ctrl+p` "Change theme" | `config/settings.py:20`, `app.py:51` |
+| ⏸️ 0.12 | Status-bar contextual hint line | Discoverability (the CLAUDE.md mock shows it) | `ui/status_bar.py` |
+
+> **0.11 note:** wired `colorscheme` → Textual's native `App.theme` on the *current* Textual
+> (floor raised to `>=0.86`, the version that added the theme system); deliberately did **not** do
+> the risky 6.5→8.x major bump. `colorscheme: nord` etc. now works; unknown/`default` keep the
+> built-in theme.
+> **0.12 DEFERRED:** a hint line already exists (`status_bar.update_hints` shows `yy:copy dd:cut
+> pp:paste`, matching the CLAUDE.md mock). Making it *contextual* requires resolving the shared
+> center-widget status/hint contention — a UX refactor out of proportion to a "quick win" and
+> regression-prone. Left for a dedicated UI pass.
 
 ---
 

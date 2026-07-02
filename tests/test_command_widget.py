@@ -155,7 +155,6 @@ from yanger.bulkedit import (
     BulkEditor,
     BulkEditGenerator,
     BulkEditParser,
-    BulkEditExecutor,
     BulkEditChanges,
     BulkEditParseError,
     VideoMove,
@@ -283,22 +282,10 @@ def test_moderate_deletion_allowed():
     assert changes.reorders == []
 
 
-def test_executor_uses_sync_client_methods():
-    """Executor calls the real (synchronous) client methods without awaiting."""
-    client = MagicMock()
-    client.add_video_to_playlist.return_value = "new_item"
-    executor = BulkEditExecutor(client)
-    changes = BulkEditChanges(
-        moves=[VideoMove(_video("vm", "id_mov", "Mov", "p1"), "p1", "p2", 0)],
-        reorders=[VideoReorder(_video("vr", "id_reo", "Reo", "p2"), "p2", 0, 1)],
-        deletions=[(_video("vd", "id_del", "Del", "p"), "p")],
-    )
-    results = asyncio.run(executor.execute(changes))
-    client.remove_video_from_playlist.assert_any_call("id_del")
-    client.add_video_to_playlist.assert_called_once_with("vm", "p2", position=0)
-    client.update_video_position.assert_called_once_with("id_reo", "p2", "vr", 1)
-    assert not client.remove_from_playlist.called  # the old, wrong name
-    assert results["failed"] == []
+# NB: the former test_executor_uses_sync_client_methods was deleted with the dead
+# BulkEditExecutor (Tier 0.8). Its guarantee — the apply path calls the correct sync
+# client method names — now lives in tests/test_operation_history.py against the REAL
+# path (BulkEditOperation), which is what the app actually runs.
 
 
 def test_bulk_editor_bulk_edit_is_synchronous(monkeypatch):

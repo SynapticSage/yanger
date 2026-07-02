@@ -115,7 +115,7 @@ yanger  # Will authenticate on first run
 | `?` | Show help overlay |
 | `:` | Enter command mode |
 | `Ctrl+R` | Refresh current view |
-| `Ctrl+Shift+R` | Refresh all (clear cache) |
+| `gR` | Refresh all (clear cache) |
 
 ## 💬 Command Mode
 
@@ -235,6 +235,32 @@ Press 'ge'
 - Compressed storage saves ~70% space
 - Some videos don't have transcripts (cached as "NOT_AVAILABLE")
 
+### Transcript Proxy (`yanger proxy`)
+
+YouTube blocks transcript requests from many cloud/datacenter IPs (the dominant failure
+mode is `IP_BLOCKED`). Route transcript fetches through a proxy to work around it.
+
+```bash
+yanger proxy status                       # show current proxy config (masks secrets)
+yanger proxy test                          # fetch a known transcript through the proxy
+                                           #   → exits non-zero if the test fails (CI-friendly)
+yanger proxy set --type generic --url https://user:pass@host:port --enable
+yanger proxy set --type webshare --webshare-user U --webshare-pass P --enable
+yanger proxy set --disable
+```
+
+Configuration precedence is env vars → `~/.config/yanger/config.yaml`. Setting either a
+generic proxy URL **or** both Webshare credentials auto-enables the proxy:
+
+| Env var | Purpose |
+|---|---|
+| `YANGER_PROXY_HTTPS` (alias `YANGER_PROXY_URL`) | Generic HTTPS proxy URL |
+| `YANGER_PROXY_HTTP` | Generic HTTP proxy URL |
+| `YANGER_WEBSHARE_USER` / `YANGER_WEBSHARE_PASS` | Webshare credentials |
+
+> **Webshare note:** use their **rotating _residential_** proxies — plain datacenter
+> Webshare IPs are themselves blocked by YouTube.
+
 ### Google Takeout Import
 
 Import Watch Later and History playlists unavailable via API.
@@ -259,6 +285,25 @@ yanger fetch-metadata
 - Deduplication of imports
 - Pagination for large playlists (7000+ videos)
 - Works offline with cached content
+
+### Automated Data Sync (`yanger sync`)
+
+`yanger sync` is the automated version of the Takeout import above: it drives Google
+Takeout in **your own** browser so you don't hand-download zips. It attaches to a Chrome
+started with `--remote-debugging-port`, pre-configures a YouTube-only export, waits for
+you to click **Create export**, then downloads and imports the result. Your credentials
+are never automated — you stay signed into your own session (Google's sanctioned path).
+
+```bash
+yanger sync                        # attach to Chrome, configure, wait, download, import
+yanger sync --start-chrome         # launch a debuggable Chrome for you first
+yanger sync --wait-minutes 0       # configure the export now, import later
+yanger sync --merge                # merge into existing cache instead of replacing
+```
+
+Defaults: Chrome profile at `~/.yanger/chrome-profile`, downloads at
+`~/.yanger/takeout-downloads` (override with `--profile-dir` / `--download-dir`). If the
+export email/zip is slow, sync can resume on a later run rather than re-submitting.
 
 ### Bulk Edit Mode
 

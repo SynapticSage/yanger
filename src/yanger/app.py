@@ -64,7 +64,9 @@ class YouTubeRangerApp(App):
         # binding would fire undo before the follow-up key, making uv/uV unreachable.
         Binding("U", "redo", "Redo"),
         Binding("ctrl+r", "refresh", "Refresh"),
-        Binding("ctrl+shift+r", "refresh_all", "Refresh All"),
+        # refresh_all is reached via 'gR' in on_key, NOT a Binding: terminals can't
+        # deliver the Ctrl+Shift+R chord, so advertising it in the footer/palette was
+        # misleading (Tier 0.7).
         Binding("ctrl+q", "force_quit", "Force Quit", show=False),
     ]
     
@@ -158,8 +160,27 @@ class YouTubeRangerApp(App):
         self.help_overlay = HelpOverlay()
         yield self.help_overlay
     
+    @staticmethod
+    def _resolve_colorscheme_theme(colorscheme: str, available_themes) -> Optional[str]:
+        """Map a configured colorscheme to a Textual native theme name (Tier 0.11).
+
+        Returns the theme to apply, or None to keep Textual's built-in default. "default"
+        and unknown names (e.g. a config typo) return None so startup can never crash on
+        an invalid theme. Textual ships nord/gruvbox/dracula/etc., so `colorscheme: nord`
+        just works — closing the previously-dead colorscheme config string.
+        """
+        if colorscheme and colorscheme != "default" and colorscheme in available_themes:
+            return colorscheme
+        return None
+
     async def on_mount(self) -> None:
         """Initialize the application after mounting."""
+        # Apply the configured colorscheme to Textual's native theme system.
+        theme = self._resolve_colorscheme_theme(
+            getattr(self.settings.ui, "colorscheme", "default"), self.available_themes
+        )
+        if theme:
+            self.theme = theme
         try:
             # Best-effort: ensure our CSS is loaded even when running from a
             # different working directory (e.g. editable installs, tests)
@@ -1225,9 +1246,9 @@ class YouTubeRangerApp(App):
         elif event.key == 'g' and not getattr(self, '_pending_g', False):
             self._pending_g = True
             if self.status_bar:
-                self.status_bar.update_status("Press 'n':new 'd':delete 't':transcript 'T':auto-fetch 'e':export 'g':top", "")
+                self.status_bar.update_status("Press 'n':new 'd':delete 't':transcript 'T':auto-fetch 'e':export 'R':refresh-all 'g':top", "")
             event.stop()
-        # Check for 'gn' or 'gd' or 'gt' or 'gT' or 'ge' commands
+        # Check for 'gn' or 'gd' or 'gt' or 'gT' or 'ge' or 'gR' commands
         elif hasattr(self, '_pending_g') and self._pending_g:
             if event.key == 'n':
                 self.action_new_playlist()
@@ -1239,6 +1260,10 @@ class YouTubeRangerApp(App):
                 await self.toggle_auto_fetch_transcript()
             elif event.key == 'e':
                 await self.export_transcript()
+            elif event.key == 'R':
+                # Reachable refresh-all: terminals can't deliver the Ctrl+Shift+R
+                # chord, so this g-prefix alias is the supported path (Tier 0.7).
+                await self.action_refresh_all()
             elif event.key == 'g':
                 # Double 'g' - pass to miller view for go to top
                 if self.miller_view:
