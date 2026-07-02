@@ -37,11 +37,43 @@ def default_cache_dir() -> Path:
     return Path.home() / ".cache" / "yanger"
 
 
+# --- Schema migrations -------------------------------------------------------------
+# Ordered, idempotent steps applied via PRAGMA user_version. The Nth entry migrates the db
+# TO user_version N. Each must be safe to re-run (guarded), so a legacy db (created before
+# this framework, user_version 0) or a partially-migrated db converges correctly. This
+# replaces the old no-op schema_version bump (which advanced the number WITHOUT running any
+# migration) and the ad-hoc ALTERs that lived in a hot write path.
+
+def _migration_1_virtual_video_metadata(conn) -> None:
+    """v1: virtual_videos gains description / thumbnail_url / duration / metadata_fetched_at.
+
+    Previously bolted on by an ALTER inside update_virtual_video_metadata (run on every
+    write). Guarded add-if-absent, so it's a no-op on dbs that already have the columns.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(virtual_videos)").fetchall()}
+    for name, decl in (
+        ("description", "TEXT"),
+        ("thumbnail_url", "TEXT"),
+        ("duration", "TEXT"),
+        ("metadata_fetched_at", "TIMESTAMP"),
+    ):
+        if name not in existing:
+            conn.execute(f"ALTER TABLE virtual_videos ADD COLUMN {name} {decl}")
+
+
+# Append new migrations here; never reorder or delete existing entries (user_version is a
+# durable index into this tuple).
+_MIGRATIONS = (
+    _migration_1_virtual_video_metadata,
+)
+
+
 class PersistentCache:
     """SQLite-based persistent cache for playlists and videos."""
 
-    SCHEMA_VERSION = 1
-    
+    # Latest schema version = number of migrations. Stored per-db in PRAGMA user_version.
+    SCHEMA_VERSION = len(_MIGRATIONS)
+
     def __init__(self, cache_dir: Optional[Path] = None, 
                  ttl_days: int = 7,
                  auto_cleanup: bool = True):
@@ -192,24 +224,33 @@ class PersistentCache:
             # Create index for transcript lookups
             conn.execute("CREATE INDEX IF NOT EXISTS idx_transcripts_video ON video_transcripts(video_id)")
 
-            # Check and update schema version
-            cursor = conn.execute("SELECT value FROM cache_metadata WHERE key = 'schema_version'")
-            row = cursor.fetchone()
-            
-            if row is None:
-                conn.execute(
-                    "INSERT INTO cache_metadata (key, value) VALUES ('schema_version', ?)",
-                    (str(self.SCHEMA_VERSION),)
-                )
-            elif int(row[0]) < self.SCHEMA_VERSION:
-                # Handle schema migrations here in the future
-                logger.info(f"Migrating cache schema from version {row[0]} to {self.SCHEMA_VERSION}")
-                conn.execute(
-                    "UPDATE cache_metadata SET value = ? WHERE key = 'schema_version'",
-                    (str(self.SCHEMA_VERSION),)
-                )
-            
+            # Apply versioned migrations (PRAGMA user_version), replacing the former no-op
+            # schema_version bump.
+            self._run_migrations(conn)
+
             conn.commit()
+
+    def _run_migrations(self, conn) -> None:
+        """Bring the db up to SCHEMA_VERSION via ordered steps keyed on PRAGMA user_version.
+
+        Each migration runs once; user_version is bumped only AFTER the step succeeds, so a
+        crash mid-step leaves user_version un-advanced and the step re-runs next construction.
+        A legacy db is at user_version 0 and gets every step.
+
+        IMPORTANT: steps are NOT rolled back as a unit — Python's sqlite3 auto-commits before
+        DDL/PRAGMA, so there is no enclosing transaction around the ALTERs. Every migration
+        must therefore be individually IDEMPOTENT (e.g. guarded add-if-absent), so a partial
+        or repeated run converges rather than erroring.
+        """
+        current = conn.execute("PRAGMA user_version").fetchone()[0]
+        if current >= self.SCHEMA_VERSION:
+            return
+        for version, migrate in enumerate(_MIGRATIONS, start=1):
+            if version > current:
+                logger.info(f"Applying cache migration -> v{version}")
+                migrate(conn)
+                # PRAGMA can't be parameterized; `version` is a controlled int from enumerate.
+                conn.execute(f"PRAGMA user_version = {version}")
     
     def get_playlists(self) -> Optional[List[Playlist]]:
         """Get all cached playlists.
@@ -795,21 +836,8 @@ class PersistentCache:
             True if updated
         """
         with self._connect() as conn:
-            # First check if we need to add columns for new metadata
-            cursor = conn.execute("PRAGMA table_info(virtual_videos)")
-            columns = [col[1] for col in cursor.fetchall()]
-            
-            # Add metadata columns if they don't exist
-            if 'description' not in columns:
-                conn.execute("ALTER TABLE virtual_videos ADD COLUMN description TEXT")
-            if 'thumbnail_url' not in columns:
-                conn.execute("ALTER TABLE virtual_videos ADD COLUMN thumbnail_url TEXT")
-            if 'duration' not in columns:
-                conn.execute("ALTER TABLE virtual_videos ADD COLUMN duration TEXT")
-            if 'metadata_fetched_at' not in columns:
-                conn.execute("ALTER TABLE virtual_videos ADD COLUMN metadata_fetched_at TIMESTAMP")
-            
-            # Update the video metadata
+            # The metadata columns are guaranteed by migration v1 (run at init), so the
+            # former per-write PRAGMA table_info + ALTER dance is gone.
             result = conn.execute("""
                 UPDATE virtual_videos
                 SET title = ?,

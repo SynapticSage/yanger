@@ -34,6 +34,8 @@ the headline custom-command registry — cheaper and safer to build.
 Completed items land here (newest first) with the commit that shipped them. Full
 per-run detail lives in the gitignored `journal/`.
 
+- **Tier 1 · #5 — versioned cache migrations.** `PRAGMA user_version` + ordered idempotent
+  `_MIGRATIONS` replace the no-op schema bump and the ad-hoc per-write `ALTER TABLE`. +4 tests.
 - **Tier 1 · #1 — transcript fetch+cache unified.** 4 write paths → one injected-cache
   `fetch_and_cache_transcript` service; read gate → one `should_refetch`. Kills the duplication
   class behind §0; mcp `get_transcript` now caches `NOT_AVAILABLE` + recovers legacy poisoned rows.
@@ -223,9 +225,12 @@ minimal and safe; everything else is an explicit later slice:
    reported as "remaining today" (`api_client.py:54`, `mcp_server.py:1079`); TUI and MCP
    don't share it. Persist in SQLite keyed to the YouTube Pacific-midnight reset window.
    *Impact Med · Effort S-M · dep: cache (#0.5).*
-5. **Versioned migration framework.** Replace the no-op `SCHEMA_VERSION` branch
-   (`cache.py:179`) + ad-hoc `ALTER TABLE`s with `PRAGMA user_version` + ordered,
-   transactional steps. *Impact Med · Effort S-M.*
+5. ✅ **DONE — Versioned migration framework.** Replaced the no-op `SCHEMA_VERSION` branch
+   (advanced the number without running anything) + the ad-hoc `ALTER TABLE`s (which lived in
+   the hot `update_virtual_video_metadata` write path) with `PRAGMA user_version` + an ordered
+   `_MIGRATIONS` tuple applied once at init. Steps are individually idempotent (guarded
+   add-if-absent) since Python's sqlite3 auto-commits DDL — documented that they're NOT rolled
+   back as a unit. Legacy dbs (user_version 0) converge correctly. +4 tests. *Was Med · S-M.*
 
 ---
 
