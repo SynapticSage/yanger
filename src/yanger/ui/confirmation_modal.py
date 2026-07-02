@@ -163,11 +163,18 @@ class ConfirmationModal(ModalScreen):
         navigation behind the dialog (e.g. 'q' would quit mid-confirmation).
         Note: the app's priority 'quit' binding is additionally suppressed via
         App.check_action while a modal is on the screen stack.
+
+        Reserved keys: 'y' (confirm), 'n' / 'escape' (cancel). Enter is intentionally
+        NOT a confirm key so an accidental Enter can't confirm a destructive action.
         """
         if event.key == "escape":
             self.dismiss(False)
-        elif event.key == "y" and self.dangerous:
-            # Allow 'y' for yes on dangerous operations
+        elif event.key == "y":
+            # 'y' confirms for ANY confirmation. Previously gated on `dangerous`, which
+            # made a dangerous=False modal keyboard-inoperable: on_key stops every key, so
+            # Tab/Enter never reach the buttons — the user could only cancel or mouse-click.
+            # (We deliberately do NOT map Enter to confirm: that would let an accidental
+            # Enter confirm a destructive delete.)
             self.dismiss(True)
         elif event.key == "n":
             # Allow 'n' for no

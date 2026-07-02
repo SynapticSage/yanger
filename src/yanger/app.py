@@ -36,6 +36,7 @@ from .core.transcript_command import (
     resolve_transcript_command,
     run_transcript_command,
 )
+from .core.custom_command import load_command_registry, run_command
 from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation, BulkEditOperation
 from .command_logger import CommandLogger
 from .export import PlaylistExporter
@@ -43,6 +44,10 @@ from .bulkedit import BulkEditor
 
 
 logger = logging.getLogger(__name__)
+
+# `:run` prompts for confirmation before executing a custom command on more than this many
+# videos (running user shell against a big selection deserves a look-before-you-leap).
+RUN_CONFIRM_THRESHOLD = 5
 
 
 class YouTubeRangerApp(App):
@@ -2153,6 +2158,10 @@ class YouTubeRangerApp(App):
             # Run the user-configured external transcript command on current video
             self.call_later(self.run_transcript_for_current_video)
 
+        elif cmd_name == "run":
+            # Run a named custom command on the current/marked videos (headline registry).
+            self.call_later(self.handle_run_command, args)
+
         elif cmd_name == "set":
             # Update a setting at runtime (and persist it to the user config)
             self.handle_set_command(args)
@@ -2205,6 +2214,99 @@ class YouTubeRangerApp(App):
             self._notify_status("Transcript command finished")
         else:
             self._notify_status(f"Transcript command exited with code {exit_code}", error=True)
+
+    def _marked_or_current_videos(self) -> List[Video]:
+        """Videos a selection-aware command acts on: marked if any, else the current one.
+
+        Mirrors the dd/yy/delete marked-else-current convention via the video column.
+        """
+        if not self.miller_view or not self.miller_view.video_column:
+            return []
+        vc = self.miller_view.video_column
+        marked = vc.get_marked_videos()
+        if marked:
+            return list(marked)
+        if 0 <= vc.selected_index < len(vc.videos):
+            return [vc.videos[vc.selected_index]]
+        return []
+
+    async def handle_run_command(self, args: List[str]) -> None:
+        """`:run <name>` — run a configured custom command on the current/marked videos.
+
+        Resolves the registry (YAML ``commands:`` + ``YANGER_CMD_*``), operates on the marked
+        selection if any else the current video, and confirms before running on a large
+        selection. `:run` with no/unknown name surfaces the available command names.
+        """
+        registry = load_command_registry(self.settings)
+        if not registry:
+            self._notify_status(
+                "No custom commands configured. Add a 'commands:' map to config.yaml "
+                "or set YANGER_CMD_<NAME>.",
+                error=True,
+            )
+            return
+
+        available = ", ".join(sorted(registry))
+        if not args:
+            self._notify_status(f"Usage: :run <name>   (available: {available})", error=True)
+            return
+
+        name = args[0].strip().lower()
+        spec = registry.get(name)
+        if spec is None:
+            self._notify_status(f"Unknown command '{name}'. Available: {available}", error=True)
+            return
+
+        videos = self._marked_or_current_videos()
+        if not videos:
+            self._notify_status("No video selected", error=True)
+            return
+
+        if len(videos) > RUN_CONFIRM_THRESHOLD:
+            # Large selection: confirm before running the user's shell on all of them.
+            self._pending_run_spec = spec
+            self._pending_run_videos = videos
+            modal = ConfirmationModal(
+                title="Confirm Run",
+                message=f"Run '{name}' on {len(videos)} videos?",
+                details=f"Command: {spec.template}",
+                confirm_text="Run",
+                cancel_text="Cancel",
+                action="run_custom_command",
+                dangerous=False,
+            )
+            await self.push_screen(modal)
+        else:
+            await self.run_custom_command(spec, videos)
+
+    async def run_custom_command(self, spec, videos: List[Video]) -> None:
+        """Run ``spec`` on each video inside a single suspend() block; report failures.
+
+        Per-video (v1): one command per video, run sequentially so interactive/streaming
+        tools render in the terminal. suspend() wraps the WHOLE loop (not each video) to
+        avoid N screen flickers. Injected {url}/{id} are shlex-quoted by build_command.
+        """
+        cmds = [build_command(spec.template, v) for v in videos]
+        exit_codes: List[int] = []
+        try:
+            with self.suspend():
+                for cmd in cmds:
+                    exit_codes.append(await asyncio.to_thread(run_command, cmd))
+        except Exception as e:
+            logger.error(f"Custom command '{spec.name}' failed: {e}")
+            self._notify_status(f"Command '{spec.name}' error: {e}", error=True)
+            return
+        finally:
+            # Redraw the TUI after the external program(s) return.
+            self.refresh()
+
+        failures = [rc for rc in exit_codes if rc != 0]
+        if not failures:
+            self._notify_status(f"'{spec.name}' finished on {len(videos)} video(s)")
+        else:
+            self._notify_status(
+                f"'{spec.name}': {len(failures)} of {len(videos)} exited non-zero", error=True
+            )
 
     def handle_set_command(self, args: List[str]) -> None:
         """Handle `:set <key> <value>` - update in-memory settings and persist.
@@ -2454,6 +2556,14 @@ class YouTubeRangerApp(App):
         elif message.action == "delete_playlist":
             # Execute playlist deletion
             self.call_later(self.execute_delete_playlist)
+        elif message.action == "run_custom_command":
+            # Execute the custom command confirmed for a large selection.
+            spec = getattr(self, "_pending_run_spec", None)
+            videos = getattr(self, "_pending_run_videos", None)
+            if spec is not None and videos:
+                self.call_later(self.run_custom_command, spec, videos)
+            self._pending_run_spec = None
+            self._pending_run_videos = None
     
     async def execute_delete_videos(self, videos: List[Video]) -> None:
         """Execute the actual video deletion."""

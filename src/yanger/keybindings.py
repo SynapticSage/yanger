@@ -201,6 +201,16 @@ class KeybindingRegistry:
         )
 
         self.register_command(
+            "run",
+            "Run a configured custom command on the current/marked videos",
+            ":run <name>",
+            [
+                ":run dl",
+                ":run sum",
+            ]
+        )
+
+        self.register_command(
             "bulkedit",
             "Bulk edit playlists and videos in text editor",
             ":bulkedit [--dry-run]",

@@ -34,6 +34,12 @@ the headline custom-command registry — cheaper and safer to build.
 Completed items land here (newest first) with the commit that shipped them. Full
 per-run detail lives in the gitignored `journal/`.
 
+- **★ Headline v1 — custom-command registry + `:run`.** YAML `commands: {name: template}` +
+  `YANGER_CMD_<NAME>` env → `:run <name>` on marked-else-current, per-video, with a
+  confirm gate over 5 videos. Core builder/runner shared with `:transcript` (delegation, no
+  copy). Fixed a critical caught in review: `ConfirmationModal` was keyboard-inoperable when
+  `dangerous=False` (`y` now confirms any modal). +31 tests (core 13, `:run` 13, modal 5).
+  Deferred to slice 1b/2: long-form dict, batch, `{title}`, `:set` persistence, MCP tool.
 - **Tier 0 · 0.1/0.2/0.7/0.8/0.11 — docs + UX + dead-code.** README `sync`/`proxy` sections;
   `.env.example` proxy vars; `gR` refresh-all alias (dropped the undeliverable Ctrl+Shift+R
   binding); deleted dead `BulkEditExecutor` (coverage repointed to `BulkEditOperation`);
