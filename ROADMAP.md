@@ -23,6 +23,10 @@ the headline custom-command registry — cheaper and safer to build.
 Completed items land here (newest first) with the commit that shipped them. Full
 per-run detail lives in the gitignored `journal/`.
 
+- **Tier 0 · 0.3/0.5/0.6/0.10 — CLI/cache hardening.** `reset` now targets the real paths
+  (`~/.cache/yanger`, `~/.config/yanger/config.yaml`, resolved token) with confirm guards + `--yes`;
+  cache `_connect` enables WAL + `busy_timeout=5000`; `--verbose` wired into `ctx.obj`; transcript-api
+  pin → `>=1.2`. +7 tests. Introduced shared `cache.default_cache_dir()`.
 - **§0 — transient-transcript cache poisoning fixed.** Hoisted `TERMINAL_TRANSCRIPT_STATUSES`
   to `core/transcript_fetcher.py`; TUI auto-fetch now caches only terminal statuses. +5 regression
   tests. _(commit recorded in journal)_
@@ -126,14 +130,14 @@ skill + chaining + prompts = Med / strategic.
 |---|---|---|---|
 | 0.1 | README: document `sync` + `proxy` | Marquee CLI features undocumented | `cli.py:544,954` |
 | 0.2 | `.env.example`: add proxy vars | `proxy status` advertises them | `cli.py:991` |
-| 0.3 | `yanger reset`: fix wrong paths + add confirm | Silently no-ops on real cache/config; unguarded destructive | `cli.py:166,182,193` |
+| ✅ 0.3 | `yanger reset`: fix wrong paths + add confirm | Silently no-ops on real cache/config; unguarded destructive | `cli.py:166,182,193` |
 | 0.4 | `None`-title/description crash fixes | Crashes duplicates/statistics/`export --csv` on pre-metadata videos | duplicates/statistics/export |
-| 0.5 | `journal_mode=WAL` + `busy_timeout` in `_connect()` | MCP off-loop writes made `database is locked` reachable | `cache.py:66-75` |
-| 0.6 | `-v/--verbose` → `ctx.obj` | Group sets it but `run` never sees it (dead flag) | `cli.py:50,102` |
+| ✅ 0.5 | `journal_mode=WAL` + `busy_timeout` in `_connect()` | MCP off-loop writes made `database is locked` reachable | `cache.py:66-75` |
+| ✅ 0.6 | `-v/--verbose` → `ctx.obj` | Group sets it but `run` never sees it (dead flag) | `cli.py:50,102` |
 | 0.7 | `Ctrl+Shift+R` → reachable key (e.g. `gR`) | Terminals can't deliver the chord; binding is dead | `keybindings.py`/README |
 | 0.8 | Delete dead `BulkEditExecutor` + repoint its test | False-confidence duplicate apply path | `bulkedit.py:323,434` |
 | 0.9 | `fetch-metadata` / `proxy test` non-zero exit on error | Exit 0 breaks scripting/CI | `cli.py` |
-| 0.10 | Bump `youtube-transcript-api` pin `>=1.2` | Pin (`>=0.6.2`) lags shipped 1.x code | `pyproject.toml` |
+| ✅ 0.10 | Bump `youtube-transcript-api` pin `>=1.2` | Pin (`>=0.6.2`) lags shipped 1.x code | `pyproject.toml` |
 | 0.11 | Wire `colorscheme` → Textual native themes (bump Textual 6.5→8.x) | Closes dead `colorscheme` string; free `ctrl+p` "Change theme" | `config/settings.py:20`, `app.py:51` |
 | 0.12 | Status-bar contextual hint line | Discoverability (the CLAUDE.md mock shows it) | `ui/status_bar.py` |
 
@@ -203,7 +207,11 @@ skill + chaining + prompts = Med / strategic.
   account. *Med · M.*
 - **Centralize path resolution.** Four roots in use (`~/.config/yanger`, `~/.cache/yanger`,
   `~/.yanger`, a `.cache/yanger` config default). One XDG-style module (config/cache/state)
-  consumed by everything incl. `reset`. *Low-Med · S.*
+  consumed by everything incl. `reset`. *Low-Med · S.* **Note (0.3 review):** `settings.cache.directory`
+  (default `.cache/yanger`, overridable via `YANGER_CACHE_DIR`/`config.yaml`) is **dead config** —
+  assigned but never passed into any `PersistentCache(...)`, which is why 0.3's `default_cache_dir()`
+  is correct today. Centralization must reconcile this: either wire the setting through (and have
+  `reset` consume the same resolver) or delete it. Until then it's a latent divergence trap.
 - **Guard deprecated favorites-playlist modification** — ensure no mutation path targets a
   "favorites" virtual playlist (YouTube API deprecation). *Low · S.*
 - **User-editable keybindings (YAML loader)** — the registry is hardcoded; add a

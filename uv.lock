@@ -1594,7 +1594,7 @@ requires-dist = [
     { name = "textual", specifier = ">=0.47.0" },
     { name = "types-python-dateutil", marker = "extra == 'dev'" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },
-    { name = "youtube-transcript-api", specifier = ">=0.6.2" },
+    { name = "youtube-transcript-api", specifier = ">=1.2" },
 ]
 provides-extras = ["dev", "mcp"]
 

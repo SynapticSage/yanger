@@ -27,9 +27,19 @@ class CacheEntry:
     hits: int = 0
 
 
+def default_cache_dir() -> Path:
+    """Canonical cache directory, resolved at call time (honors $HOME / tests).
+
+    Single source of truth shared by ``PersistentCache`` and ``yanger reset`` so the
+    reset command can never target a stale path (it previously removed a nonexistent
+    ``./.yanger_cache`` and silently no-op'd).
+    """
+    return Path.home() / ".cache" / "yanger"
+
+
 class PersistentCache:
     """SQLite-based persistent cache for playlists and videos."""
-    
+
     SCHEMA_VERSION = 1
     
     def __init__(self, cache_dir: Optional[Path] = None, 
@@ -47,7 +57,7 @@ class PersistentCache:
         
         # Setup cache directory
         if cache_dir is None:
-            cache_dir = Path.home() / ".cache" / "yanger"
+            cache_dir = default_cache_dir()
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
@@ -72,6 +82,13 @@ class PersistentCache:
         """
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA foreign_keys = ON")
+        # WAL lets a reader and a writer coexist; busy_timeout makes a blocked
+        # connection wait+retry instead of raising immediately. Both matter now that
+        # MCP off-loads writes to a thread while the TUI reads — otherwise concurrent
+        # access surfaces "database is locked". journal_mode persists in the db file;
+        # busy_timeout is per-connection so it is set on every connect.
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA journal_mode = WAL")
         return conn
 
     def db_connection(self):

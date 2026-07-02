@@ -21,7 +21,7 @@ from rich.logging import RichHandler
 from . import __version__
 from .auth import YouTubeAuth, resolve_token_file, config_dir
 from .api_client import YouTubeAPIClient
-from .cache import PersistentCache
+from .cache import PersistentCache, default_cache_dir
 from .takeout import TakeoutParser
 from .export import PlaylistExporter
 
@@ -58,10 +58,13 @@ def cli(ctx: click.Context, version: bool, verbose: bool, config_dir: Optional[s
     
     # Setup logging
     setup_logging(verbose)
-    
-    # Set config directory
+
+    # Persist top-level flags so subcommands can read them (ctx.obj was only created
+    # when --config-dir was passed, so `run`'s `ctx.obj.get('verbose')` was always
+    # falsy — a dead flag). Always ensure the object and store verbose.
+    ctx.ensure_object(dict)
+    ctx.obj['verbose'] = verbose
     if config_dir:
-        ctx.ensure_object(dict)
         ctx.obj['config_dir'] = Path(config_dir)
     
     # If no subcommand, run the main TUI
@@ -163,39 +166,50 @@ def auth(client_secrets: str, token_file: str):
 @click.option('--reset-token', is_flag=True, help='Remove stored authentication')
 @click.option('--reset-cache', is_flag=True, help='Clear offline cache')
 @click.option('--reset-config', is_flag=True, help='Reset to default configuration')
-def reset(reset_token: bool, reset_cache: bool, reset_config: bool):
-    """Reset various application data."""
+@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompts (for scripting)')
+def reset(reset_token: bool, reset_cache: bool, reset_config: bool, yes: bool):
+    """Reset various application data.
+
+    Targets the REAL paths yanger uses: the token via the shared resolver, the cache
+    at ~/.cache/yanger, and the user config at ~/.config/yanger/config.yaml. Each
+    destructive action prompts for confirmation unless --yes is given.
+    """
     if not any([reset_token, reset_cache, reset_config]):
         console.print("Nothing to reset. Use --help to see options.")
         return
-    
+
     if reset_token:
         # Use the shared resolver so we remove the token that auth/mcp actually use.
         token_file = resolve_token_file()
         if token_file.exists():
-            token_file.unlink()
-            console.print(f"[green]✓[/green] Removed authentication token ({token_file})")
+            if yes or click.confirm(f"Remove authentication token ({token_file})?"):
+                token_file.unlink()
+                console.print(f"[green]✓[/green] Removed authentication token ({token_file})")
         else:
             console.print(f"No token file found ({token_file})")
-    
+
     if reset_cache:
-        cache_dir = Path('.yanger_cache')
+        # default_cache_dir() is the same resolver PersistentCache uses, so this can
+        # never target a stale path (previously removed a nonexistent ./.yanger_cache).
+        cache_dir = default_cache_dir()
         if cache_dir.exists():
-            import shutil
-            shutil.rmtree(cache_dir)
-            console.print("[green]✓[/green] Cleared cache directory")
+            if yes or click.confirm(f"Delete offline cache ({cache_dir})? This cannot be undone."):
+                import shutil
+                shutil.rmtree(cache_dir)
+                console.print(f"[green]✓[/green] Cleared cache directory ({cache_dir})")
         else:
-            console.print("No cache directory found")
-    
+            console.print(f"No cache directory found ({cache_dir})")
+
     if reset_config:
-        config_files = [
-            Path('config/user_config.yaml'),
-            Path('config/keybindings_user.yaml')
-        ]
-        for config_file in config_files:
-            if config_file.exists():
+        # The real user config is ~/.config/yanger/config.yaml (settings.py), not the
+        # repo-relative config/*.yaml the old code targeted.
+        config_file = config_dir() / "config.yaml"
+        if config_file.exists():
+            if yes or click.confirm(f"Remove user config ({config_file})?"):
                 config_file.unlink()
                 console.print(f"[green]✓[/green] Removed {config_file}")
+        else:
+            console.print(f"No user config found ({config_file})")
 
 
 @cli.command()
