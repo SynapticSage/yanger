@@ -57,10 +57,10 @@ async def test_not_available_is_cached(monkeypatch):
     await YouTubeRangerApp._auto_fetch_transcript(_fake_app(cache), video)
 
     cache.cache_transcript.assert_called_once()
-    # video_id positional first, status positional last
-    args = cache.cache_transcript.call_args.args
-    assert args[0] == "vid123"
-    assert args[-1] == "NOT_AVAILABLE"
+    # fetch_and_cache_transcript caches via keyword args.
+    kwargs = cache.cache_transcript.call_args.kwargs
+    assert kwargs["video_id"] == "vid123"
+    assert kwargs["fetch_status"] == "NOT_AVAILABLE"
 
 
 async def test_success_is_cached(monkeypatch, sample_transcript_data):
@@ -72,4 +72,4 @@ async def test_success_is_cached(monkeypatch, sample_transcript_data):
     await YouTubeRangerApp._auto_fetch_transcript(_fake_app(cache), video)
 
     cache.cache_transcript.assert_called_once()
-    assert cache.cache_transcript.call_args.args[-1] == "SUCCESS"
+    assert cache.cache_transcript.call_args.kwargs["fetch_status"] == "SUCCESS"

@@ -34,6 +34,10 @@ the headline custom-command registry — cheaper and safer to build.
 Completed items land here (newest first) with the commit that shipped them. Full
 per-run detail lives in the gitignored `journal/`.
 
+- **Tier 1 · #1 — transcript fetch+cache unified.** 4 write paths → one injected-cache
+  `fetch_and_cache_transcript` service; read gate → one `should_refetch`. Kills the duplication
+  class behind §0; mcp `get_transcript` now caches `NOT_AVAILABLE` + recovers legacy poisoned rows.
+  Net −118/+151 (the +151 is mostly tests). +15 tests, suite 238 green. Dual-reviewed PASS.
 - **★ Headline v1 — custom-command registry + `:run`.** YAML `commands: {name: template}` +
   `YANGER_CMD_<NAME>` env → `:run <name>` on marked-else-current, per-video, with a
   confirm gate over 5 videos. Core builder/runner shared with `:transcript` (delegation, no
@@ -194,17 +198,17 @@ minimal and safe; everything else is an explicit later slice:
 
 ## Tier 1 — Foundations (do before/with the headline; unlock velocity + safety)
 
-1. **Unify transcript fetch+cache into one core service.** Collapse the 4 hand-copied
-   copies (`app.py:966`, `app.py:1017`, `mcp_server.py:995`, `mcp_server.py:1418`) into a
-   single `fetch_and_cache_transcript(...)` owning the format/compress/cache + terminal-vs-transient
-   policy. §0 already hoisted the **write**-side policy constant `TERMINAL_TRANSCRIPT_STATUSES`
-   into `core/transcript_fetcher.py`; the remaining work is (a) the four fetch+cache bodies and
-   (b) the **read**-side "is-terminal ⇒ don't retry" gate, still triplicated and inconsistent:
-   `app.py:1335` (hardcoded `['SUCCESS','NOT_AVAILABLE']` — won't track the constant if it grows),
-   `mcp_server.py:1004-1012` and `:1443-1447` (treat *any* cached row as terminal). The service
-   should own both sides and fold `app.py:1335` onto the shared constant. **Inject the cache
-   handle** into the service (don't import `PersistentCache` into `core` — keeps `core` a leaf,
-   avoids a cache⇄transcript_fetcher cycle). *Impact High · Effort M · no dep.*
+1. ✅ **DONE — Unify transcript fetch+cache into one core service.** All 4 hand-copied write
+   bodies (app auto/manual, mcp get/batch) now delegate to
+   `core/transcript_fetcher.fetch_and_cache_transcript(fetcher, cache, video_id)` — the single
+   owner of format/compress/cache + the terminal-vs-transient policy (cache **injected**, so
+   `core` stays a leaf, no cycle). The **read**-side "should I refetch?" gate is single-sourced
+   too via `should_refetch(status)` (tracks `TERMINAL_TRANSCRIPT_STATUSES`), folded into all 3
+   refetch sites (TUI auto-fetch + mcp `get_transcript` cache-first + mcp `batch skip_cached`) —
+   MCP now also recovers legacy poisoned transient rows. Bonus: mcp `get_transcript` now caches
+   `NOT_AVAILABLE` (previously refetched forever). The `!= "SUCCESS"` **serve**-checks (mcp:1011,
+   mcp search, app export, miller_view) are a *different* question ("do I have a servable body?")
+   and are intentionally left alone. +15 tests (`test_transcript_service.py`). *Was Impact High · M.*
 2. **Faithful API-client/cache test harness + cover untested paths.** One shared test
    double for `YouTubeAPIClient` with real method signatures (ban per-method
    `MagicMock(name=...)`); integration tests driving `execute_command`/operations against

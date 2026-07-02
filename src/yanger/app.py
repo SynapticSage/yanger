@@ -992,33 +992,16 @@ class YouTubeRangerApp(App):
     async def _auto_fetch_transcript(self, video: Video) -> None:
         """Auto-fetch transcript in background (silent, no notifications)."""
         try:
-            from .core.transcript_fetcher import TranscriptFetcher, TERMINAL_TRANSCRIPT_STATUSES
+            from .core.transcript_fetcher import TranscriptFetcher, fetch_and_cache_transcript
             fetcher = TranscriptFetcher(preferred_languages=self.settings.transcripts.languages)
 
-            # Run in thread since it's I/O bound
+            # Fetch + apply the shared cache-write policy in one thread hop (I/O bound).
+            # The service owns the format/compress/cache + terminal-vs-transient rule.
             transcript_data, status = await asyncio.to_thread(
-                fetcher.fetch_transcript,
-                video.id
+                fetch_and_cache_transcript, fetcher, self._cache, video.id
             )
 
             if status == 'SUCCESS' and transcript_data:
-                # Compress transcript text
-                compressed_text = TranscriptFetcher.compress_transcript(
-                    TranscriptFetcher.format_as_text(transcript_data)
-                )
-                # Convert to JSON for storage
-                transcript_json = TranscriptFetcher.format_as_json(transcript_data)
-
-                # Cache the transcript
-                self._cache.cache_transcript(
-                    video.id,
-                    compressed_text,
-                    transcript_json,
-                    transcript_data.language,
-                    transcript_data.auto_generated,
-                    status
-                )
-
                 # Refresh preview pane if this is still the current video
                 if self.current_video and self.current_video.id == video.id:
                     if self.status_bar:
@@ -1026,20 +1009,6 @@ class YouTubeRangerApp(App):
                         self.status_bar.update_status(f"Transcript loaded ({lang_str})", "")
                     if self.miller_view and self.miller_view.preview_pane:
                         await self.miller_view.preview_pane.show_video(video)
-            elif status in TERMINAL_TRANSCRIPT_STATUSES:
-                # Cache ONLY permanent failures (NOT_AVAILABLE) to avoid refetching.
-                # Transient failures (IP_BLOCKED / ERROR) are deliberately left uncached
-                # so a later run — e.g. after the user configures a proxy — can retry.
-                # (Previously this else-branch cached EVERY status, permanently poisoning
-                # the cache: the §0 bug, matching the MCP path's terminal-status policy.)
-                self._cache.cache_transcript(
-                    video.id,
-                    None,
-                    None,
-                    None,
-                    False,
-                    status
-                )
         except Exception as e:
             # Silent failure for auto-fetch - log but don't notify
             logger.warning(f"Auto-fetch transcript failed for {video.id}: {e}")
@@ -1053,34 +1022,16 @@ class YouTubeRangerApp(App):
         # Show feedback that fetch is starting
         self.notify(f"Fetching transcript for: {self.current_video.title[:50]}...")
 
-        # Use TranscriptFetcher from core
-        from .core.transcript_fetcher import TranscriptFetcher
+        # Use the shared fetch+cache service (owns compress/cache + terminal policy).
+        from .core.transcript_fetcher import TranscriptFetcher, fetch_and_cache_transcript
         fetcher = TranscriptFetcher(preferred_languages=self.settings.transcripts.languages)
 
         # Run in thread since it's I/O bound
         transcript_data, status = await asyncio.to_thread(
-            fetcher.fetch_transcript,
-            self.current_video.id
+            fetch_and_cache_transcript, fetcher, self._cache, self.current_video.id
         )
 
         if status == 'SUCCESS' and transcript_data:
-            # Compress transcript text
-            compressed_text = TranscriptFetcher.compress_transcript(
-                TranscriptFetcher.format_as_text(transcript_data)
-            )
-            # Convert to JSON for storage
-            transcript_json = TranscriptFetcher.format_as_json(transcript_data)
-
-            # Cache the transcript
-            self._cache.cache_transcript(
-                self.current_video.id,
-                compressed_text,
-                transcript_json,
-                transcript_data.language,
-                transcript_data.auto_generated,
-                status
-            )
-
             lang_str = f"{transcript_data.language}" + (" [auto]" if transcript_data.auto_generated else "")
             self.notify(f"Transcript fetched ({lang_str})", timeout=3)
 
@@ -1089,15 +1040,7 @@ class YouTubeRangerApp(App):
                 await self.miller_view.preview_pane.show_video(self.current_video)
 
         elif status == 'NOT_AVAILABLE':
-            # Cache the not-available status to avoid refetching
-            self._cache.cache_transcript(
-                self.current_video.id,
-                None,
-                None,
-                None,
-                False,
-                status
-            )
+            # Already cached by the service; just inform the user.
             self.notify("No transcript available for this video", severity="warning")
         else:
             # Error status - extract error message if present
@@ -1358,11 +1301,11 @@ class YouTubeRangerApp(App):
 
         # Auto-fetch transcript if enabled
         if self.settings.transcripts.enabled and self.settings.transcripts.auto_fetch:
-            # Check if transcript is already cached
-            transcript_status = self._cache.get_transcript_status(video.id)
-
-            # Only fetch if not already cached (SUCCESS) or known unavailable
-            if transcript_status not in ['SUCCESS', 'NOT_AVAILABLE']:
+            from .core.transcript_fetcher import should_refetch
+            # Fetch only if uncached or a transient failure (SUCCESS / NOT_AVAILABLE are
+            # final). should_refetch tracks TERMINAL_TRANSCRIPT_STATUSES, unlike the old
+            # hardcoded ['SUCCESS','NOT_AVAILABLE'] gate.
+            if should_refetch(self._cache.get_transcript_status(video.id)):
                 # Fetch in background without blocking UI
                 asyncio.create_task(self._auto_fetch_transcript(video))
     
