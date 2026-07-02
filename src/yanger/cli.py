@@ -815,7 +815,7 @@ def fetch_metadata(playlist, batch_size, limit, since, days_ago, dry_run, verbos
     # Validate date options
     if since and days_ago:
         console.print("[red]Error: Cannot use both --since and --days-ago options[/red]")
-        return
+        sys.exit(1)
     
     # Parse date filters
     since_date = None
@@ -824,7 +824,7 @@ def fetch_metadata(playlist, batch_size, limit, since, days_ago, dry_run, verbos
             since_date = datetime.strptime(since, "%Y-%m-%d")
         except ValueError:
             console.print(f"[red]Invalid date format: {since}. Use YYYY-MM-DD[/red]")
-            return
+            sys.exit(1)
     elif days_ago:
         since_date = datetime.now() - timedelta(days=days_ago)
     
@@ -852,7 +852,7 @@ def fetch_metadata(playlist, batch_size, limit, since, days_ago, dry_run, verbos
                 console.print("\nAvailable virtual playlists:")
                 for vp in virtual_playlists:
                     console.print(f"  - {vp['title']} ({vp['video_count']} videos)")
-                return
+                sys.exit(1)
         
         # Get videos without metadata, with date filtering
         video_ids = cache.get_virtual_videos_without_metadata(
@@ -1047,6 +1047,9 @@ def proxy_test(video_id: str):
         if "blocking" in str(result.get("error", "")).lower():
             console.print("\n[yellow]YouTube is blocking requests.[/yellow]")
             console.print("Try configuring a proxy with: yanger proxy set --help")
+
+        # Non-zero exit so scripts/CI can detect a failed proxy test (was exit 0).
+        sys.exit(1)
 
 
 @proxy.command(name='set')

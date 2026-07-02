@@ -23,6 +23,9 @@ the headline custom-command registry — cheaper and safer to build.
 Completed items land here (newest first) with the commit that shipped them. Full
 per-run detail lives in the gitignored `journal/`.
 
+- **Tier 0 · 0.4/0.9 — None-title crash fixes + non-zero exit codes.** `Video.__post_init__`
+  coerces None title/channel/description → "" (fixes duplicates/statistics/export + two MCP paths);
+  `proxy test` and `fetch-metadata` now `sys.exit(1)` on error. +9 tests.
 - **Tier 0 · 0.3/0.5/0.6/0.10 — CLI/cache hardening.** `reset` now targets the real paths
   (`~/.cache/yanger`, `~/.config/yanger/config.yaml`, resolved token) with confirm guards + `--yes`;
   cache `_connect` enables WAL + `busy_timeout=5000`; `--verbose` wired into `ctx.obj`; transcript-api
@@ -131,12 +134,12 @@ skill + chaining + prompts = Med / strategic.
 | 0.1 | README: document `sync` + `proxy` | Marquee CLI features undocumented | `cli.py:544,954` |
 | 0.2 | `.env.example`: add proxy vars | `proxy status` advertises them | `cli.py:991` |
 | ✅ 0.3 | `yanger reset`: fix wrong paths + add confirm | Silently no-ops on real cache/config; unguarded destructive | `cli.py:166,182,193` |
-| 0.4 | `None`-title/description crash fixes | Crashes duplicates/statistics/`export --csv` on pre-metadata videos | duplicates/statistics/export |
+| ✅ 0.4 | `None`-title/description crash fixes | Crashes duplicates/statistics/`export --csv` on pre-metadata videos | duplicates/statistics/export |
 | ✅ 0.5 | `journal_mode=WAL` + `busy_timeout` in `_connect()` | MCP off-loop writes made `database is locked` reachable | `cache.py:66-75` |
 | ✅ 0.6 | `-v/--verbose` → `ctx.obj` | Group sets it but `run` never sees it (dead flag) | `cli.py:50,102` |
 | 0.7 | `Ctrl+Shift+R` → reachable key (e.g. `gR`) | Terminals can't deliver the chord; binding is dead | `keybindings.py`/README |
 | 0.8 | Delete dead `BulkEditExecutor` + repoint its test | False-confidence duplicate apply path | `bulkedit.py:323,434` |
-| 0.9 | `fetch-metadata` / `proxy test` non-zero exit on error | Exit 0 breaks scripting/CI | `cli.py` |
+| ✅ 0.9 | `fetch-metadata` / `proxy test` non-zero exit on error | Exit 0 breaks scripting/CI | `cli.py` |
 | ✅ 0.10 | Bump `youtube-transcript-api` pin `>=1.2` | Pin (`>=0.6.2`) lags shipped 1.x code | `pyproject.toml` |
 | 0.11 | Wire `colorscheme` → Textual native themes (bump Textual 6.5→8.x) | Closes dead `colorscheme` string; free `ctrl+p` "Change theme" | `config/settings.py:20`, `app.py:51` |
 | 0.12 | Status-bar contextual hint line | Discoverability (the CLAUDE.md mock shows it) | `ui/status_bar.py` |
