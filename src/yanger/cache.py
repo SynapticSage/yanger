@@ -61,10 +61,27 @@ def _migration_1_virtual_video_metadata(conn) -> None:
             conn.execute(f"ALTER TABLE virtual_videos ADD COLUMN {name} {decl}")
 
 
+def _migration_2_quota_usage(conn) -> None:
+    """v2: quota_usage table for cross-process YouTube API quota tracking.
+
+    Keyed by the Pacific-midnight reset window (reset_key = YYYY-MM-DD in America/Los_Angeles),
+    so the count auto-resets when the window rolls over — a new key simply starts at 0.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quota_usage (
+            reset_key TEXT PRIMARY KEY,
+            used INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+
+
 # Append new migrations here; never reorder or delete existing entries (user_version is a
 # durable index into this tuple).
 _MIGRATIONS = (
     _migration_1_virtual_video_metadata,
+    _migration_2_quota_usage,
 )
 
 
@@ -251,7 +268,37 @@ class PersistentCache:
                 migrate(conn)
                 # PRAGMA can't be parameterized; `version` is a controlled int from enumerate.
                 conn.execute(f"PRAGMA user_version = {version}")
-    
+
+    # --- API quota (shared across processes; keyed to the Pacific reset window) ---
+
+    def get_quota_used(self, reset_key: str) -> int:
+        """Units used in the given quota window (0 if the window has no row yet)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT used FROM quota_usage WHERE reset_key = ?", (reset_key,)
+            ).fetchone()
+            return row[0] if row else 0
+
+    def add_quota_used(self, units: int, reset_key: str) -> int:
+        """Atomically add `units` to the window's total and return the new total.
+
+        The atomic UPSERT (`ON CONFLICT DO UPDATE SET used = used + excluded.used`) is what lets
+        the TUI and MCP processes share one running count instead of each keeping its own.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO quota_usage (reset_key, used) VALUES (?, ?)
+                ON CONFLICT(reset_key) DO UPDATE SET used = used + excluded.used
+                """,
+                (reset_key, units),
+            )
+            row = conn.execute(
+                "SELECT used FROM quota_usage WHERE reset_key = ?", (reset_key,)
+            ).fetchone()
+            conn.commit()
+            return row[0] if row else units
+
     def get_playlists(self) -> Optional[List[Playlist]]:
         """Get all cached playlists.
         

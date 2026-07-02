@@ -220,9 +220,9 @@ def quota():
         auth_handler = YouTubeAuth()
         auth_handler.authenticate()
         
-        # Create API client
-        client = YouTubeAPIClient(auth_handler)
-        
+        # Create API client (share the cross-process quota counter via the cache)
+        client = YouTubeAPIClient(auth_handler, quota_store=PersistentCache())
+
         # Get channel info to test and use 1 quota unit
         client._track_quota('playlists.list')
         
@@ -672,7 +672,7 @@ def export(format, output, include_virtual, include_real, verbose):
         try:
             auth = YouTubeAuth()
             auth.authenticate()
-            api_client = YouTubeAPIClient(auth)
+            api_client = YouTubeAPIClient(auth, quota_store=PersistentCache())
         except Exception as e:
             console.print(f"[yellow]Warning: Could not authenticate YouTube API: {e}[/yellow]")
             console.print("[yellow]Skipping real playlists...[/yellow]\n")
@@ -901,8 +901,9 @@ def fetch_metadata(playlist, batch_size, limit, since, days_ago, dry_run, verbos
         console.print("\nAuthenticating...")
         auth = YouTubeAuth()
         auth.authenticate()
-        api_client = YouTubeAPIClient(auth)
-        
+        # `cache` (created above) backs the shared, cross-process quota counter.
+        api_client = YouTubeAPIClient(auth, quota_store=cache)
+
         # Fetch metadata with progress bar
         updated_count = 0
         failed_ids = []

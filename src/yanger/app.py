@@ -322,7 +322,8 @@ class YouTubeRangerApp(App):
         try:
             self.auth = YouTubeAuth()
             self.auth.authenticate()
-            self.api_client = YouTubeAPIClient(self.auth)
+            # Share the quota counter with the MCP process via the SQLite cache.
+            self.api_client = YouTubeAPIClient(self.auth, quota_store=self._cache)
             self.offline_mode = False
 
             # Initialize bulk editor with API client

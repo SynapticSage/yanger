@@ -146,8 +146,9 @@ class YangerMCPServer:
             token_file=str(token_file),
         )
         auth.authenticate()
-        self.api_client = YouTubeAPIClient(auth)
+        # Cache first so it can back the shared, cross-process quota counter.
         self.cache = PersistentCache()
+        self.api_client = YouTubeAPIClient(auth, quota_store=self.cache)
 
         # Load proxy settings and create transcript fetcher
         proxy_settings = self._load_proxy_settings()

@@ -34,6 +34,9 @@ the headline custom-command registry — cheaper and safer to build.
 Completed items land here (newest first) with the commit that shipped them. Full
 per-run detail lives in the gitignored `journal/`.
 
+- **Tier 1 · #4 — shared cross-process API quota.** `quota_used` → property backed by a SQLite
+  `quota_usage` table (migration v2) keyed to the Pacific reset window; TUI/MCP/CLI share one
+  atomic count. `tzdata` dep + lazy/defensive ZoneInfo. +7 tests.
 - **Tier 1 · #5 — versioned cache migrations.** `PRAGMA user_version` + ordered idempotent
   `_MIGRATIONS` replace the no-op schema bump and the ad-hoc per-write `ALTER TABLE`. +4 tests.
 - **Tier 1 · #1 — transcript fetch+cache unified.** 4 write paths → one injected-cache
@@ -221,10 +224,13 @@ minimal and safe; everything else is an explicit later slice:
    `operation_history.py` (14) and the api_client-calling handlers; catch real modes
    (`HttpError`, `sqlite3.Error`, `OSError`, `CalledProcessError`) and let
    `AttributeError`/`TypeError` propagate. *Impact Med-High · Effort M · best after #2.*
-4. **Persist + share quota across processes.** `quota_used` resets per process and is
-   reported as "remaining today" (`api_client.py:54`, `mcp_server.py:1079`); TUI and MCP
-   don't share it. Persist in SQLite keyed to the YouTube Pacific-midnight reset window.
-   *Impact Med · Effort S-M · dep: cache (#0.5).*
+4. ✅ **DONE — Persist + share quota across processes.** `YouTubeAPIClient.quota_used` is now a
+   property backed by an injected `quota_store` (the SQLite cache): a `quota_usage(reset_key, used)`
+   table (migration v2) keyed to the Pacific-midnight window, atomic UPSERT increment. TUI + MCP
+   (+ the CLI commands) share one running count that auto-resets when the Pacific day rolls over.
+   `tzdata` added as a dep + the ZoneInfo lookup made lazy/defensive (no import-time crash on
+   tz-db-less platforms). Falls back to in-memory when no store is passed (back-compat). +7 tests.
+   *Was Med · S-M · dep: cache (#0.5).*
 5. ✅ **DONE — Versioned migration framework.** Replaced the no-op `SCHEMA_VERSION` branch
    (advanced the number without running anything) + the ad-hoc `ALTER TABLE`s (which lived in
    the hot `update_virtual_video_metadata` write path) with `PRAGMA user_version` + an ordered
