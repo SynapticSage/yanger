@@ -53,6 +53,43 @@ def test_fake_implements_every_public_client_method():
     assert not missing, f"Fake is missing real client methods: {sorted(missing)}"
 
 
+def _paste_video():
+    from yanger.models import Video
+    return Video(id="v1", playlist_item_id="", title="T", channel_title="")
+
+
+def test_operation_catches_api_error_as_clean_failure(fake_api_client):
+    """Tier 1 #3: a real API error (HttpError) is caught -> operation returns False."""
+    from googleapiclient.errors import HttpError
+    from yanger.operation_history import PasteOperation
+
+    class _Resp:
+        status = 403
+        reason = "quotaExceeded"
+
+    def _raise_http(*a, **k):
+        raise HttpError(resp=_Resp(), content=b'{"error": "quota"}')
+
+    fake_api_client.add_video_to_playlist = _raise_http
+    op = PasteOperation(api_client=fake_api_client, videos=[_paste_video()],
+                        target_playlist_id="PL1")
+    assert op.execute() is False
+
+
+def test_operation_lets_programming_error_propagate(fake_api_client):
+    """Tier 1 #3: a bug (e.g. a KeyError from a stale id) must NOT be masked as False."""
+    from yanger.operation_history import PasteOperation
+
+    def _raise_bug(*a, **k):
+        raise KeyError("stale playlist_item_id")  # a programming error, not an API error
+
+    fake_api_client.add_video_to_playlist = _raise_bug
+    op = PasteOperation(api_client=fake_api_client, videos=[_paste_video()],
+                        target_playlist_id="PL1")
+    with pytest.raises(KeyError):
+        op.execute()
+
+
 def test_delete_and_undo_through_operation_stack(fake_api_client):
     """Drive the REAL DeleteVideosOperation + OperationStack against the shared fake."""
     fake = fake_api_client

@@ -312,8 +312,8 @@ class TakeoutParser:
                     if timestamp_str:
                         try:
                             added_at = datetime.fromisoformat(timestamp_str.replace('+00:00', '+00:00'))
-                        except:
-                            pass
+                        except (ValueError, TypeError):
+                            pass  # unparseable timestamp -> leave added_at None
                     
                     videos.append(TakeoutVideo(
                         video_id=video_id,
@@ -404,8 +404,8 @@ class TakeoutParser:
                     if metadata.get('duration_ms'):
                         try:
                             video.duration_ms = int(metadata['duration_ms'])
-                        except:
-                            pass
+                        except (ValueError, TypeError):
+                            pass  # non-numeric duration -> leave unset
     
     def _is_valid_video_id(self, video_id: str) -> bool:
         """Check if a video ID is valid.

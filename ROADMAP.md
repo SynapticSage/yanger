@@ -41,6 +41,8 @@ the headline custom-command registry — cheaper and safer to build.
 Completed items land here (newest first) with the commit that shipped them. Full
 per-run detail lives in the gitignored `journal/`.
 
+- **Tier 1 · #3 (started) — narrow except.** 2 bare `except:` in takeout + all 14
+  `operation_history` handlers → `(HttpError, QuotaExceededError)`; bugs now propagate. +2 tests.
 - **Tier 1 · #2 — faithful test harness + Textual pilot.** Shared FakeYouTubeAPIClient (real
   signatures, `inspect`-guarded), a real app-boot Pilot harness driving the confirm modal, ops
   integration + takeout parsers. +22 tests. Surfaced that the runner was on the wrong Textual.
@@ -235,10 +237,14 @@ minimal and safe; everything else is an explicit later slice:
    **Big discovery:** `uv run pytest` was silently on homebrew Textual 0.47.1, not the pinned
    6.5.0 — see "Discovered during /loop". *Coverage of the full command layer can grow further,
    but the harness (the velocity-unlock deliverable) is in.*
-3. **Narrow `except Exception`** project-wide (80 occurrences + 2 bare). Start with
-   `operation_history.py` (14) and the api_client-calling handlers; catch real modes
-   (`HttpError`, `sqlite3.Error`, `OSError`, `CalledProcessError`) and let
-   `AttributeError`/`TypeError` propagate. *Impact Med-High · Effort M · best after #2.*
+3. 🔶 **STARTED — Narrow `except Exception`.** Done: both **bare `except:`** in `takeout.py`
+   → `(ValueError, TypeError)`; and all **14 handlers in `operation_history.py`** → a shared
+   `_OPERATION_API_ERRORS = (HttpError, QuotaExceededError)` tuple, so a real API/quota error is a
+   clean `return False` while a bug (AttributeError/KeyError from a stale id) propagates instead of
+   being masked. +2 harness tests prove both behaviors (built on the #2 fake). **Remaining (~66
+   sites in app/mcp/cli/etc.):** need per-site failure-mode analysis — file I/O → `OSError`,
+   subprocess → `CalledProcessError`, JSON → `JSONDecodeError`, SQLite → `sqlite3.Error` — NOT a
+   uniform sweep. *Impact Med-High · Effort M · continue on the #2 safety net.*
 4. ✅ **DONE — Persist + share quota across processes.** `YouTubeAPIClient.quota_used` is now a
    property backed by an injected `quota_store` (the SQLite cache): a `quota_usage(reset_key, used)`
    table (migration v2) keyed to the Pacific-midnight window, atomic UPSERT increment. TUI + MCP

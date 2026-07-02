@@ -10,10 +10,19 @@ from typing import List, Optional, Any, Dict
 from datetime import datetime
 import logging
 
+from googleapiclient.errors import HttpError
+
 from .models import Video, Playlist
 from .bulkedit import BulkEditChanges
+from .api_client import QuotaExceededError
 
 logger = logging.getLogger(__name__)
+
+# Operations wrap YouTube API calls; these are the real failure modes to catch and turn into
+# a clean "operation failed" (return False). Everything else (AttributeError/TypeError/KeyError
+# = a bug, e.g. a stale playlist_item_id) is deliberately left to propagate rather than be
+# silently swallowed — that masking is what the roadmap's "narrow except Exception" item targets.
+_OPERATION_API_ERRORS = (HttpError, QuotaExceededError)
 
 
 class Operation(ABC):
@@ -106,7 +115,7 @@ class PasteOperation(Operation):
             logger.info(f"Executed: {self.description}")
             return True
             
-        except Exception as e:
+        except _OPERATION_API_ERRORS as e:
             logger.error(f"Failed to execute paste operation: {e}")
             return False
     
@@ -137,7 +146,7 @@ class PasteOperation(Operation):
             logger.info(f"Undone: {self.description}")
             return True
             
-        except Exception as e:
+        except _OPERATION_API_ERRORS as e:
             logger.error(f"Failed to undo paste operation: {e}")
             return False
 
@@ -174,7 +183,7 @@ class CreatePlaylistOperation(Operation):
             self.executed = True
             logger.info(f"Created playlist: {self.title}")
             return True
-        except Exception as e:
+        except _OPERATION_API_ERRORS as e:
             logger.error(f"Failed to create playlist: {e}")
             return False
     
@@ -188,7 +197,7 @@ class CreatePlaylistOperation(Operation):
             self.executed = False
             logger.info(f"Deleted playlist: {self.title}")
             return True
-        except Exception as e:
+        except _OPERATION_API_ERRORS as e:
             logger.error(f"Failed to delete playlist: {e}")
             return False
 
@@ -229,7 +238,7 @@ class RenameOperation(Operation):
             self.executed = True
             logger.info(f"Renamed {self.item_type}: {self.old_title} → {self.new_title}")
             return True
-        except Exception as e:
+        except _OPERATION_API_ERRORS as e:
             logger.error(f"Failed to rename {self.item_type}: {e}")
             return False
     
@@ -250,7 +259,7 @@ class RenameOperation(Operation):
             self.executed = False
             logger.info(f"Restored {self.item_type} name: {self.new_title} → {self.old_title}")
             return True
-        except Exception as e:
+        except _OPERATION_API_ERRORS as e:
             logger.error(f"Failed to restore {self.item_type} name: {e}")
             return False
 
@@ -289,7 +298,7 @@ class BulkEditOperation(Operation):
                 self.applied_deletions.append((video, playlist_id))
                 success_count += 1
                 logger.info(f"Deleted '{video.title}' from playlist")
-            except Exception as e:
+            except _OPERATION_API_ERRORS as e:
                 logger.error(f"Failed to delete '{video.title}': {e}")
 
         # Process moves
@@ -308,7 +317,7 @@ class BulkEditOperation(Operation):
                 self.applied_moves.append((move, new_item_id))
                 success_count += 1
                 logger.info(f"Moved '{move.video.title}' to different playlist")
-            except Exception as e:
+            except _OPERATION_API_ERRORS as e:
                 logger.error(f"Failed to move '{move.video.title}': {e}")
 
         # Process reorders
@@ -323,7 +332,7 @@ class BulkEditOperation(Operation):
                 self.applied_reorders.append(reorder)
                 success_count += 1
                 logger.info(f"Reordered '{reorder.video.title}' to position {reorder.new_position}")
-            except Exception as e:
+            except _OPERATION_API_ERRORS as e:
                 logger.error(f"Failed to reorder '{reorder.video.title}': {e}")
 
         self.executed = success_count > 0
@@ -357,7 +366,7 @@ class BulkEditOperation(Operation):
                 )
                 undo_count += 1
                 logger.info(f"Restored position of '{reorder.video.title}'")
-            except Exception as e:
+            except _OPERATION_API_ERRORS as e:
                 logger.error(f"Failed to restore position of '{reorder.video.title}': {e}")
 
         # Undo moves (move back to original playlist)
@@ -372,7 +381,7 @@ class BulkEditOperation(Operation):
                 )
                 undo_count += 1
                 logger.info(f"Moved '{move.video.title}' back to original playlist")
-            except Exception as e:
+            except _OPERATION_API_ERRORS as e:
                 logger.error(f"Failed to move '{move.video.title}' back: {e}")
 
         # Undo deletions (re-add videos)
@@ -384,7 +393,7 @@ class BulkEditOperation(Operation):
                 )
                 undo_count += 1
                 logger.info(f"Restored '{video.title}' to playlist")
-            except Exception as e:
+            except _OPERATION_API_ERRORS as e:
                 logger.error(f"Failed to restore '{video.title}': {e}")
 
         self.executed = False
@@ -439,7 +448,7 @@ class DeleteVideosOperation(Operation):
             self.executed = True
             return True
             
-        except Exception as e:
+        except _OPERATION_API_ERRORS as e:
             logger.error(f"Failed to delete videos: {e}")
             return False
     
@@ -466,7 +475,7 @@ class DeleteVideosOperation(Operation):
             self.executed = False
             return True
             
-        except Exception as e:
+        except _OPERATION_API_ERRORS as e:
             logger.error(f"Failed to restore deleted videos: {e}")
             return False
 

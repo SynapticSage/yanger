@@ -36,27 +36,34 @@ async def test_app_boots_headless(app_pilot):
 
 
 async def test_confirm_modal_y_confirms_via_keyboard(app_pilot):
-    """The regression the pilot exists for: a dangerous=False modal must confirm on 'y'."""
+    """The regression the pilot exists for: a dangerous=False modal must CONFIRM (not just
+    dismiss) on 'y'. We capture the dismiss result to prove confirm vs cancel."""
     app, pilot = app_pilot
-    app.push_screen(ConfirmationModal(
-        title="Confirm Run", message="Run on 6 videos?",
-        action="run_custom_command", dangerous=False,
-    ))
+    results = []
+    app.push_screen(
+        ConfirmationModal(title="Confirm Run", message="Run on 6 videos?",
+                          action="run_custom_command", dangerous=False),
+        results.append,
+    )
     await pilot.pause()
     assert isinstance(app.screen, ConfirmationModal)
 
     await pilot.press("y")
     await pilot.pause()
-    # 'y' dismissed the modal -> we're back to the base screen (was impossible before the fix).
     assert not isinstance(app.screen, ConfirmationModal)
+    assert results == [True]  # 'y' CONFIRMED, not merely dismissed
 
 
 async def test_confirm_modal_escape_cancels(app_pilot):
     app, pilot = app_pilot
-    app.push_screen(ConfirmationModal(
-        title="Confirm", message="?", action="run_custom_command", dangerous=False,
-    ))
+    results = []
+    app.push_screen(
+        ConfirmationModal(title="Confirm", message="?", action="run_custom_command",
+                          dangerous=False),
+        results.append,
+    )
     await pilot.pause()
     await pilot.press("escape")
     await pilot.pause()
     assert not isinstance(app.screen, ConfirmationModal)
+    assert results == [False]  # escape CANCELLED
