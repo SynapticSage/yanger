@@ -140,6 +140,22 @@ commands:
 tool = High / M (dep: registry + opt-in gate) → analysis-cache wiring = High / S-M →
 skill + chaining + prompts = Med / strategic.
 
+**Agreed v1 scope (this /loop run, post adversarial-critic).** The core `:run` slice ships
+minimal and safe; everything else is an explicit later slice:
+- **v1 (now):** YAML `commands: {name: "template"}` (bare strings) + `YANGER_CMD_<NAME>` env
+  overrides; keys normalized lowercase. `:run <name>` on marked-else-current (mirrors `dd`/`yy`),
+  **per-video only**. Generic `build_command`/`run_command` live in `core/custom_command.py`;
+  `core/transcript_command.py` **delegates** to them (dedup, not a hand-copy). Confirm modal when
+  selection > threshold. `:run`/`:run <unknown>` surface available names.
+- **Deliberately deferred (critic-flagged):** injecting `transcript_command` into the registry
+  (dual-source-of-truth divergence — back-compat already lives in the untouched `:transcript`
+  branch); long-form `{run,mode,confirm}` dict; **batch** mode (`{urls}`/`{ids}`/stdin — least
+  specified, ARG_MAX, riskiest); `{title}` (uploader-controlled → wider injection surface);
+  `:set commands.<name>` persistence (doesn't fit the scalar `save_user_setting` shape — users edit
+  `config.yaml` directly); tab-completion. → **slice 1b**.
+- **Note:** `Settings.commands` must be wired at all **four** touch-points (field, `from_dict`,
+  `merge`'s section list, `save_settings`) or `commands:` is silently dropped.
+
 ---
 
 ## Tier 0 — Quick wins (S effort, clear value, ship first)

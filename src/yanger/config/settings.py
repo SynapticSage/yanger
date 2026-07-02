@@ -128,7 +128,10 @@ class Settings:
     cache: CacheSettings = field(default_factory=CacheSettings)
     transcripts: TranscriptSettings = field(default_factory=TranscriptSettings)
     youtube: YouTubeSettings = field(default_factory=YouTubeSettings)
-    
+    # User-defined custom-command registry: name -> shell template (the ★ headline feature).
+    # A plain dict, not a section dataclass, so from_dict/merge/save handle it explicitly.
+    commands: Dict[str, str] = field(default_factory=dict)
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Settings':
         """Create Settings from dictionary."""
@@ -172,6 +175,18 @@ class Settings:
                 if hasattr(settings.youtube, key):
                     setattr(settings.youtube, key, value)
 
+        # Custom-command registry (name -> shell template). v1 accepts bare strings only;
+        # non-string values (future long-form {run, mode, confirm} dicts) are skipped with a
+        # warning so one bad entry can't break config load. Keys are normalized lowercase.
+        if 'commands' in data and isinstance(data['commands'], dict):
+            for name, template in data['commands'].items():
+                if isinstance(template, str):
+                    settings.commands[str(name).lower()] = template
+                else:
+                    logger.warning(
+                        f"Skipping custom command '{name}': long-form (mode/confirm) not yet supported"
+                    )
+
         return settings
     
     def merge(self, other: 'Settings') -> None:
@@ -185,6 +200,11 @@ class Settings:
                 value = getattr(other_section, key)
                 if value is not None:  # Only override non-None values
                     setattr(self_section, key, value)
+
+        # `commands` is a plain dict, not a section dataclass — merge by key so a user
+        # config's commands are added over the defaults rather than dropped.
+        if other.commands:
+            self.commands.update(other.commands)
 
 
 def load_settings(config_dir: Optional[Path] = None) -> Settings:
@@ -276,7 +296,8 @@ def save_settings(settings: Settings, config_dir: Optional[Path] = None) -> None
         'keybindings': vars(settings.keybindings),
         'cache': vars(settings.cache),
         'transcripts': transcript_data,
-        'youtube': vars(settings.youtube)
+        'youtube': vars(settings.youtube),
+        'commands': dict(settings.commands),
     }
     
     # Save to file
