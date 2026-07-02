@@ -1,0 +1,283 @@
+# YouTube Ranger (yanger) — Roadmap
+
+Status: **alpha**. This roadmap was synthesized from a three-lens discovery pass
+(gap-analysis + emerging opportunities, architecture/tech-debt, product/features)
+against the merged codebase. Items are proposals, prioritized by leverage.
+
+**Legend** — Impact = user-visible value (High / Med / Low). Effort = S (≤ ~½ day) ·
+M (~1–3 days) · L (> 3 days). "Velocity unlock" = makes later work cheaper/safer.
+
+## Guiding theme
+
+yanger's biggest risk is not missing features — it's **duplication on untested
+paths**. Both prior Criticals lived on zero-coverage code, and two tests were
+*masking* bugs by mocking nonexistent method names. The transcript fetch+cache
+logic is hand-copied in four places and has already diverged into a live bug (see
+below). A few foundational consolidations make every subsequent feature — including
+the headline custom-command registry — cheaper and safer to build.
+
+---
+
+## 0. Known issue found during discovery (fix outside the roadmap)
+
+- **TUI auto-fetch caches transient transcript failures.** `_auto_fetch_transcript`
+  (`src/yanger/app.py:1003-1012`) caches *every* status including transient
+  `IP_BLOCKED`/`ERROR`, permanently poisoning the cache so a later-configured proxy
+  can't recover. This is the same bug fixed in the MCP path (`TERMINAL_TRANSCRIPT_STATUSES`,
+  `mcp_server.py:64`) that did not propagate because the logic is duplicated. **Small
+  fix; do it now.** (Properly resolved by Tier 1 item 1.)
+
+---
+
+## ★ Headline track — User-defined custom-command registry (+ agent-domain integration)
+
+> **Confirmed top priority (user request, 2026-07-02):** "a config file where users can set
+> custom command names to bash commands or pipes of commands to run on a video URL." That is
+> exactly this track — a YAML `commands:` registry mapping names → shell templates/pipes with
+> `{url}`/`{id}` placeholders, run against the current video or a selection. No separate item is
+> needed; this headline *is* the feature. Build the **core registry + `:run`** slice first.
+
+Generalize the existing single `:transcript` hook into a **named registry of shell
+commands** users can run on the current video *or* a selection. Pure reuse of
+`src/yanger/core/transcript_command.py` (`build_command`/`resolve`/`run`, `shell=True`,
+`shlex.quote`'d `{url}`/`{id}`) and existing selection helpers
+(`miller_view.video_column.get_marked_videos()`, visual mode) + config plumbing
+(`save_user_setting`, env merge in `load_settings`).
+
+### Config schema
+```yaml
+# ~/.config/yanger/config.yaml
+commands:
+  dl:    "yt-dlp {url}"
+  sum:   "yeet {url} | fabric -sp summarize"
+  archive: "archivebox add {url}"
+  # long form opts into batch + confirmation:
+  dlall: { run: "yt-dlp {urls}", mode: batch, confirm: true }
+```
+- Bare `name: "template"` ⇒ `{run: template, mode: per-video, confirm: false}`.
+- Env override convention `YANGER_CMD_<NAME>` (mirrors `YANGER_TRANSCRIPT_COMMAND`);
+  add a `commands` branch to `_USER_SETTING_SECTIONS` so `:set` can persist them.
+- `transcript_command` becomes the reserved default-named command → **back-compat,
+  no migration**.
+
+### Placeholders & set-semantics
+- Single video: `{url}`, `{id}`, plus `{title}` (filenames).
+- Selection — two modes, chosen per-command via `mode:`:
+  - **`per-video`** (default): run once per selected video (each `shlex.quote`'d).
+  - **`batch`**: one invocation with `{urls}`/`{ids}` (space-joined, quoted) or stdin
+    (newline-joined) for `xargs`/`fabric`-style tools.
+- Default on a selection with no `mode:` is **per-video** (least surprising).
+
+### TUI invocation UX
+- `:run <name>` (new branch in `execute_command`) — operates on marked/visual
+  selection if any, else current video (mirrors the `dd`/`yy` marked-else-current
+  convention).
+- Tab-completion of command names; optional user-bindable keys (`keybindings:` →
+  `:run <name>`); optional later: a quick fuzzy command palette.
+
+### Execution & safety
+- `shell=True` (user's own config; same posture as `transcript_command`/`$EDITOR`),
+  only injected URLs/IDs are `shlex.quote`'d.
+- `with self.suspend(): asyncio.to_thread(run)` for interactive/streaming tools.
+- Output: per-video interactive streams live; batch/capture → scrollable modal or
+  `$PAGER`; non-zero exits surfaced per video.
+- **Confirm** modal when selection > threshold (e.g. 5) or `confirm: true`.
+- It runs arbitrary user-configured shell — acceptable/user-owned; guardrails:
+  confirm-on-large-selection, quote-only-injection, never auto-run on startup,
+  document clearly.
+
+### LLM / MCP / Skill integration
+- **Gated generic MCP tool** `run_custom_command(name, video_ids[], mode?)` — one tool
+  with a `name` enum generated from the registry at `list_tools()` time. Preferred over
+  one-tool-per-command because **some clients ignore `tools/list_changed`** (e.g. a
+  reported Claude Desktop gap), so a single generic tool degrades gracefully.
+  **Default OFF** behind `mcp.allow_custom_commands` (LLM-driven shell exec).
+- **Commands as LLM pipelines:** capture command stdout as an **analysis artifact**
+  keyed to the video, reusing the transcript/`fabric_analyze` cache → returnable via a
+  new `get_analysis`; unify TUI-run and MCP-run results in one store.
+- **MCP elicitation** as the confirm-before-shell-exec / before-irreversible gate.
+- **MCP sampling** lets pipelines use the *client's* model — no local Fabric/key.
+- **Claude Skill / slash-commands** that surface the registry to the agent and can
+  **author new commands** into config (with confirmation); Agent-Skills packaging.
+- **LLM chaining**: agent composes registry commands across a selection (transcript →
+  summarize → file note), mapping onto the per-video/batch semantics.
+
+**Slice priorities:** core registry + `:run` = **High / M / no deps** → generic MCP
+tool = High / M (dep: registry + opt-in gate) → analysis-cache wiring = High / S-M →
+skill + chaining + prompts = Med / strategic.
+
+---
+
+## Tier 0 — Quick wins (S effort, clear value, ship first)
+
+| # | Item | Why | Evidence |
+|---|---|---|---|
+| 0.1 | README: document `sync` + `proxy` | Marquee CLI features undocumented | `cli.py:544,954` |
+| 0.2 | `.env.example`: add proxy vars | `proxy status` advertises them | `cli.py:991` |
+| 0.3 | `yanger reset`: fix wrong paths + add confirm | Silently no-ops on real cache/config; unguarded destructive | `cli.py:166,182,193` |
+| 0.4 | `None`-title/description crash fixes | Crashes duplicates/statistics/`export --csv` on pre-metadata videos | duplicates/statistics/export |
+| 0.5 | `journal_mode=WAL` + `busy_timeout` in `_connect()` | MCP off-loop writes made `database is locked` reachable | `cache.py:66-75` |
+| 0.6 | `-v/--verbose` → `ctx.obj` | Group sets it but `run` never sees it (dead flag) | `cli.py:50,102` |
+| 0.7 | `Ctrl+Shift+R` → reachable key (e.g. `gR`) | Terminals can't deliver the chord; binding is dead | `keybindings.py`/README |
+| 0.8 | Delete dead `BulkEditExecutor` + repoint its test | False-confidence duplicate apply path | `bulkedit.py:323,434` |
+| 0.9 | `fetch-metadata` / `proxy test` non-zero exit on error | Exit 0 breaks scripting/CI | `cli.py` |
+| 0.10 | Bump `youtube-transcript-api` pin `>=1.2` | Pin (`>=0.6.2`) lags shipped 1.x code | `pyproject.toml` |
+| 0.11 | Wire `colorscheme` → Textual native themes (bump Textual 6.5→8.x) | Closes dead `colorscheme` string; free `ctrl+p` "Change theme" | `config/settings.py:20`, `app.py:51` |
+| 0.12 | Status-bar contextual hint line | Discoverability (the CLAUDE.md mock shows it) | `ui/status_bar.py` |
+
+---
+
+## Tier 1 — Foundations (do before/with the headline; unlock velocity + safety)
+
+1. **Unify transcript fetch+cache into one core service.** Collapse the 4 hand-copied
+   copies (`app.py:966`, `app.py:1017`, `mcp_server.py:995`, `mcp_server.py:1418`) into a
+   single `fetch_and_cache_transcript(...)` owning the format/compress/cache + terminal-vs-transient
+   policy. **Kills the §0 live bug**; prerequisite for transcripts-as-MCP-resources.
+   *Impact High · Effort M · no dep.*
+2. **Faithful API-client/cache test harness + cover untested paths.** One shared test
+   double for `YouTubeAPIClient` with real method signatures (ban per-method
+   `MagicMock(name=...)`); integration tests driving `execute_command`/operations against
+   the double + a real temp SQLite cache. Cover `api_client.py`, the command layer,
+   `takeout.py`/`duplicates.py`/`statistics.py` (currently zero direct tests).
+   *Impact High · Effort M-L · no dep · velocity unlock for every later refactor.*
+3. **Narrow `except Exception`** project-wide (80 occurrences + 2 bare). Start with
+   `operation_history.py` (14) and the api_client-calling handlers; catch real modes
+   (`HttpError`, `sqlite3.Error`, `OSError`, `CalledProcessError`) and let
+   `AttributeError`/`TypeError` propagate. *Impact Med-High · Effort M · best after #2.*
+4. **Persist + share quota across processes.** `quota_used` resets per process and is
+   reported as "remaining today" (`api_client.py:54`, `mcp_server.py:1079`); TUI and MCP
+   don't share it. Persist in SQLite keyed to the YouTube Pacific-midnight reset window.
+   *Impact Med · Effort S-M · dep: cache (#0.5).*
+5. **Versioned migration framework.** Replace the no-op `SCHEMA_VERSION` branch
+   (`cache.py:179`) + ad-hoc `ALTER TABLE`s with `PRAGMA user_version` + ordered,
+   transactional steps. *Impact Med · Effort S-M.*
+
+---
+
+## Tier 2 — MCP / LLM surface deepening
+
+- **Elicitation: confirm-before-irreversible** mutations (and before shell-exec).
+  Directly de-risks the ALPHA-irreversibility warning. *High · M.*
+- **MCP undo parity.** Route MCP mutations through `operation_history` (the TUI has full
+  undo/redo; MCP currently records nothing). Pairs with persisted store (#1.4/#1.5).
+  *Med-High · M.*
+- **Resources + Prompts.** Expose playlists, cached transcripts, and saved commands as
+  MCP resources; Fabric patterns as MCP prompts (the explicitly-deferred
+  `docs/MCP_SERVER_PLAN.md` Phase 4). *Med · M.*
+- **Sampling** for LLM pipelines using the connected client's model (removes the hard
+  local-Fabric/key dependency in `fabric_analyze`). *Med · M.*
+- **Fix cache-only blind spots.** `search_videos` and cross-playlist `find_duplicates`
+  only scan cached playlists and silently return partial results — prime the cache or
+  annotate coverage. *Med · M.*
+
+---
+
+## Tier 3 — Strategic / larger
+
+- **Decompose `app.py` (2,690 lines).** Extract the 185-line command dispatcher
+  (`execute_command`) + ranger handlers → a `commands/` module; move transcript/metadata
+  domain ops → `core/` (realizes Tier-1 #1). Shrinks the god-object, eases testing,
+  realigns to the CLAUDE.md structure. *Med · L · after #1.2 · velocity unlock.*
+- **Takeout improvements.** JSON history import (preserve watched-at timestamps; current
+  HTML parse only recovers IDs; fix the `takeout.py:314` `Z`-timestamp no-op); zip-import
+  metadata enrichment; `sync` resume/download-only mode (watch for the emailed zip
+  instead of re-submitting an export); validate the live Takeout DOM against a real
+  account. *Med · M.*
+- **Centralize path resolution.** Four roots in use (`~/.config/yanger`, `~/.cache/yanger`,
+  `~/.yanger`, a `.cache/yanger` config default). One XDG-style module (config/cache/state)
+  consumed by everything incl. `reset`. *Low-Med · S.*
+- **Guard deprecated favorites-playlist modification** — ensure no mutation path targets a
+  "favorites" virtual playlist (YouTube API deprecation). *Low · S.*
+- **User-editable keybindings (YAML loader)** — the registry is hardcoded; add a
+  `config/keybindings.yaml`. *Med · M.*
+
+---
+
+## Dropped — won't build (explicit product decisions)
+
+- **`:play` external player (mpv/vlc) — DROPPED (2026-07-02, user decision).** Piping YouTube
+  video streams into an external player (mpv/vlc, typically via `yt-dlp`) to *watch* videos
+  sits crosswise to YouTube's Terms of Service (playback outside the YouTube player / embedded
+  player). yanger stays an *organization/management* tool. Users who want this can still wire it
+  themselves through the general custom-command registry (their own config, their own posture) —
+  we simply don't ship or endorse a first-class `:play` verb. `r` (open in browser) remains the
+  supported "watch" affordance. *Note: this does not restrict the custom-command registry, which
+  is content-agnostic shell the user configures.*
+
+## Decisions needed
+
+1. **`origin/claude/simple-rich-ui-8ZHYs` → DROP.** A parallel, untested second UI (a
+   584-line `rich` menu) re-implements auth + loading independently of `app.py` — the exact
+   untested-duplicate pattern behind prior Criticals; no documented need. The CLI + MCP
+   already are the non-TUI surface. If accessibility/fallback ever becomes a real reported
+   need, add a `--no-tui` mode over the existing CLI verbs (with tests), not a third UI.
+2. **Explicitly drop/defer low-fit vision features** so they stop reading as perpetual TODO:
+   macros (`qa`/`@a`), plugin system, smart/auto playlists, playlist sharing, merge/split as
+   a user op. They're large scope and off the app's actual momentum (TUI + MCP/LLM).
+3. **Reconcile the drifted `CLAUDE.md` vision** with reality (or rewrite it): it describes a
+   `commands/`/`core/` package layout, `core/` classes, and `api_key` auth that don't exist,
+   and `v`/`V`/`gr`/`gR`/`gs`/`H`/`L` keys that differ from the shipped keymap.
+
+---
+
+## Suggested sequencing
+
+- **Now:** §0 live-bug fix + Tier 0 quick wins.
+- **Next:** Tier 1 #1 (transcript service) + #2 (test harness) — these unblock everything else.
+- **Then:** the headline custom-command registry (core `:run` first; the gated MCP tool once
+  elicitation lands).
+- **Ongoing:** Tier 2 MCP deepening; Tier 3 once foundations are in.
+
+---
+
+## Appendix A — Built vs intended (vs the CLAUDE.md vision)
+
+| Feature (intended) | Status | Note |
+|---|---|---|
+| Three-column miller view; hjkl/gg/G; cut/copy/paste; dD; cw; sort/filter/search | DONE | Core TUI solid |
+| Visual mode / invert / unmark | DONE | `V`=visual, `v`=invert (spec says reverse — drift) |
+| Undo/redo | PARTIAL | Full in TUI; **MCP mutations bypass it** |
+| Command mode (`:`) | DONE | ~15 commands |
+| Offline SQLite cache | DONE | ~95% API reduction |
+| Duplicate detection; statistics | DONE | TUI + MCP |
+| `H`/`L` history; `gs` settings; `:move`/`:backup` | MISSING | Spec'd, never built |
+| Macros (`qa`/`@a`) | MISSING | Not started |
+| Colorschemes (default/nord) | MISSING | Dead config string; no loader (Tier 0.11) |
+| Custom keybindings (YAML) | MISSING | Registry hardcoded (Tier 3) |
+| Plugin system; smart playlists; sharing; merge/split | MISSING | See Decision 2 |
+| mpv/vlc playback | DROPPED | ToS posture — see "Dropped"; `r` opens browser; users can DIY via custom-command registry |
+| Video download | PARTIAL | Via `:transcript`/custom-command hook, not built-in |
+| **Beyond spec (built):** MCP server (~20 tools), Takeout import + Puppeteer `sync`, transcript fetch/cache/proxy + Webshare, `:transcript`/`:set` hook, bulk edit, multi-format export | DONE | README/journals ahead of the vision doc |
+
+## Appendix B — External opportunities (as of mid-2026) & references
+
+Installed: `mcp 1.25.0`, `textual 6.5.0`, `youtube-transcript-api 1.2.3`,
+`google-api-python-client 2.187.0`.
+
+- **Textual** native theme system (`App.theme` + `register_theme`, since 0.86) and the
+  `ctrl+p` command palette; latest is 8.x — closes the colorscheme gap cheaply.
+- **MCP spec** (current stable 2025-11-25) adds **elicitation**, **sampling**, structured
+  tool output, and resources/prompts — yanger's server is tools-only today. Dynamic tool
+  registration via `notifications/tools/list_changed` exists but **client support is uneven**
+  (design a generic `run_command` fallback).
+- **Claude Skills** (custom slash-commands merged into Skills) are the distribution path for
+  a command registry; latest Claude line (Opus 4.8) + Tool Search Tool / programmatic tool
+  calling keep large tool libraries usable.
+- **Transcripts:** cloud-IP blocking remains the dominant failure mode; Webshare requires
+  *rotating Residential* proxies (document this); PoToken support is in progress; a hosted
+  fallback can ride the `transcript_command` hook.
+- **YouTube Data API v3:** stable (10k/day quota); no uploads so the `videos.insert` cost
+  hike is irrelevant; favorites-playlist modification is deprecated (guard it).
+
+References:
+- Textual: changelog · command-palette guide (textual.textualize.io)
+- MCP: modelcontextprotocol.info/specification · tools spec · transports-future blog · client-capability-gap (pulsemcp)
+- Claude: code.claude.com/docs/en/skills · anthropic.com/engineering/advanced-tool-use · platform.claude.com programmatic-tool-calling
+- Transcripts: pypi.org/project/youtube-transcript-api · jdepoix/youtube-transcript-api#593 (cloud IP blocking)
+- YouTube API: developers.google.com/youtube/v3/revision_history
+
+---
+
+*Sources for this roadmap: the project journals (`./journal/`, local/gitignored), the
+CLAUDE.md vision spec, `README.md`, `docs/MCP_SERVER_PLAN.md`, and a three-agent discovery
+pass over the merged codebase.*
