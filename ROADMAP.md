@@ -20,6 +20,26 @@ the headline custom-command registry — cheaper and safer to build.
 
 ## Discovered during /loop (follow-ups)
 
+- **🐞 Overlays don't take focus / render — HIGH user-visible (reported 2026-07-02, "never resolved").**
+  Two symptoms, **one root cause**: `CommandInput` and `HelpOverlay` are CSS-`display`-toggled
+  `Container`s embedded in the main `compose()` (`app.py:154,165`), NOT `ModalScreen`s on the screen
+  stack — so the app's `on_key` and the miller view keep keyboard focus behind them.
+  - **(a) Command input is invisible while typing.** `:`+text captures fine (Enter submits → the
+    ack/error popup you see), but the typed text never renders. `ui/command_input.py` is littered
+    with `!important` colour overrides (`color: white !important`, forced styles in `show()`) — the
+    fingerprint of an unwon rendering fight. *Severe: users can't see what they type.*
+  - **(b) Help overlay ignores arrow/`j`/`k`.** `app.py:on_key` returns early when the command input
+    (`:1112`) or search input (`:1119`) has focus, but has **no check for `help_overlay`**, so
+    navigation keys fall through to the miller columns behind it (`:1140+`). `HelpOverlay.on_key`
+    (`help_overlay.py:205`) only handles `escape`/`?`, never scroll. Mouse wheel works (routed to the
+    widget under the pointer, bypassing `on_key`).
+  - **Fix (both):** convert `CommandInput` + `HelpOverlay` to `ModalScreen`s pushed on the stack — the
+    pattern `ui/confirmation_modal.py` already uses and the new pilot harness (`test_pilot_harness.py`)
+    can verify. That yields focus capture, key isolation from the background, and correct top-layer
+    rendering, and lets the `!important` CSS hacks be deleted. *Cheaper interim fix for (b) alone: add
+    a `help_overlay`-focus early-return in `on_key` and give `HelpOverlay.on_key` up/down handling.*
+    *Impact High (usability) · Effort M · verifiable with the Tier-1 #2 pilot.*
+
 - **⚠️ Tests ran on the WRONG Textual for most of this run (found by the Tier-1 #2 review).**
   The `.venv` has no `pytest`, so `uv run pytest` silently falls back to homebrew Python 3.10 +
   **Textual 0.47.1** — 6 majors below the pinned `textual>=0.86` (venv has 6.5.0). The suite passed
