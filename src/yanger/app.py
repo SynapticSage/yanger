@@ -966,7 +966,7 @@ class YouTubeRangerApp(App):
     async def _auto_fetch_transcript(self, video: Video) -> None:
         """Auto-fetch transcript in background (silent, no notifications)."""
         try:
-            from .core.transcript_fetcher import TranscriptFetcher
+            from .core.transcript_fetcher import TranscriptFetcher, TERMINAL_TRANSCRIPT_STATUSES
             fetcher = TranscriptFetcher(preferred_languages=self.settings.transcripts.languages)
 
             # Run in thread since it's I/O bound
@@ -1000,8 +1000,12 @@ class YouTubeRangerApp(App):
                         self.status_bar.update_status(f"Transcript loaded ({lang_str})", "")
                     if self.miller_view and self.miller_view.preview_pane:
                         await self.miller_view.preview_pane.show_video(video)
-            else:
-                # Cache the status to avoid refetching
+            elif status in TERMINAL_TRANSCRIPT_STATUSES:
+                # Cache ONLY permanent failures (NOT_AVAILABLE) to avoid refetching.
+                # Transient failures (IP_BLOCKED / ERROR) are deliberately left uncached
+                # so a later run — e.g. after the user configures a proxy — can retry.
+                # (Previously this else-branch cached EVERY status, permanently poisoning
+                # the cache: the §0 bug, matching the MCP path's terminal-status policy.)
                 self._cache.cache_transcript(
                     video.id,
                     None,

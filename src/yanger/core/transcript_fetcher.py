@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Only these transcript failure statuses are permanent and safe to cache. Transient
+# failures (IP_BLOCKED, ERROR/ERROR:...) must NOT be cached: caching them would make
+# skip_cached / get_transcript / the TUI auto-fetch skip the video forever, so a proxy
+# configured AFTER a block could never recover it. Leaving them uncached lets a later
+# run retry. Owned here (where fetch_transcript emits the statuses) so every caller —
+# app.py, mcp_server.py — shares one definition instead of hand-copying it.
+TERMINAL_TRANSCRIPT_STATUSES = frozenset({"NOT_AVAILABLE"})
+
 
 @dataclass
 class TranscriptSegment:

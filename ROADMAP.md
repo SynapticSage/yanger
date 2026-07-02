@@ -18,14 +18,26 @@ the headline custom-command registry — cheaper and safer to build.
 
 ---
 
+## Changelog
+
+Completed items land here (newest first) with the commit that shipped them. Full
+per-run detail lives in the gitignored `journal/`.
+
+- **§0 — transient-transcript cache poisoning fixed.** Hoisted `TERMINAL_TRANSCRIPT_STATUSES`
+  to `core/transcript_fetcher.py`; TUI auto-fetch now caches only terminal statuses. +5 regression
+  tests. _(commit recorded in journal)_
+
+---
+
 ## 0. Known issue found during discovery (fix outside the roadmap)
 
-- **TUI auto-fetch caches transient transcript failures.** `_auto_fetch_transcript`
-  (`src/yanger/app.py:1003-1012`) caches *every* status including transient
-  `IP_BLOCKED`/`ERROR`, permanently poisoning the cache so a later-configured proxy
-  can't recover. This is the same bug fixed in the MCP path (`TERMINAL_TRANSCRIPT_STATUSES`,
-  `mcp_server.py:64`) that did not propagate because the logic is duplicated. **Small
-  fix; do it now.** (Properly resolved by Tier 1 item 1.)
+- ✅ **RESOLVED — TUI auto-fetch caches transient transcript failures.** `_auto_fetch_transcript`
+  (`src/yanger/app.py`) cached *every* status including transient `IP_BLOCKED`/`ERROR`,
+  permanently poisoning the cache so a later-configured proxy couldn't recover. **Fixed** by
+  hoisting the shared policy `TERMINAL_TRANSCRIPT_STATUSES` into its owner
+  `core/transcript_fetcher.py` (now imported by both `app.py` and `mcp_server.py`) and gating
+  the auto-fetch cache write on it. Regression test: `tests/test_auto_fetch_transcript_caching.py`
+  (5 cases). See Changelog. (Full fetch+cache unification remains Tier 1 item 1.)
 
 ---
 
@@ -132,8 +144,14 @@ skill + chaining + prompts = Med / strategic.
 1. **Unify transcript fetch+cache into one core service.** Collapse the 4 hand-copied
    copies (`app.py:966`, `app.py:1017`, `mcp_server.py:995`, `mcp_server.py:1418`) into a
    single `fetch_and_cache_transcript(...)` owning the format/compress/cache + terminal-vs-transient
-   policy. **Kills the §0 live bug**; prerequisite for transcripts-as-MCP-resources.
-   *Impact High · Effort M · no dep.*
+   policy. §0 already hoisted the **write**-side policy constant `TERMINAL_TRANSCRIPT_STATUSES`
+   into `core/transcript_fetcher.py`; the remaining work is (a) the four fetch+cache bodies and
+   (b) the **read**-side "is-terminal ⇒ don't retry" gate, still triplicated and inconsistent:
+   `app.py:1335` (hardcoded `['SUCCESS','NOT_AVAILABLE']` — won't track the constant if it grows),
+   `mcp_server.py:1004-1012` and `:1443-1447` (treat *any* cached row as terminal). The service
+   should own both sides and fold `app.py:1335` onto the shared constant. **Inject the cache
+   handle** into the service (don't import `PersistentCache` into `core` — keeps `core` a leaf,
+   avoids a cache⇄transcript_fetcher cycle). *Impact High · Effort M · no dep.*
 2. **Faithful API-client/cache test harness + cover untested paths.** One shared test
    double for `YouTubeAPIClient` with real method signatures (ban per-method
    `MagicMock(name=...)`); integration tests driving `execute_command`/operations against

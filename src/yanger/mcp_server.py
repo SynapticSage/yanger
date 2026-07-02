@@ -38,7 +38,7 @@ except ImportError:
 from .auth import YouTubeAuth, resolve_token_file, resolve_client_secrets_file
 from .api_client import YouTubeAPIClient, QuotaExceededError
 from .cache import PersistentCache
-from .core.transcript_fetcher import TranscriptFetcher
+from .core.transcript_fetcher import TranscriptFetcher, TERMINAL_TRANSCRIPT_STATUSES
 from .core.proxy import ProxySettings as CoreProxySettings
 from .config.settings import load_settings
 from .models import Playlist, Video, PrivacyStatus
@@ -57,11 +57,8 @@ DEFAULT_TRANSCRIPT_MAX_CHARS = 20000
 # batch responsive without spawning an unbounded swarm of LLM subprocesses.
 FABRIC_BATCH_CONCURRENCY = 4
 
-# Only these transcript failure statuses are permanent and safe to cache. Transient
-# failures (IP_BLOCKED, ERROR/ERROR:...) must NOT be cached: caching them would make
-# skip_cached and get_transcript skip the video forever, so a proxy configured AFTER
-# a block could never recover it. Leaving them uncached lets a later run retry.
-TERMINAL_TRANSCRIPT_STATUSES = frozenset({"NOT_AVAILABLE"})
+# TERMINAL_TRANSCRIPT_STATUSES is imported from core.transcript_fetcher (its owner) so
+# the TUI and MCP paths share one policy — see that module for the rationale.
 
 
 class YangerMCPServer:
