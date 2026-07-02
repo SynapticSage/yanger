@@ -217,3 +217,10 @@ def get_transcript_from_db(db_path: Path, video_id: str) -> Dict[str, Any]:
         if row:
             return dict(row)
         return None
+
+
+@pytest.fixture
+def fake_api_client():
+    """Shared faithful YouTubeAPIClient double (see tests/fakes.py)."""
+    from fakes import FakeYouTubeAPIClient
+    return FakeYouTubeAPIClient()

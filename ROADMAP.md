@@ -20,6 +20,13 @@ the headline custom-command registry — cheaper and safer to build.
 
 ## Discovered during /loop (follow-ups)
 
+- **⚠️ Tests ran on the WRONG Textual for most of this run (found by the Tier-1 #2 review).**
+  The `.venv` has no `pytest`, so `uv run pytest` silently falls back to homebrew Python 3.10 +
+  **Textual 0.47.1** — 6 majors below the pinned `textual>=0.86` (venv has 6.5.0). The suite passed
+  on both, but Textual-version-sensitive code was validated on an unsupported framework. **Fix: use
+  `uv run --extra dev pytest`** (runs the venv/6.5.0). Consider adding pytest to the venv or a
+  Makefile/tox target so the correct runner is the default. (Project memory updated.)
+
 - **Bulk-edit renames are silently dropped but reported as done.** (Surfaced by the 0.8
   arch review.) The live apply path `operation_history.BulkEditOperation.execute` never
   iterates `changes.renames`, yet the preview renders a "Renames" section, `summary()` counts
@@ -34,6 +41,9 @@ the headline custom-command registry — cheaper and safer to build.
 Completed items land here (newest first) with the commit that shipped them. Full
 per-run detail lives in the gitignored `journal/`.
 
+- **Tier 1 · #2 — faithful test harness + Textual pilot.** Shared FakeYouTubeAPIClient (real
+  signatures, `inspect`-guarded), a real app-boot Pilot harness driving the confirm modal, ops
+  integration + takeout parsers. +22 tests. Surfaced that the runner was on the wrong Textual.
 - **Tier 1 · #4 — shared cross-process API quota.** `quota_used` → property backed by a SQLite
   `quota_usage` table (migration v2) keyed to the Pacific reset window; TUI/MCP/CLI share one
   atomic count. `tzdata` dep + lazy/defensive ZoneInfo. +7 tests.
@@ -214,12 +224,17 @@ minimal and safe; everything else is an explicit later slice:
    `NOT_AVAILABLE` (previously refetched forever). The `!= "SUCCESS"` **serve**-checks (mcp:1011,
    mcp search, app export, miller_view) are a *different* question ("do I have a servable body?")
    and are intentionally left alone. +15 tests (`test_transcript_service.py`). *Was Impact High · M.*
-2. **Faithful API-client/cache test harness + cover untested paths.** One shared test
-   double for `YouTubeAPIClient` with real method signatures (ban per-method
-   `MagicMock(name=...)`); integration tests driving `execute_command`/operations against
-   the double + a real temp SQLite cache. Cover `api_client.py`, the command layer,
-   `takeout.py`/`duplicates.py`/`statistics.py` (currently zero direct tests).
-   *Impact High · Effort M-L · no dep · velocity unlock for every later refactor.*
+2. ✅ **DONE (harness) — Faithful API-client/cache test harness + a real TUI pilot.**
+   `tests/fakes.py::FakeYouTubeAPIClient` — a shared double with the REAL `YouTubeAPIClient`
+   signatures + a `test_harness.py` **signature-faithfulness guard** (`inspect.signature`) that
+   fails if the fake drifts, banning the `MagicMock(name=...)` false-confidence mode. A
+   **Textual Pilot harness** (`test_pilot_harness.py`) boots the app headless and drives real
+   keystrokes through `ConfirmationModal` (asserts confirm-vs-cancel) — the harness whose absence
+   let the `:run` modal critical through. Integration test drives the real `DeleteVideosOperation`
+   + `OperationStack` through the fake; `takeout.py` content parsers now covered. +22 tests.
+   **Big discovery:** `uv run pytest` was silently on homebrew Textual 0.47.1, not the pinned
+   6.5.0 — see "Discovered during /loop". *Coverage of the full command layer can grow further,
+   but the harness (the velocity-unlock deliverable) is in.*
 3. **Narrow `except Exception`** project-wide (80 occurrences + 2 bare). Start with
    `operation_history.py` (14) and the api_client-calling handlers; catch real modes
    (`HttpError`, `sqlite3.Error`, `OSError`, `CalledProcessError`) and let
