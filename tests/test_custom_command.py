@@ -14,9 +14,12 @@ import yaml
 from yanger.core import custom_command
 from yanger.core.custom_command import (
     build_command,
+    build_batch_command,
     run_command,
     load_command_registry,
     CommandSpec,
+    MODE_PER_VIDEO,
+    MODE_BATCH,
 )
 from yanger.config.settings import Settings, save_settings
 
@@ -90,6 +93,39 @@ def test_registry_missing_commands_attr_is_empty():
     assert load_command_registry(SimpleNamespace()) == {}
 
 
+# ----- slice 2: long-form specs + batch --------------------------------------------
+
+def test_registry_parses_long_form():
+    settings = SimpleNamespace(commands={
+        "dlall": {"run": "yt-dlp {urls}", "mode": "batch", "confirm": True},
+        "sum": {"run": "yeet {url}"},  # dict without mode/confirm -> defaults
+    })
+    reg = load_command_registry(settings)
+    assert reg["dlall"] == CommandSpec(name="dlall", template="yt-dlp {urls}", mode=MODE_BATCH, confirm=True)
+    assert reg["sum"].mode == MODE_PER_VIDEO and reg["sum"].confirm is False
+
+
+def test_registry_invalid_mode_defaults_per_video():
+    reg = load_command_registry(SimpleNamespace(commands={"x": {"run": "c {url}", "mode": "bacth"}}))
+    assert reg["x"].mode == MODE_PER_VIDEO
+
+
+def test_registry_long_form_without_run_is_skipped():
+    reg = load_command_registry(SimpleNamespace(commands={"bad": {"mode": "batch"}}))
+    assert "bad" not in reg
+
+
+def test_build_batch_command_substitutes_urls_and_ids():
+    vids = [SimpleNamespace(id="a"), SimpleNamespace(id="b b")]  # space forces quoting
+    assert "watch?v=a" in build_batch_command("dl {urls}", vids)
+    assert "'b b'" in build_batch_command("tool {ids}", vids)
+
+
+def test_build_batch_command_appends_urls_when_no_placeholder():
+    cmd = build_batch_command("archivebox add", [SimpleNamespace(id="a")])
+    assert cmd.startswith("archivebox add ") and "watch?v=a" in cmd
+
+
 # ----- Settings plumbing (all four touch-points) ----------------------------------
 
 def test_settings_from_dict_parses_commands_lowercased_and_skips_nonstring():
@@ -111,6 +147,14 @@ def test_settings_save_roundtrips_commands(tmp_path):
     assert written["commands"] == {"dl": "yt-dlp {url}"}
     # And it loads back.
     assert Settings.from_dict(written).commands == {"dl": "yt-dlp {url}"}
+
+
+def test_settings_accepts_and_roundtrips_long_form(tmp_path):
+    s = Settings.from_dict({"commands": {"dlall": {"run": "yt-dlp {urls}", "mode": "batch"}}})
+    assert s.commands["dlall"] == {"run": "yt-dlp {urls}", "mode": "batch"}
+    save_settings(s, config_dir=tmp_path)
+    written = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert written["commands"]["dlall"]["mode"] == "batch"
 
 
 # ----- transcript_command delegation (dedup) --------------------------------------

@@ -92,6 +92,9 @@ per-run detail lives in the gitignored `journal/`.
   `fetch_and_cache_transcript` service; read gate → one `should_refetch`. Kills the duplication
   class behind §0; mcp `get_transcript` now caches `NOT_AVAILABLE` + recovers legacy poisoned rows.
   Net −118/+151 (the +151 is mostly tests). +15 tests, suite 238 green. Dual-reviewed PASS.
+- **★ Headline slice 2 — long-form commands + batch.** `commands:` now accepts
+  `{run, mode: per-video|batch, confirm: true}`; batch runs one `{urls}`/`{ids}` invocation over the
+  selection; `confirm: true` always prompts. +12 tests. Reviewed PASS (batch quoting = shlex.join-safe).
 - **★ Headline v1 — custom-command registry + `:run`.** YAML `commands: {name: template}` +
   `YANGER_CMD_<NAME>` env → `:run <name>` on marked-else-current, per-video, with a
   confirm gate over 5 videos. Core builder/runner shared with `:transcript` (delegation, no
@@ -211,12 +214,15 @@ minimal and safe; everything else is an explicit later slice:
   **per-video only**. Generic `build_command`/`run_command` live in `core/custom_command.py`;
   `core/transcript_command.py` **delegates** to them (dedup, not a hand-copy). Confirm modal when
   selection > threshold. `:run`/`:run <unknown>` surface available names.
-- **Deliberately deferred (critic-flagged):** injecting `transcript_command` into the registry
-  (dual-source-of-truth divergence — back-compat already lives in the untouched `:transcript`
-  branch); long-form `{run,mode,confirm}` dict; **batch** mode (`{urls}`/`{ids}`/stdin — least
-  specified, ARG_MAX, riskiest); `{title}` (uploader-controlled → wider injection surface);
-  `:set commands.<name>` persistence (doesn't fit the scalar `save_user_setting` shape — users edit
-  `config.yaml` directly); tab-completion. → **slice 1b**.
+- **✅ slice 2 DONE:** long-form `{run, mode, confirm}` dict (mode validated; unknown → per-video);
+  **batch** mode (`{urls}`/`{ids}` argv, `shlex`-quoted = `shlex.join`-safe, confirmed on large
+  selections to guard ARG_MAX); `confirm: true` always prompts. +12 tests, review PASS (batch
+  injection posture verified equivalent to per-video).
+- **Still deferred:** injecting `transcript_command` into the registry (dual-source-of-truth —
+  back-compat lives in the untouched `:transcript` branch); batch **stdin** (only argv shipped);
+  `{title}` (uploader-controlled → wider injection surface); `:set commands.<name>` persistence
+  (users edit `config.yaml` directly); tab-completion; the **gated MCP `run_custom_command` tool**
+  (wants the Tier-2 opt-in/elicitation gate).
 - **Note:** `Settings.commands` must be wired at all **four** touch-points (field, `from_dict`,
   `merge`'s section list, `save_settings`) or `commands:` is silently dropped.
 

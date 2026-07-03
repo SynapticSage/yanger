@@ -14,7 +14,7 @@ import pytest
 
 import yanger.app as appmod
 from yanger.app import YouTubeRangerApp, RUN_CONFIRM_THRESHOLD
-from yanger.core.custom_command import CommandSpec
+from yanger.core.custom_command import CommandSpec, MODE_BATCH
 
 
 def _video(vid):
@@ -94,6 +94,15 @@ async def test_name_is_case_insensitive():
     assert len(app.ran) == 1 and app.ran[0][0].name == "dl"
 
 
+async def test_confirm_true_command_prompts_even_for_one_video():
+    """slice 2: a `confirm: true` command shows the modal even below the size threshold."""
+    app = _fake_app(commands={"rm": {"run": "rm {url}", "confirm": True}}, selection=[_video("a")])
+    await YouTubeRangerApp.handle_run_command(app, ["rm"])
+    assert app.ran == []               # not run directly
+    assert len(app.pushed) == 1        # confirmed despite a single video
+    assert app._pending_run_spec.confirm is True
+
+
 # ----- run_custom_command execution + reporting --------------------------------
 
 def _runner_app(exit_codes):
@@ -111,7 +120,7 @@ async def test_run_custom_command_all_success(monkeypatch):
     app = _runner_app([0, 0])
     spec = CommandSpec(name="dl", template="yt-dlp {url}")
     await YouTubeRangerApp.run_custom_command(app, spec, [_video("a"), _video("b")])
-    assert "finished on 2 video(s)" in app.notes[-1][0] and app.notes[-1][1] is False
+    assert "finished (2 video(s))" in app.notes[-1][0] and app.notes[-1][1] is False
 
 
 async def test_run_custom_command_reports_failures(monkeypatch):
@@ -119,7 +128,18 @@ async def test_run_custom_command_reports_failures(monkeypatch):
     app = _runner_app([1])
     spec = CommandSpec(name="dl", template="yt-dlp {url}")
     await YouTubeRangerApp.run_custom_command(app, spec, [_video("a")])
-    assert "1 of 1 exited non-zero" in app.notes[-1][0] and app.notes[-1][1] is True
+    assert "1 of 1 run(s) exited non-zero" in app.notes[-1][0] and app.notes[-1][1] is True
+
+
+async def test_run_custom_command_batch_is_single_invocation(monkeypatch):
+    """slice 2: a batch command runs ONCE over the whole selection (not per-video)."""
+    seen = []
+    monkeypatch.setattr(appmod, "run_command", lambda cmd: seen.append(cmd) or 0)
+    app = _runner_app([0])
+    spec = CommandSpec(name="dlall", template="yt-dlp {urls}", mode=MODE_BATCH)
+    await YouTubeRangerApp.run_custom_command(app, spec, [_video("a"), _video("b")])
+    assert len(seen) == 1
+    assert "watch?v=a" in seen[0] and "watch?v=b" in seen[0]
 
 
 async def test_run_custom_command_builds_quoted_command(monkeypatch):

@@ -17,8 +17,16 @@ are ``shlex.quote``d. Placeholders must sit as standalone arguments, not inside 
 import os
 import shlex
 import subprocess
+import logging
 from dataclasses import dataclass
 from typing import Dict
+
+logger = logging.getLogger(__name__)
+
+# Command execution modes.
+MODE_PER_VIDEO = "per-video"
+MODE_BATCH = "batch"
+_VALID_MODES = frozenset({MODE_PER_VIDEO, MODE_BATCH})
 
 # {id} -> raw YouTube video id; expands to the standard watch URL for {url}.
 YOUTUBE_WATCH_URL = "https://www.youtube.com/watch?v={id}"
@@ -45,6 +53,24 @@ def build_command(template: str, video) -> str:
     return cmd
 
 
+def build_batch_command(template: str, videos) -> str:
+    """Substitute ``{urls}`` / ``{ids}`` for a SINGLE batch invocation over a selection.
+
+    Each url/id is ``shlex.quote``d and the set is space-joined (argv style, for tools like
+    ``xargs``/``fabric``). If the template references neither placeholder, the quoted URLs are
+    appended. Argv-only (no stdin in this slice); a very large selection can exceed ARG_MAX, so
+    ``:run`` confirms before running a big batch.
+    """
+    urls = " ".join(shlex.quote(YOUTUBE_WATCH_URL.format(id=v.id)) for v in videos)
+    ids = " ".join(shlex.quote(v.id) for v in videos)
+
+    has_placeholder = "{urls}" in template or "{ids}" in template
+    cmd = template.replace("{urls}", urls).replace("{ids}", ids)
+    if not has_placeholder:
+        cmd = f"{cmd} {urls}"
+    return cmd
+
+
 def run_command(cmd: str) -> int:
     """Run a resolved command via the shell and return its exit code.
 
@@ -56,9 +82,16 @@ def run_command(cmd: str) -> int:
 
 @dataclass
 class CommandSpec:
-    """One named custom command. v1 is a bare shell template (per-video)."""
+    """One named custom command.
+
+    Bare string config ⇒ ``{template, mode=per-video, confirm=False}``. Long-form config
+    (``{run, mode, confirm}``) sets ``mode`` (``per-video`` runs once per selected video;
+    ``batch`` runs once with ``{urls}``/``{ids}``) and ``confirm`` (always prompt before running).
+    """
     name: str      # normalized (lowercase) registry key
-    template: str  # the shell template, with optional {url}/{id} placeholders
+    template: str  # the shell template, with optional {url}/{id} (or {urls}/{ids}) placeholders
+    mode: str = MODE_PER_VIDEO
+    confirm: bool = False
 
 
 def load_command_registry(settings) -> Dict[str, CommandSpec]:
@@ -72,11 +105,29 @@ def load_command_registry(settings) -> Dict[str, CommandSpec]:
     registry: Dict[str, CommandSpec] = {}
 
     raw = getattr(settings, "commands", None) or {}
-    for name, template in raw.items():
-        if isinstance(template, str) and template.strip():
-            key = str(name).strip().lower()
-            if key:
-                registry[key] = CommandSpec(name=key, template=template)
+    for name, spec in raw.items():
+        key = str(name).strip().lower()
+        if not key:
+            continue
+        if isinstance(spec, str):
+            if spec.strip():
+                registry[key] = CommandSpec(name=key, template=spec)
+        elif isinstance(spec, dict):
+            template = spec.get("run", "")
+            if not (isinstance(template, str) and template.strip()):
+                logger.warning(f"custom command '{key}': long-form requires a non-empty 'run' string; skipped")
+            else:
+                mode = str(spec.get("mode", MODE_PER_VIDEO)).strip().lower()
+                if mode not in _VALID_MODES:
+                    logger.warning(
+                        f"custom command '{key}': unknown mode '{mode}' (use per-video|batch); "
+                        f"defaulting to {MODE_PER_VIDEO}"
+                    )
+                    mode = MODE_PER_VIDEO
+                registry[key] = CommandSpec(
+                    name=key, template=template, mode=mode,
+                    confirm=bool(spec.get("confirm", False)),
+                )
 
     # Env overrides / additions (runtime only; never persisted).
     for env_key, value in os.environ.items():

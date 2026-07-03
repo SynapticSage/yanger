@@ -78,3 +78,12 @@ youtube:
   quota_warning_threshold: 7500 # 75%
   quota_critical_threshold: 9000 # 90%
 
+
+# User-defined custom commands, run with `:run <name>` on the current or marked videos.
+# Placeholders are shell-quoted before injection: {url} / {id} (per-video), {urls} / {ids}
+# (batch, one invocation over the whole selection). Also settable via YANGER_CMD_<NAME> env.
+# commands:
+#   dl:  "yt-dlp {url}"                       # bare string => per-video
+#   sum: "yeet {url} | fabric -sp summarize"  # pipes work (shell=True; your own config)
+#   dlall: { run: "yt-dlp {urls}", mode: batch }   # one yt-dlp for the whole selection
+#   wipe:  { run: "trash {url}", confirm: true }    # always prompt before running

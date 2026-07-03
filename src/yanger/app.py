@@ -36,7 +36,7 @@ from .core.transcript_command import (
     resolve_transcript_command,
     run_transcript_command,
 )
-from .core.custom_command import load_command_registry, run_command
+from .core.custom_command import load_command_registry, run_command, build_batch_command, MODE_BATCH
 from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation, BulkEditOperation
 from .command_logger import CommandLogger
 from .export import PlaylistExporter
@@ -2201,8 +2201,9 @@ class YouTubeRangerApp(App):
             self._notify_status("No video selected", error=True)
             return
 
-        if len(videos) > RUN_CONFIRM_THRESHOLD:
-            # Large selection: confirm before running the user's shell on all of them.
+        if spec.confirm or len(videos) > RUN_CONFIRM_THRESHOLD:
+            # Confirm before running the user's shell: a `confirm: true` command always, or any
+            # selection larger than the threshold (also guards a big batch against ARG_MAX).
             self._pending_run_spec = spec
             self._pending_run_videos = videos
             modal = ConfirmationModal(
@@ -2219,13 +2220,18 @@ class YouTubeRangerApp(App):
             await self.run_custom_command(spec, videos)
 
     async def run_custom_command(self, spec, videos: List[Video]) -> None:
-        """Run ``spec`` on each video inside a single suspend() block; report failures.
+        """Run ``spec`` over ``videos`` inside a single suspend() block; report failures.
 
-        Per-video (v1): one command per video, run sequentially so interactive/streaming
-        tools render in the terminal. suspend() wraps the WHOLE loop (not each video) to
-        avoid N screen flickers. Injected {url}/{id} are shlex-quoted by build_command.
+        - ``per-video``: one command per video, run sequentially (interactive/streaming tools
+          render in the terminal).
+        - ``batch``: ONE command with ``{urls}``/``{ids}`` for the whole selection.
+        suspend() wraps the WHOLE run (not each command) to avoid screen flicker. All injected
+        url/id are shlex-quoted by build_command/build_batch_command.
         """
-        cmds = [build_command(spec.template, v) for v in videos]
+        if spec.mode == MODE_BATCH:
+            cmds = [build_batch_command(spec.template, videos)]
+        else:
+            cmds = [build_command(spec.template, v) for v in videos]
         exit_codes: List[int] = []
         try:
             with self.suspend():
@@ -2241,10 +2247,11 @@ class YouTubeRangerApp(App):
 
         failures = [rc for rc in exit_codes if rc != 0]
         if not failures:
-            self._notify_status(f"'{spec.name}' finished on {len(videos)} video(s)")
+            self._notify_status(f"'{spec.name}' finished ({len(videos)} video(s))")
         else:
+            # Denominator is invocation count (batch = 1 run over N videos).
             self._notify_status(
-                f"'{spec.name}': {len(failures)} of {len(videos)} exited non-zero", error=True
+                f"'{spec.name}': {len(failures)} of {len(cmds)} run(s) exited non-zero", error=True
             )
 
     def handle_set_command(self, args: List[str]) -> None:

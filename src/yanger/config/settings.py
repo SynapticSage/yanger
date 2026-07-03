@@ -128,9 +128,11 @@ class Settings:
     cache: CacheSettings = field(default_factory=CacheSettings)
     transcripts: TranscriptSettings = field(default_factory=TranscriptSettings)
     youtube: YouTubeSettings = field(default_factory=YouTubeSettings)
-    # User-defined custom-command registry: name -> shell template (the ★ headline feature).
-    # A plain dict, not a section dataclass, so from_dict/merge/save handle it explicitly.
-    commands: Dict[str, str] = field(default_factory=dict)
+    # User-defined custom-command registry: name -> shell template (str) OR a long-form
+    # {run, mode, confirm} dict (the ★ headline feature). A plain dict, not a section
+    # dataclass, so from_dict/merge/save handle it explicitly. Interpreted by
+    # core.custom_command.load_command_registry.
+    commands: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Settings':
@@ -175,17 +177,15 @@ class Settings:
                 if hasattr(settings.youtube, key):
                     setattr(settings.youtube, key, value)
 
-        # Custom-command registry (name -> shell template). v1 accepts bare strings only;
-        # non-string values (future long-form {run, mode, confirm} dicts) are skipped with a
-        # warning so one bad entry can't break config load. Keys are normalized lowercase.
+        # Custom-command registry (name -> shell template str, or a {run, mode, confirm} dict).
+        # Stored as-is (lowercased key); load_command_registry validates/normalizes. A bad entry
+        # (neither str nor dict) is skipped with a warning so it can't break config load.
         if 'commands' in data and isinstance(data['commands'], dict):
-            for name, template in data['commands'].items():
-                if isinstance(template, str):
-                    settings.commands[str(name).lower()] = template
+            for name, spec in data['commands'].items():
+                if isinstance(spec, (str, dict)):
+                    settings.commands[str(name).lower()] = spec
                 else:
-                    logger.warning(
-                        f"Skipping custom command '{name}': long-form (mode/confirm) not yet supported"
-                    )
+                    logger.warning(f"Skipping custom command '{name}': expected a string or a mapping")
 
         return settings
     
