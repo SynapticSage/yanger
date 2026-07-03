@@ -81,6 +81,17 @@ async def test_help_is_modal_and_owns_the_keyboard(app_pilot):
     assert not isinstance(app.screen, HelpOverlay)          # dismissed back to the base screen
 
 
+@pytest.mark.parametrize("dismiss_key", ["escape", "q", "question_mark"])
+async def test_help_dismiss_keys(app_pilot, dismiss_key):
+    app, pilot = app_pilot
+    app.action_help()
+    await pilot.pause()
+    assert isinstance(app.screen, HelpOverlay)
+    await pilot.press(dismiss_key)
+    await pilot.pause()
+    assert not isinstance(app.screen, HelpOverlay)
+
+
 async def test_command_input_is_on_screen_when_typing(app_pilot):
     """Regression for the 'can't see what I'm typing' bug: the command Input was composited
     off-screen (rows 30-31 on a 30-row screen) by a dock collision + internal margin. Assert

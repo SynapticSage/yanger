@@ -20,7 +20,21 @@ the headline custom-command registry — cheaper and safer to build.
 
 ## Discovered during /loop (follow-ups)
 
-- **🐞 Overlays don't take focus / render — HIGH user-visible (reported 2026-07-02, "never resolved").**
+- **✅ RESOLVED — Overlays don't take focus / render (reported 2026-07-02, "never resolved").**
+  Turned out to be TWO different failure modes (the pilot harness, Tier-1 #2, diagnosed both by
+  booting the app and measuring widget regions):
+  - **(a) command input invisible → FIXED (layout, not CSS).** The `Input` was composited
+    *off-screen* (rows 30-31 on a 30-row terminal): `#command-input` and `#status-bar` both
+    `dock: bottom` collided, and an internal `margin-top` pushed the Input below the viewport.
+    Fix: `#command-input` `margin-bottom: 1` (sit above the status bar) + drop the Input `margin-top`
+    / container `border-top`. The wall of `!important` colour CSS was treating the wrong disease.
+  - **(b) help ignores arrow/j/k → FIXED (ModalScreen).** `HelpOverlay` is now a `ModalScreen`
+    (pushed via `action_help`) that owns the keyboard: focuses its scroll area, scrolls on
+    arrow/j/k/pgup/pgdn/home/end, dismisses on escape/?/q, and `event.stop()`s every key so nothing
+    leaks to the miller view. Removed the embedded widget + dead `show_help` reactive.
+  - Both verified with render-aware pilot tests (on-screen region / focus ownership), reviewed PASS
+    (robust down to a 4-row terminal). Commits `8bc8af9`, `e4c3239`. _Original diagnosis kept below._
+
   Two symptoms, **one root cause**: `CommandInput` and `HelpOverlay` are CSS-`display`-toggled
   `Container`s embedded in the main `compose()` (`app.py:154,165`), NOT `ModalScreen`s on the screen
   stack — so the app's `on_key` and the miller view keep keyboard focus behind them.
@@ -61,6 +75,9 @@ the headline custom-command registry — cheaper and safer to build.
 Completed items land here (newest first) with the commit that shipped them. Full
 per-run detail lives in the gitignored `journal/`.
 
+- **TUI overlay bugs (user-reported) — command input visible while typing + help modal owns the
+  keyboard.** Command input off-screen fixed via layout (margin-bottom); `HelpOverlay` → `ModalScreen`.
+  +4 render-aware pilot tests. Commits `8bc8af9`, `e4c3239`.
 - **Tier 1 · #3 (started) — narrow except.** 2 bare `except:` in takeout + all 14
   `operation_history` handlers → `(HttpError, QuotaExceededError)`; bugs now propagate. +2 tests.
 - **Tier 1 · #2 — faithful test harness + Textual pilot.** Shared FakeYouTubeAPIClient (real
