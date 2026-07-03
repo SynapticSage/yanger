@@ -76,7 +76,6 @@ class YouTubeRangerApp(App):
     ]
     
     # Reactive attributes
-    show_help = reactive(False)
     command_mode = reactive(False)
     
     def __init__(self, 
@@ -138,7 +137,6 @@ class YouTubeRangerApp(App):
         # UI components
         self.miller_view: Optional[MillerView] = None
         self.status_bar: Optional[StatusBar] = None
-        self.help_overlay: Optional[HelpOverlay] = None
         self.command_input: Optional[CommandInput] = None
         
     def compose(self) -> ComposeResult:
@@ -160,10 +158,8 @@ class YouTubeRangerApp(App):
         
         # Status bar at bottom (below command input when visible)
         yield StatusBar(id="status-bar")
-        
-        # Help overlay (hidden by default)
-        self.help_overlay = HelpOverlay()
-        yield self.help_overlay
+
+        # Help is a ModalScreen pushed on demand (see action_help), not an embedded widget.
     
     @staticmethod
     def _resolve_colorscheme_theme(colorscheme: str, available_themes) -> Optional[str]:
@@ -708,8 +704,7 @@ class YouTubeRangerApp(App):
         """Show help overlay."""
         if self.command_logger:
             self.command_logger.log_action("show_help")
-        if self.help_overlay:
-            self.help_overlay.show()
+        self.push_screen(HelpOverlay())
     
     def action_open_in_browser(self) -> None:
         """Open selected video(s) or playlist in browser."""

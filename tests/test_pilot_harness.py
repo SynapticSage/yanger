@@ -9,8 +9,11 @@ keystrokes through the real screen stack.
 import pytest
 import pytest_asyncio
 
+from textual.containers import ScrollableContainer
+
 from yanger.app import YouTubeRangerApp
 from yanger.ui.confirmation_modal import ConfirmationModal
+from yanger.ui.help_overlay import HelpOverlay
 
 
 @pytest_asyncio.fixture
@@ -52,6 +55,30 @@ async def test_confirm_modal_y_confirms_via_keyboard(app_pilot):
     await pilot.pause()
     assert not isinstance(app.screen, ConfirmationModal)
     assert results == [True]  # 'y' CONFIRMED, not merely dismissed
+
+
+async def test_help_is_modal_and_owns_the_keyboard(app_pilot):
+    """Regression for 'help ignores arrow/j/k': help is now a ModalScreen that captures focus,
+    so its scroll area (not the miller view behind it) receives navigation keys."""
+    app, pilot = app_pilot
+    app.action_help()
+    await pilot.pause()
+
+    assert isinstance(app.screen, HelpOverlay)             # a real modal on the stack now
+    scroll = app.screen.query_one(ScrollableContainer)
+    assert app.focused is scroll                            # focus moved to the help, not the list
+
+    await pilot.press("end")                                # content is longer than the modal
+    await pilot.pause()
+    assert scroll.scroll_offset.y > 0                       # it actually scrolled
+
+    await pilot.press("k")                                  # a nav key is consumed, stays modal
+    await pilot.pause()
+    assert isinstance(app.screen, HelpOverlay)
+
+    await pilot.press("escape")
+    await pilot.pause()
+    assert not isinstance(app.screen, HelpOverlay)          # dismissed back to the base screen
 
 
 async def test_command_input_is_on_screen_when_typing(app_pilot):
