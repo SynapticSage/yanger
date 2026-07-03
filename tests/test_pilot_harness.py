@@ -54,6 +54,27 @@ async def test_confirm_modal_y_confirms_via_keyboard(app_pilot):
     assert results == [True]  # 'y' CONFIRMED, not merely dismissed
 
 
+async def test_command_input_is_on_screen_when_typing(app_pilot):
+    """Regression for the 'can't see what I'm typing' bug: the command Input was composited
+    off-screen (rows 30-31 on a 30-row screen) by a dock collision + internal margin. Assert
+    the rendered region is on-screen AND not covered, and that typed text echoes into it."""
+    app, pilot = app_pilot
+    app.action_command_mode()
+    await pilot.pause()
+
+    iw = app.query_one("#command-input").input_widget
+    assert iw.region.height > 0
+    assert iw.region.bottom <= app.size.height, f"Input off-screen: {iw.region}"
+    # The Input's own center must hit the Input (before the fix this raised NoWidget /
+    # returned the status bar, i.e. it was hidden behind/below other widgets).
+    widget, _ = app.screen.get_widget_at(*iw.region.center)
+    assert widget is iw
+
+    await pilot.press("g", "t")
+    await pilot.pause()
+    assert "gt" in iw.value  # typed chars land in (and render in) the visible input
+
+
 async def test_confirm_modal_escape_cancels(app_pilot):
     app, pilot = app_pilot
     results = []
