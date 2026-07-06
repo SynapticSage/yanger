@@ -174,14 +174,26 @@ class YouTubeRangerApp(App):
             return colorscheme
         return None
 
-    async def on_mount(self) -> None:
-        """Initialize the application after mounting."""
-        # Apply the configured colorscheme to Textual's native theme system.
+    def _apply_colorscheme(self) -> None:
+        """Apply settings.ui.colorscheme to Textual's native theme system, if available.
+
+        `available_themes` was added in Textual 0.86; an OLDER *installed* Textual raises
+        AttributeError here and would crash startup (the pyproject `>=0.86` pin does NOT upgrade
+        an already-installed environment). Guard at runtime and degrade to the built-in theme.
+        """
+        try:
+            available_themes = self.available_themes
+        except AttributeError:
+            available_themes = {}
         theme = self._resolve_colorscheme_theme(
-            getattr(self.settings.ui, "colorscheme", "default"), self.available_themes
+            getattr(self.settings.ui, "colorscheme", "default"), available_themes
         )
         if theme:
             self.theme = theme
+
+    async def on_mount(self) -> None:
+        """Initialize the application after mounting."""
+        self._apply_colorscheme()
         try:
             # Best-effort: ensure our CSS is loaded even when running from a
             # different working directory (e.g. editable installs, tests)
