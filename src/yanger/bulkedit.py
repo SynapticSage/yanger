@@ -320,105 +320,6 @@ class BulkEditParser:
         return changes
 
 
-class BulkEditExecutor:
-    """Executes bulk edit changes via YouTube API."""
-
-    def __init__(self, api_client):
-        """Initialize executor.
-
-        Args:
-            api_client: YouTubeAPIClient instance
-        """
-        self.api_client = api_client
-
-    async def execute(self, changes: BulkEditChanges,
-                     dry_run: bool = False) -> Dict[str, any]:
-        """Execute bulk edit changes.
-
-        Args:
-            changes: Changes to apply
-            dry_run: If True, don't actually make changes
-
-        Returns:
-            Dict with execution results
-        """
-        results = {
-            'success': [],
-            'failed': [],
-            'skipped': []
-        }
-
-        if dry_run:
-            logger.info("DRY RUN - No changes will be made")
-
-        # The api_client methods below are SYNCHRONOUS, so they are not awaited.
-        # Process deletions first
-        for video, playlist_id in changes.deletions:
-            try:
-                if not dry_run:
-                    self.api_client.remove_video_from_playlist(
-                        video.playlist_item_id
-                    )
-                results['success'].append(
-                    f"Deleted '{video.title}' from playlist"
-                )
-            except Exception as e:
-                results['failed'].append(
-                    f"Failed to delete '{video.title}': {e}"
-                )
-
-        # Process moves (these implicitly handle position)
-        for move in changes.moves:
-            try:
-                if not dry_run:
-                    # Add to target playlist
-                    self.api_client.add_video_to_playlist(
-                        move.video.id,
-                        move.target_playlist_id,
-                        position=move.new_position
-                    )
-                    # Remove from source playlist
-                    self.api_client.remove_video_from_playlist(
-                        move.video.playlist_item_id
-                    )
-                results['success'].append(
-                    f"Moved '{move.video.title}' to different playlist"
-                )
-            except Exception as e:
-                results['failed'].append(
-                    f"Failed to move '{move.video.title}': {e}"
-                )
-
-        # Process reorders within playlists
-        for reorder in sorted(changes.reorders, key=lambda r: r.new_position):
-            try:
-                if not dry_run:
-                    self.api_client.update_video_position(
-                        reorder.video.playlist_item_id,
-                        reorder.playlist_id,
-                        reorder.video.id,
-                        reorder.new_position
-                    )
-                results['success'].append(
-                    f"Reordered '{reorder.video.title}' to position {reorder.new_position}"
-                )
-            except Exception as e:
-                results['failed'].append(
-                    f"Failed to reorder '{reorder.video.title}': {e}"
-                )
-
-        # Process renames
-        for rename in changes.renames:
-            # Note: YouTube API doesn't support renaming videos/playlists directly
-            # This would need special handling or could be skipped
-            results['skipped'].append(
-                f"Rename of {rename.item_type} '{rename.old_name}' to '{rename.new_name}' "
-                f"(not supported by YouTube API)"
-            )
-
-        return results
-
-
 class BulkEditor:
     """Main bulk edit coordinator."""
 
@@ -431,7 +332,9 @@ class BulkEditor:
         self.api_client = api_client
         self.generator = BulkEditGenerator()
         self.parser = BulkEditParser()
-        self.executor = BulkEditExecutor(api_client)
+        # NB: the app applies bulk edits via operation_history.BulkEditOperation (so they
+        # participate in undo/redo). There is deliberately no executor here — a former
+        # BulkEditExecutor duplicated that apply logic on a path the app never called.
 
     def launch_editor(self, content: str) -> Optional[str]:
         """Launch text editor with content.

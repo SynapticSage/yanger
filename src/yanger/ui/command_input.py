@@ -63,7 +63,6 @@ class CommandInput(Container):
         height: 3;
         display: none;
         background: $surface;
-        border-top: solid $accent;
         padding: 0 1;
     }
     
@@ -74,11 +73,10 @@ class CommandInput(Container):
     CommandInput > Input {
         width: 100%;
         height: 1;
-        margin-top: 1;
         color: white !important;
         background: black !important;
         text-style: not dim !important;
-        border: tall $accent;
+        border: none;
     }
     
     CommandInput > Input:focus {

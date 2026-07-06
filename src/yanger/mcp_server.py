@@ -38,7 +38,11 @@ except ImportError:
 from .auth import YouTubeAuth, resolve_token_file, resolve_client_secrets_file
 from .api_client import YouTubeAPIClient, QuotaExceededError
 from .cache import PersistentCache
-from .core.transcript_fetcher import TranscriptFetcher
+from .core.transcript_fetcher import (
+    TranscriptFetcher,
+    fetch_and_cache_transcript,
+    should_refetch,
+)
 from .core.proxy import ProxySettings as CoreProxySettings
 from .config.settings import load_settings
 from .models import Playlist, Video, PrivacyStatus
@@ -57,11 +61,8 @@ DEFAULT_TRANSCRIPT_MAX_CHARS = 20000
 # batch responsive without spawning an unbounded swarm of LLM subprocesses.
 FABRIC_BATCH_CONCURRENCY = 4
 
-# Only these transcript failure statuses are permanent and safe to cache. Transient
-# failures (IP_BLOCKED, ERROR/ERROR:...) must NOT be cached: caching them would make
-# skip_cached and get_transcript skip the video forever, so a proxy configured AFTER
-# a block could never recover it. Leaving them uncached lets a later run retry.
-TERMINAL_TRANSCRIPT_STATUSES = frozenset({"NOT_AVAILABLE"})
+# Transcript fetch+cache and its terminal-vs-transient policy now live in one place:
+# core.transcript_fetcher.fetch_and_cache_transcript (Tier 1 #1). Callers here just invoke it.
 
 
 class YangerMCPServer:
@@ -145,8 +146,9 @@ class YangerMCPServer:
             token_file=str(token_file),
         )
         auth.authenticate()
-        self.api_client = YouTubeAPIClient(auth)
+        # Cache first so it can back the shared, cross-process quota counter.
         self.cache = PersistentCache()
+        self.api_client = YouTubeAPIClient(auth, quota_store=self.cache)
 
         # Load proxy settings and create transcript fetcher
         proxy_settings = self._load_proxy_settings()
@@ -1002,9 +1004,12 @@ class YangerMCPServer:
             proxy_settings = self._load_proxy_settings()
             self.transcript_fetcher = TranscriptFetcher(proxy_settings=proxy_settings)
 
-        # Check cache first (SQLite read offloaded off the event loop)
+        # Check cache first (SQLite read offloaded off the event loop). Serve a cached row
+        # only if it is FINAL (SUCCESS or terminal); should_refetch lets a legacy poisoned
+        # transient row (pre-§0 IP_BLOCKED/ERROR) fall through to a fresh fetch instead of
+        # being served as a permanent error — same read policy as the TUI.
         cached = await asyncio.to_thread(self.cache.get_transcript, video_id)
-        if cached:
+        if cached and not should_refetch(cached.get("fetch_status")):
             # A cached failure (e.g. NOT_AVAILABLE) stores no transcript body, so
             # surface it instead of json.loads(None) / an empty text dump.
             if cached.get("fetch_status") != "SUCCESS":
@@ -1031,9 +1036,11 @@ class YangerMCPServer:
                 "truncated": truncated,
             }
 
-        # Fetch fresh transcript (network I/O — must not block the event loop)
+        # Fetch fresh + apply the shared cache-write policy off the event loop. Unlike the
+        # old inline code, this also caches a terminal NOT_AVAILABLE (no more refetch-forever)
+        # while still leaving transient IP_BLOCKED/ERROR uncached for retry.
         transcript, status = await asyncio.to_thread(
-            self.transcript_fetcher.fetch_transcript, video_id
+            fetch_and_cache_transcript, self.transcript_fetcher, self.cache, video_id
         )
 
         if transcript is None:
@@ -1042,19 +1049,6 @@ class YangerMCPServer:
                 "error": status,
                 "message": "Transcript not available for this video",
             }
-
-        # Cache it (SQLite write offloaded off the event loop)
-        await asyncio.to_thread(
-            self.cache.cache_transcript,
-            video_id=video_id,
-            transcript_text=TranscriptFetcher.compress_transcript(
-                TranscriptFetcher.format_as_text(transcript)
-            ),
-            transcript_json=TranscriptFetcher.format_as_json(transcript),
-            language=transcript.language,
-            auto_generated=transcript.auto_generated,
-            fetch_status="SUCCESS",
-        )
 
         if format_type == "json":
             return {
@@ -1442,45 +1436,26 @@ class YangerMCPServer:
         failed = []
 
         for video_id in video_ids:
-            # Check cache if skip_cached is enabled
+            # Check cache if skip_cached is enabled. Skip only FINAL rows; a legacy
+            # poisoned transient row is refetched (same read policy as should_refetch).
             if skip_cached:
                 cached = self.cache.get_transcript(video_id)
-                if cached:
+                if cached and not should_refetch(cached.get("fetch_status")):
                     skipped.append(video_id)
                     continue
 
-            # Fetch transcript
-            transcript, status = self.transcript_fetcher.fetch_transcript(video_id)
+            # Fetch + apply the shared cache-write policy (SUCCESS cached; terminal
+            # NOT_AVAILABLE cached; transient IP_BLOCKED/ERROR left uncached for retry).
+            transcript, status = fetch_and_cache_transcript(
+                self.transcript_fetcher, self.cache, video_id
+            )
 
             if transcript:
-                # Cache it
-                self.cache.cache_transcript(
-                    video_id=video_id,
-                    transcript_text=TranscriptFetcher.compress_transcript(
-                        TranscriptFetcher.format_as_text(transcript)
-                    ),
-                    transcript_json=TranscriptFetcher.format_as_json(transcript),
-                    language=transcript.language,
-                    auto_generated=transcript.auto_generated,
-                    fetch_status="SUCCESS",
-                )
                 fetched.append({
                     "video_id": video_id,
                     "language": transcript.language,
                 })
             else:
-                # Cache ONLY terminal failures (NOT_AVAILABLE). Transient failures
-                # (IP_BLOCKED / ERROR) are left uncached so a later run — e.g. after
-                # the user configures a proxy — can retry them.
-                if status in TERMINAL_TRANSCRIPT_STATUSES:
-                    self.cache.cache_transcript(
-                        video_id=video_id,
-                        transcript_text=None,
-                        transcript_json=None,
-                        language=None,
-                        auto_generated=False,
-                        fetch_status=status,
-                    )
                 failed.append({
                     "video_id": video_id,
                     "reason": status,

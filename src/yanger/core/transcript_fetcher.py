@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Only these transcript failure statuses are permanent and safe to cache. Transient
+# failures (IP_BLOCKED, ERROR/ERROR:...) must NOT be cached: caching them would make
+# skip_cached / get_transcript / the TUI auto-fetch skip the video forever, so a proxy
+# configured AFTER a block could never recover it. Leaving them uncached lets a later
+# run retry. Owned here (where fetch_transcript emits the statuses) so every caller —
+# app.py, mcp_server.py — shares one definition instead of hand-copying it.
+TERMINAL_TRANSCRIPT_STATUSES = frozenset({"NOT_AVAILABLE"})
+
 
 @dataclass
 class TranscriptSegment:
@@ -276,3 +284,61 @@ class TranscriptFetcher:
         header = f"Transcript ({transcript.language}, {type_str}):\n"
 
         return header + text
+
+
+def fetch_and_cache_transcript(fetcher: "TranscriptFetcher", cache, video_id: str):
+    """Fetch a transcript and apply the single cache-write policy (Tier 1 #1).
+
+    One place owns fetch → format/compress → cache + the terminal-vs-transient rule,
+    replacing four hand-copied copies (app.py auto/manual, mcp_server get/batch) that had
+    already diverged (the §0 bug lived in one; mcp ``get_transcript`` never cached
+    ``NOT_AVAILABLE`` at all → refetched forever). The write invariant is now single-sourced.
+
+    ``cache`` is INJECTED (any object with ``cache_transcript(...)``) so this lives in
+    ``core`` without importing ``PersistentCache`` — keeping ``core`` a leaf and avoiding a
+    cache⇄fetcher import cycle.
+
+    Returns ``(TranscriptData | None, status)``:
+      - ``SUCCESS`` + data: transcript compressed/json/language cached; returns ``(data, 'SUCCESS')``.
+      - terminal (``NOT_AVAILABLE``): status cached with no body; returns ``(None, status)``.
+      - transient (``IP_BLOCKED`` / ``ERROR...``): NOT cached (retryable); returns ``(None, status)``.
+    """
+    data, status = fetcher.fetch_transcript(video_id)
+
+    if status == 'SUCCESS' and data is not None:
+        cache.cache_transcript(
+            video_id=video_id,
+            transcript_text=TranscriptFetcher.compress_transcript(
+                TranscriptFetcher.format_as_text(data)
+            ),
+            transcript_json=TranscriptFetcher.format_as_json(data),
+            language=data.language,
+            auto_generated=data.auto_generated,
+            fetch_status='SUCCESS',
+        )
+        return data, status
+
+    if status in TERMINAL_TRANSCRIPT_STATUSES:
+        cache.cache_transcript(
+            video_id=video_id,
+            transcript_text=None,
+            transcript_json=None,
+            language=None,
+            auto_generated=False,
+            fetch_status=status,
+        )
+
+    return None, status
+
+
+def should_refetch(cached_status: Optional[str]) -> bool:
+    """True if a cached transcript status warrants a (re)fetch.
+
+    Refetch when there is no cached row, or the cached status is a *transient* failure
+    (``IP_BLOCKED`` / ``ERROR...``). A ``SUCCESS`` or terminal (``NOT_AVAILABLE``) status is
+    final. Reads ``TERMINAL_TRANSCRIPT_STATUSES`` so it stays correct if the terminal set
+    ever grows — unlike the old hardcoded ``['SUCCESS', 'NOT_AVAILABLE']`` gate.
+    """
+    if not cached_status:
+        return True
+    return cached_status != 'SUCCESS' and cached_status not in TERMINAL_TRANSCRIPT_STATUSES

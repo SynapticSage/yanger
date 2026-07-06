@@ -63,6 +63,10 @@ Input .input--suggestion {
 #command-input {
     dock: bottom;
     height: 3;
+    /* Sit ABOVE the #status-bar (also dock: bottom) instead of colliding with it, which
+       pushed the inner Input off the bottom of the screen (invisible while typing).
+       NOTE: margin-bottom must equal #status-bar's height (currently 1) — keep in sync. */
+    margin-bottom: 1;
 }
 
 /* Focus styles for columns */

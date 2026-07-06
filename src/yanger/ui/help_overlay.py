@@ -5,33 +5,30 @@ Displays keybindings and commands from the central registry.
 # Modified: 2025-08-08
 
 from textual.app import ComposeResult
-from textual.containers import Container, Vertical, ScrollableContainer
+from textual.containers import Vertical, ScrollableContainer
+from textual.screen import ModalScreen
 from textual.widgets import Static
-from textual.binding import Binding
 from textual import events
 
 from ..keybindings import registry
 
 
-class HelpOverlay(Container):
-    """Overlay widget showing help information."""
-    
+class HelpOverlay(ModalScreen):
+    """Modal help screen showing keybindings and commands.
+
+    A ModalScreen (not an embedded Container) so it OWNS the keyboard while open — arrow/j/k
+    scroll the help, not the miller view behind it, which was the bug when this was a
+    display-toggled Container sharing the screen with the app's on_key handler.
+    """
+
     DEFAULT_CSS = """
     HelpOverlay {
-        layer: overlay;
+        align: center middle;
+    }
+
+    HelpOverlay > Vertical {
         width: 80%;
         height: 80%;
-        align: center middle;
-        display: none;
-    }
-    
-    HelpOverlay.visible {
-        display: block;
-    }
-    
-    HelpOverlay > Vertical {
-        width: 100%;
-        height: 100%;
         background: $surface;
         border: double $primary;
         padding: 1;
@@ -103,10 +100,6 @@ class HelpOverlay(Container):
     }
     """
     
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.can_focus = True
-        
     def compose(self) -> ComposeResult:
         """Create help overlay layout."""
         with Vertical():
@@ -188,22 +181,27 @@ class HelpOverlay(Container):
         
         return "\n".join(lines)
     
-    def show(self) -> None:
-        """Show the help overlay."""
-        # Regenerate content to catch any dynamic changes
-        content_widget = self.query_one(".help-content Static")
-        if content_widget:
-            content_widget.update(self._generate_help_content())
-        
-        self.add_class("visible")
-        self.focus()
-        
-    def hide(self) -> None:
-        """Hide the help overlay."""
-        self.remove_class("visible")
-        
+    def on_mount(self) -> None:
+        """Focus the scrollable content so arrow/pgup/pgdn scroll it natively."""
+        self.query_one(ScrollableContainer).focus()
+
     async def on_key(self, event: events.Key) -> None:
-        """Handle key events."""
-        if event.key in ["escape", "?"]:
-            self.hide()
-            event.stop()
+        """Own the keyboard: scroll on arrow/j/k, dismiss on escape/?/q, and consume EVERY
+        key so nothing leaks to the miller view behind the modal (the reported bug)."""
+        scroll = self.query_one(ScrollableContainer)
+        key = event.key
+        if key in ("escape", "question_mark", "q"):
+            self.dismiss()
+        elif key in ("down", "j"):
+            scroll.scroll_down()
+        elif key in ("up", "k"):
+            scroll.scroll_up()
+        elif key == "pagedown":
+            scroll.scroll_page_down()
+        elif key == "pageup":
+            scroll.scroll_page_up()
+        elif key == "home":
+            scroll.scroll_home()
+        elif key == "end":
+            scroll.scroll_end()
+        event.stop()

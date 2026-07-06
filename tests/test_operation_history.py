@@ -12,7 +12,7 @@ Covers three latent bugs:
 import pytest
 
 from yanger.models import Video
-from yanger.bulkedit import BulkEditChanges, VideoReorder
+from yanger.bulkedit import BulkEditChanges, VideoReorder, VideoMove
 from yanger.operation_history import (
     PasteOperation,
     BulkEditOperation,
@@ -107,6 +107,33 @@ class TestBulkEditReorder:
         assert op.undo() is True
         # Undo restores the old position via the same 4-arg call.
         assert client.position_calls[-1] == ("item-1", "PL", "vid1", 0)
+
+
+class TestBulkEditOperationClientMethods:
+    """The real apply path calls the correct SYNC client methods (repointed from the
+    deleted BulkEditExecutor test in Tier 0.8)."""
+
+    def test_execute_calls_correct_client_methods(self):
+        client = FakeApiClient()
+        # Seed source membership so the move's/deletion's remove calls resolve.
+        client.playlists["p1"] = [{'item_id': 'id_mov', 'video_id': 'vm'}]
+        client.playlists["p"] = [{'item_id': 'id_del', 'video_id': 'vd'}]
+
+        changes = BulkEditChanges(
+            moves=[VideoMove(make_video("vm", "id_mov", "p1"), "p1", "p2", 0)],
+            reorders=[VideoReorder(make_video("vr", "id_reo", "p2"), "p2", 0, 1)],
+            deletions=[(make_video("vd", "id_del", "p"), "p")],
+        )
+        op = BulkEditOperation(client, changes)
+        assert op.execute() is True
+
+        # Deletion removed from its playlist.
+        assert client.video_ids_in("p") == []
+        # Move: added to target, removed from source.
+        assert "vm" in client.video_ids_in("p2")
+        assert client.video_ids_in("p1") == []
+        # Reorder: full 4-arg update_video_position signature.
+        assert ("id_reo", "p2", "vr", 1) in client.position_calls
 
 
 class TestPasteCutRedo:

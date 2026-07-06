@@ -6,7 +6,8 @@ quota management and error handling.
 # Created: 2025-08-03
 
 from typing import List, Optional, Dict, Any, Generator
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import logging
 
 from googleapiclient.errors import HttpError
@@ -17,6 +18,23 @@ from .auth import YouTubeAuth
 
 
 logger = logging.getLogger(__name__)
+
+
+def current_quota_reset_key() -> str:
+    """Key for the current quota window: the Pacific-time date (YYYY-MM-DD).
+
+    The YouTube Data API daily quota resets at midnight Pacific Time; when the Pacific day
+    rolls over the key changes and the shared counter starts a fresh window at 0 — no reset
+    job needed. The ZoneInfo lookup is done HERE (not at import) and guarded so a platform
+    with no IANA tz database (Windows / slim containers) degrades to a UTC-8 approximation
+    instead of failing to import the whole app. The `tzdata` dependency makes the exact
+    (DST-aware) path the normal one.
+    """
+    try:
+        now_pacific = datetime.now(ZoneInfo("America/Los_Angeles"))
+    except ZoneInfoNotFoundError:
+        now_pacific = datetime.now(timezone.utc) - timedelta(hours=8)
+    return now_pacific.date().isoformat()
 
 
 class QuotaExceededError(Exception):
@@ -41,42 +59,61 @@ class YouTubeAPIClient:
         'playlistItems.delete': 50,
     }
     
-    def __init__(self, auth: YouTubeAuth, daily_quota: int = 10000):
+    def __init__(self, auth: YouTubeAuth, daily_quota: int = 10000, quota_store=None):
         """Initialize the API client.
-        
+
         Args:
             auth: Authenticated YouTubeAuth instance
             daily_quota: Daily quota limit (default: 10000)
+            quota_store: Optional object exposing get_quota_used(reset_key) and
+                add_quota_used(units, reset_key) (e.g. PersistentCache). When provided, quota
+                is PERSISTED and SHARED across processes (TUI + MCP) and reset at the Pacific
+                window; otherwise it is tracked in-memory per process (the legacy behaviour).
         """
         self.auth = auth
         self.youtube: Resource = auth.get_youtube_service()
         self.daily_quota = daily_quota
-        self.quota_used = 0
+        self._quota_store = quota_store
+        self._quota_used = 0  # in-memory fallback when no store is provided
         self.quota_reset_time = None
-        
+
+    @property
+    def quota_used(self) -> int:
+        """Units used in the current window — the shared store's count if present, else in-memory."""
+        if self._quota_store is not None:
+            return self._quota_store.get_quota_used(current_quota_reset_key())
+        return self._quota_used
+
+    @quota_used.setter
+    def quota_used(self, value: int) -> None:
+        # Kept so an explicit in-memory reset (client.quota_used = 0) still works without a store.
+        self._quota_used = value
+
     def _track_quota(self, operation: str, count: int = 1) -> None:
         """Track quota usage for an operation.
-        
+
         Args:
             operation: The API operation name
             count: Number of times the operation was performed
-            
+
         Raises:
             QuotaExceededError: If quota would be exceeded
         """
         cost = self.QUOTA_COSTS.get(operation, 1) * count
-        
+
         if self.quota_used + cost > self.daily_quota:
             raise QuotaExceededError(
                 f"Operation would exceed daily quota. "
                 f"Used: {self.quota_used}, Cost: {cost}, "
                 f"Limit: {self.daily_quota}"
             )
-        
-        self.quota_used += cost
-        logger.debug(f"Quota used: {self.quota_used}/{self.daily_quota} "
-                    f"(+{cost} for {operation})")
-    
+
+        if self._quota_store is not None:
+            self._quota_store.add_quota_used(cost, current_quota_reset_key())
+        else:
+            self._quota_used += cost
+        logger.debug(f"Quota +{cost} for {operation} (limit {self.daily_quota})")
+
     def get_quota_remaining(self) -> int:
         """Get remaining quota for today.
         

@@ -177,8 +177,9 @@ class DuplicateDetector:
     
     def _normalize_title(self, title: str) -> str:
         """Normalize title for comparison."""
-        # Convert to lowercase
-        title = title.lower()
+        # Defensive: callers pass video.title (coerced non-None by Video.__post_init__),
+        # but guard here so this helper is safe in isolation too.
+        title = (title or "").lower()
         
         # Remove common video suffixes
         patterns = [

@@ -36,6 +36,7 @@ from .core.transcript_command import (
     resolve_transcript_command,
     run_transcript_command,
 )
+from .core.custom_command import load_command_registry, run_command, build_batch_command, MODE_BATCH
 from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation, BulkEditOperation
 from .command_logger import CommandLogger
 from .export import PlaylistExporter
@@ -43,6 +44,10 @@ from .bulkedit import BulkEditor
 
 
 logger = logging.getLogger(__name__)
+
+# `:run` prompts for confirmation before executing a custom command on more than this many
+# videos (running user shell against a big selection deserves a look-before-you-leap).
+RUN_CONFIRM_THRESHOLD = 5
 
 
 class YouTubeRangerApp(App):
@@ -64,12 +69,13 @@ class YouTubeRangerApp(App):
         # binding would fire undo before the follow-up key, making uv/uV unreachable.
         Binding("U", "redo", "Redo"),
         Binding("ctrl+r", "refresh", "Refresh"),
-        Binding("ctrl+shift+r", "refresh_all", "Refresh All"),
+        # refresh_all is reached via 'gR' in on_key, NOT a Binding: terminals can't
+        # deliver the Ctrl+Shift+R chord, so advertising it in the footer/palette was
+        # misleading (Tier 0.7).
         Binding("ctrl+q", "force_quit", "Force Quit", show=False),
     ]
     
     # Reactive attributes
-    show_help = reactive(False)
     command_mode = reactive(False)
     
     def __init__(self, 
@@ -131,7 +137,6 @@ class YouTubeRangerApp(App):
         # UI components
         self.miller_view: Optional[MillerView] = None
         self.status_bar: Optional[StatusBar] = None
-        self.help_overlay: Optional[HelpOverlay] = None
         self.command_input: Optional[CommandInput] = None
         
     def compose(self) -> ComposeResult:
@@ -153,13 +158,30 @@ class YouTubeRangerApp(App):
         
         # Status bar at bottom (below command input when visible)
         yield StatusBar(id="status-bar")
-        
-        # Help overlay (hidden by default)
-        self.help_overlay = HelpOverlay()
-        yield self.help_overlay
+
+        # Help is a ModalScreen pushed on demand (see action_help), not an embedded widget.
     
+    @staticmethod
+    def _resolve_colorscheme_theme(colorscheme: str, available_themes) -> Optional[str]:
+        """Map a configured colorscheme to a Textual native theme name (Tier 0.11).
+
+        Returns the theme to apply, or None to keep Textual's built-in default. "default"
+        and unknown names (e.g. a config typo) return None so startup can never crash on
+        an invalid theme. Textual ships nord/gruvbox/dracula/etc., so `colorscheme: nord`
+        just works — closing the previously-dead colorscheme config string.
+        """
+        if colorscheme and colorscheme != "default" and colorscheme in available_themes:
+            return colorscheme
+        return None
+
     async def on_mount(self) -> None:
         """Initialize the application after mounting."""
+        # Apply the configured colorscheme to Textual's native theme system.
+        theme = self._resolve_colorscheme_theme(
+            getattr(self.settings.ui, "colorscheme", "default"), self.available_themes
+        )
+        if theme:
+            self.theme = theme
         try:
             # Best-effort: ensure our CSS is loaded even when running from a
             # different working directory (e.g. editable installs, tests)
@@ -296,7 +318,8 @@ class YouTubeRangerApp(App):
         try:
             self.auth = YouTubeAuth()
             self.auth.authenticate()
-            self.api_client = YouTubeAPIClient(self.auth)
+            # Share the quota counter with the MCP process via the SQLite cache.
+            self.api_client = YouTubeAPIClient(self.auth, quota_store=self._cache)
             self.offline_mode = False
 
             # Initialize bulk editor with API client
@@ -681,8 +704,7 @@ class YouTubeRangerApp(App):
         """Show help overlay."""
         if self.command_logger:
             self.command_logger.log_action("show_help")
-        if self.help_overlay:
-            self.help_overlay.show()
+        self.push_screen(HelpOverlay())
     
     def action_open_in_browser(self) -> None:
         """Open selected video(s) or playlist in browser."""
@@ -966,33 +988,16 @@ class YouTubeRangerApp(App):
     async def _auto_fetch_transcript(self, video: Video) -> None:
         """Auto-fetch transcript in background (silent, no notifications)."""
         try:
-            from .core.transcript_fetcher import TranscriptFetcher
+            from .core.transcript_fetcher import TranscriptFetcher, fetch_and_cache_transcript
             fetcher = TranscriptFetcher(preferred_languages=self.settings.transcripts.languages)
 
-            # Run in thread since it's I/O bound
+            # Fetch + apply the shared cache-write policy in one thread hop (I/O bound).
+            # The service owns the format/compress/cache + terminal-vs-transient rule.
             transcript_data, status = await asyncio.to_thread(
-                fetcher.fetch_transcript,
-                video.id
+                fetch_and_cache_transcript, fetcher, self._cache, video.id
             )
 
             if status == 'SUCCESS' and transcript_data:
-                # Compress transcript text
-                compressed_text = TranscriptFetcher.compress_transcript(
-                    TranscriptFetcher.format_as_text(transcript_data)
-                )
-                # Convert to JSON for storage
-                transcript_json = TranscriptFetcher.format_as_json(transcript_data)
-
-                # Cache the transcript
-                self._cache.cache_transcript(
-                    video.id,
-                    compressed_text,
-                    transcript_json,
-                    transcript_data.language,
-                    transcript_data.auto_generated,
-                    status
-                )
-
                 # Refresh preview pane if this is still the current video
                 if self.current_video and self.current_video.id == video.id:
                     if self.status_bar:
@@ -1000,16 +1005,6 @@ class YouTubeRangerApp(App):
                         self.status_bar.update_status(f"Transcript loaded ({lang_str})", "")
                     if self.miller_view and self.miller_view.preview_pane:
                         await self.miller_view.preview_pane.show_video(video)
-            else:
-                # Cache the status to avoid refetching
-                self._cache.cache_transcript(
-                    video.id,
-                    None,
-                    None,
-                    None,
-                    False,
-                    status
-                )
         except Exception as e:
             # Silent failure for auto-fetch - log but don't notify
             logger.warning(f"Auto-fetch transcript failed for {video.id}: {e}")
@@ -1023,34 +1018,16 @@ class YouTubeRangerApp(App):
         # Show feedback that fetch is starting
         self.notify(f"Fetching transcript for: {self.current_video.title[:50]}...")
 
-        # Use TranscriptFetcher from core
-        from .core.transcript_fetcher import TranscriptFetcher
+        # Use the shared fetch+cache service (owns compress/cache + terminal policy).
+        from .core.transcript_fetcher import TranscriptFetcher, fetch_and_cache_transcript
         fetcher = TranscriptFetcher(preferred_languages=self.settings.transcripts.languages)
 
         # Run in thread since it's I/O bound
         transcript_data, status = await asyncio.to_thread(
-            fetcher.fetch_transcript,
-            self.current_video.id
+            fetch_and_cache_transcript, fetcher, self._cache, self.current_video.id
         )
 
         if status == 'SUCCESS' and transcript_data:
-            # Compress transcript text
-            compressed_text = TranscriptFetcher.compress_transcript(
-                TranscriptFetcher.format_as_text(transcript_data)
-            )
-            # Convert to JSON for storage
-            transcript_json = TranscriptFetcher.format_as_json(transcript_data)
-
-            # Cache the transcript
-            self._cache.cache_transcript(
-                self.current_video.id,
-                compressed_text,
-                transcript_json,
-                transcript_data.language,
-                transcript_data.auto_generated,
-                status
-            )
-
             lang_str = f"{transcript_data.language}" + (" [auto]" if transcript_data.auto_generated else "")
             self.notify(f"Transcript fetched ({lang_str})", timeout=3)
 
@@ -1059,15 +1036,7 @@ class YouTubeRangerApp(App):
                 await self.miller_view.preview_pane.show_video(self.current_video)
 
         elif status == 'NOT_AVAILABLE':
-            # Cache the not-available status to avoid refetching
-            self._cache.cache_transcript(
-                self.current_video.id,
-                None,
-                None,
-                None,
-                False,
-                status
-            )
+            # Already cached by the service; just inform the user.
             self.notify("No transcript available for this video", severity="warning")
         else:
             # Error status - extract error message if present
@@ -1221,9 +1190,9 @@ class YouTubeRangerApp(App):
         elif event.key == 'g' and not getattr(self, '_pending_g', False):
             self._pending_g = True
             if self.status_bar:
-                self.status_bar.update_status("Press 'n':new 'd':delete 't':transcript 'T':auto-fetch 'e':export 'g':top", "")
+                self.status_bar.update_status("Press 'n':new 'd':delete 't':transcript 'T':auto-fetch 'e':export 'R':refresh-all 'g':top", "")
             event.stop()
-        # Check for 'gn' or 'gd' or 'gt' or 'gT' or 'ge' commands
+        # Check for 'gn' or 'gd' or 'gt' or 'gT' or 'ge' or 'gR' commands
         elif hasattr(self, '_pending_g') and self._pending_g:
             if event.key == 'n':
                 self.action_new_playlist()
@@ -1235,6 +1204,10 @@ class YouTubeRangerApp(App):
                 await self.toggle_auto_fetch_transcript()
             elif event.key == 'e':
                 await self.export_transcript()
+            elif event.key == 'R':
+                # Reachable refresh-all: terminals can't deliver the Ctrl+Shift+R
+                # chord, so this g-prefix alias is the supported path (Tier 0.7).
+                await self.action_refresh_all()
             elif event.key == 'g':
                 # Double 'g' - pass to miller view for go to top
                 if self.miller_view:
@@ -1324,11 +1297,11 @@ class YouTubeRangerApp(App):
 
         # Auto-fetch transcript if enabled
         if self.settings.transcripts.enabled and self.settings.transcripts.auto_fetch:
-            # Check if transcript is already cached
-            transcript_status = self._cache.get_transcript_status(video.id)
-
-            # Only fetch if not already cached (SUCCESS) or known unavailable
-            if transcript_status not in ['SUCCESS', 'NOT_AVAILABLE']:
+            from .core.transcript_fetcher import should_refetch
+            # Fetch only if uncached or a transient failure (SUCCESS / NOT_AVAILABLE are
+            # final). should_refetch tracks TERMINAL_TRANSCRIPT_STATUSES, unlike the old
+            # hardcoded ['SUCCESS','NOT_AVAILABLE'] gate.
+            if should_refetch(self._cache.get_transcript_status(video.id)):
                 # Fetch in background without blocking UI
                 asyncio.create_task(self._auto_fetch_transcript(video))
     
@@ -2124,6 +2097,10 @@ class YouTubeRangerApp(App):
             # Run the user-configured external transcript command on current video
             self.call_later(self.run_transcript_for_current_video)
 
+        elif cmd_name == "run":
+            # Run a named custom command on the current/marked videos (headline registry).
+            self.call_later(self.handle_run_command, args)
+
         elif cmd_name == "set":
             # Update a setting at runtime (and persist it to the user config)
             self.handle_set_command(args)
@@ -2176,6 +2153,106 @@ class YouTubeRangerApp(App):
             self._notify_status("Transcript command finished")
         else:
             self._notify_status(f"Transcript command exited with code {exit_code}", error=True)
+
+    def _marked_or_current_videos(self) -> List[Video]:
+        """Videos a selection-aware command acts on: marked if any, else the current one.
+
+        Mirrors the dd/yy/delete marked-else-current convention via the video column.
+        """
+        if not self.miller_view or not self.miller_view.video_column:
+            return []
+        vc = self.miller_view.video_column
+        marked = vc.get_marked_videos()
+        if marked:
+            return list(marked)
+        if 0 <= vc.selected_index < len(vc.videos):
+            return [vc.videos[vc.selected_index]]
+        return []
+
+    async def handle_run_command(self, args: List[str]) -> None:
+        """`:run <name>` — run a configured custom command on the current/marked videos.
+
+        Resolves the registry (YAML ``commands:`` + ``YANGER_CMD_*``), operates on the marked
+        selection if any else the current video, and confirms before running on a large
+        selection. `:run` with no/unknown name surfaces the available command names.
+        """
+        registry = load_command_registry(self.settings)
+        if not registry:
+            self._notify_status(
+                "No custom commands configured. Add a 'commands:' map to config.yaml "
+                "or set YANGER_CMD_<NAME>.",
+                error=True,
+            )
+            return
+
+        available = ", ".join(sorted(registry))
+        if not args:
+            self._notify_status(f"Usage: :run <name>   (available: {available})", error=True)
+            return
+
+        name = args[0].strip().lower()
+        spec = registry.get(name)
+        if spec is None:
+            self._notify_status(f"Unknown command '{name}'. Available: {available}", error=True)
+            return
+
+        videos = self._marked_or_current_videos()
+        if not videos:
+            self._notify_status("No video selected", error=True)
+            return
+
+        if spec.confirm or len(videos) > RUN_CONFIRM_THRESHOLD:
+            # Confirm before running the user's shell: a `confirm: true` command always, or any
+            # selection larger than the threshold (also guards a big batch against ARG_MAX).
+            self._pending_run_spec = spec
+            self._pending_run_videos = videos
+            modal = ConfirmationModal(
+                title="Confirm Run",
+                message=f"Run '{name}' on {len(videos)} videos?",
+                details=f"Command: {spec.template}",
+                confirm_text="Run",
+                cancel_text="Cancel",
+                action="run_custom_command",
+                dangerous=False,
+            )
+            await self.push_screen(modal)
+        else:
+            await self.run_custom_command(spec, videos)
+
+    async def run_custom_command(self, spec, videos: List[Video]) -> None:
+        """Run ``spec`` over ``videos`` inside a single suspend() block; report failures.
+
+        - ``per-video``: one command per video, run sequentially (interactive/streaming tools
+          render in the terminal).
+        - ``batch``: ONE command with ``{urls}``/``{ids}`` for the whole selection.
+        suspend() wraps the WHOLE run (not each command) to avoid screen flicker. All injected
+        url/id are shlex-quoted by build_command/build_batch_command.
+        """
+        if spec.mode == MODE_BATCH:
+            cmds = [build_batch_command(spec.template, videos)]
+        else:
+            cmds = [build_command(spec.template, v) for v in videos]
+        exit_codes: List[int] = []
+        try:
+            with self.suspend():
+                for cmd in cmds:
+                    exit_codes.append(await asyncio.to_thread(run_command, cmd))
+        except Exception as e:
+            logger.error(f"Custom command '{spec.name}' failed: {e}")
+            self._notify_status(f"Command '{spec.name}' error: {e}", error=True)
+            return
+        finally:
+            # Redraw the TUI after the external program(s) return.
+            self.refresh()
+
+        failures = [rc for rc in exit_codes if rc != 0]
+        if not failures:
+            self._notify_status(f"'{spec.name}' finished ({len(videos)} video(s))")
+        else:
+            # Denominator is invocation count (batch = 1 run over N videos).
+            self._notify_status(
+                f"'{spec.name}': {len(failures)} of {len(cmds)} run(s) exited non-zero", error=True
+            )
 
     def handle_set_command(self, args: List[str]) -> None:
         """Handle `:set <key> <value>` - update in-memory settings and persist.
@@ -2425,6 +2502,14 @@ class YouTubeRangerApp(App):
         elif message.action == "delete_playlist":
             # Execute playlist deletion
             self.call_later(self.execute_delete_playlist)
+        elif message.action == "run_custom_command":
+            # Execute the custom command confirmed for a large selection.
+            spec = getattr(self, "_pending_run_spec", None)
+            videos = getattr(self, "_pending_run_videos", None)
+            if spec is not None and videos:
+                self.call_later(self.run_custom_command, spec, videos)
+            self._pending_run_spec = None
+            self._pending_run_videos = None
     
     async def execute_delete_videos(self, videos: List[Video]) -> None:
         """Execute the actual video deletion."""

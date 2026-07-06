@@ -117,7 +117,21 @@ class Video:
     is_selected: bool = False
     is_marked: bool = False
     is_focused: bool = False
-    
+
+    def __post_init__(self):
+        # Pre-metadata videos (fresh Takeout imports) arrive from the cache with NULL
+        # title/channel/description. The dataclass contract is `str`, and consumers
+        # (duplicate normalize `.lower()`, statistics `title[:40]`, CSV/JSON export) do
+        # string ops that crash on None. Coerce here so every construction path is safe.
+        # DB-level "needs metadata" detection uses the raw `title` column (title IS NULL
+        # OR title = ''), not Video objects, so it is unaffected by this coercion.
+        if self.title is None:
+            self.title = ""
+        if self.channel_title is None:
+            self.channel_title = ""
+        if self.description is None:
+            self.description = ""
+
     @classmethod
     def from_playlist_item(cls, item: Dict[str, Any]) -> 'Video':
         """Create a Video from playlistItems.list() response.

@@ -57,7 +57,7 @@ class KeybindingRegistry:
         self.register("?", "Show this help", KeyContext.GLOBAL, "Application")
         self.register(":", "Enter command mode", KeyContext.GLOBAL, "Application")
         self.register("ctrl+r", "Refresh current view", KeyContext.GLOBAL, "Application")
-        self.register("ctrl+shift+r", "Refresh all playlists", KeyContext.GLOBAL, "Application")
+        self.register("gR", "Refresh all playlists", KeyContext.GLOBAL, "Application")
         self.register("ctrl+q", "Force quit", KeyContext.GLOBAL, "Application", hidden=True)
         
         # Navigation
@@ -198,6 +198,16 @@ class KeybindingRegistry:
             "Show playlist statistics",
             ":stats",
             [":stats"]
+        )
+
+        self.register_command(
+            "run",
+            "Run a configured custom command on the current/marked videos",
+            ":run <name>",
+            [
+                ":run dl",
+                ":run sum",
+            ]
         )
 
         self.register_command(
