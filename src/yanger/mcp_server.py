@@ -942,12 +942,23 @@ class YangerMCPServer:
 
         # The whole scan is one SQLite read per playlist; run it off the event
         # loop so a large cache can't block stdio/cancellation.
-        results = await asyncio.to_thread(self._search_videos_blocking, query, limit)
+        results, cached_scanned = await asyncio.to_thread(self._search_videos_blocking, query, limit)
 
-        return {"results": results, "count": len(results), "query": query}
+        return {
+            "results": results,
+            "count": len(results),
+            "query": query,
+            # Be explicit that this only sees cached data — otherwise a caller (esp. an LLM)
+            # reads an empty/short result as authoritative when the playlist just isn't cached.
+            "coverage": {
+                "cached_playlists_searched": cached_scanned,
+                "note": "Only locally-cached playlists were searched; playlists not yet cached "
+                        "are not included. Run list_playlists / get_playlist to cache more.",
+            },
+        }
 
-    def _search_videos_blocking(self, query: str, limit: int) -> List[dict[str, Any]]:
-        """Synchronous cache scan for _search_videos (runs in a worker thread)."""
+    def _search_videos_blocking(self, query: str, limit: int) -> tuple[List[dict[str, Any]], int]:
+        """Synchronous cache scan for _search_videos. Returns (results, cached_playlist_count)."""
         results = []
 
         # Search in cached playlists
@@ -974,7 +985,7 @@ class YangerMCPServer:
             if len(results) >= limit:
                 break
 
-        return results
+        return results, len(playlists)
 
     # --- Transcripts ---
 
@@ -1121,18 +1132,27 @@ class YangerMCPServer:
         include_fuzzy = args.get("include_fuzzy", False)
 
         # Cache reads plus CPU-bound fuzzy matching — run off the event loop.
-        results = await asyncio.to_thread(
+        results, scanned = await asyncio.to_thread(
             self._find_duplicates_blocking, playlist_id, include_fuzzy
         )
 
-        return {
+        resp = {
             "duplicates": results,
             "count": len(results),
             "scope": playlist_id or "all_playlists",
         }
+        if not playlist_id:
+            # Cross-playlist dedup only sees cached playlists — say so, or an empty result
+            # reads as "no duplicates" when it's really "nothing cached to compare".
+            resp["coverage"] = {
+                "cached_playlists_scanned": scanned,
+                "note": "Only locally-cached playlists were compared; uncached playlists are not "
+                        "included. Run list_playlists / get_playlist to cache more.",
+            }
+        return resp
 
     def _find_duplicates_blocking(self, playlist_id: Optional[str],
-                                  include_fuzzy: bool) -> List[dict[str, Any]]:
+                                  include_fuzzy: bool) -> tuple[List[dict[str, Any]], int]:
         """Synchronous duplicate detection for _find_duplicates (worker thread)."""
         detector = DuplicateDetector(fuzzy_threshold=0.85 if include_fuzzy else 1.0)
 
@@ -1155,6 +1175,7 @@ class YangerMCPServer:
                     videos = self.api_client.get_playlist_items(playlist_id)
 
             duplicates = detector.find_duplicates(videos, playlist_id)
+            scanned = 1
         else:
             # Find duplicates across all playlists
             playlists = self.cache.get_playlists() or []
@@ -1166,6 +1187,7 @@ class YangerMCPServer:
                     playlist_videos.append((playlist, videos))
 
             duplicates = detector.find_duplicates_across(playlist_videos)
+            scanned = len(playlists)
 
         # Format results
         results = []
@@ -1184,7 +1206,7 @@ class YangerMCPServer:
                 ],
             })
 
-        return results
+        return results, scanned
 
     async def _analyze_playlist(self, args: dict[str, Any]) -> dict[str, Any]:
         """Get comprehensive playlist analytics."""
