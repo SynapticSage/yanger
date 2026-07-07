@@ -4,6 +4,7 @@ Provides persistent caching of playlist and video data using SQLite.
 """
 # Modified: 2025-08-08
 
+import os
 import sqlite3
 import json
 import time
@@ -28,12 +29,16 @@ class CacheEntry:
 
 
 def default_cache_dir() -> Path:
-    """Canonical cache directory, resolved at call time (honors $HOME / tests).
+    """Canonical cache directory, resolved at call time.
 
-    Single source of truth shared by ``PersistentCache`` and ``yanger reset`` so the
-    reset command can never target a stale path (it previously removed a nonexistent
-    ``./.yanger_cache`` and silently no-op'd).
+    Honors ``$YANGER_CACHE_DIR`` (expanded) when set, else ``~/.cache/yanger``. Single source
+    of truth shared by ``PersistentCache`` and ``yanger reset`` so the reset command can never
+    target a stale path, AND so the advertised ``YANGER_CACHE_DIR`` env var actually takes effect
+    (it was previously assigned to a dead ``settings.cache.directory`` and silently ignored).
     """
+    env_dir = os.environ.get("YANGER_CACHE_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser()
     return Path.home() / ".cache" / "yanger"
 
 
