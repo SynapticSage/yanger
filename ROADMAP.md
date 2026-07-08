@@ -67,7 +67,10 @@ the headline custom-command registry — cheaper and safer to build.
   bulk editor is told it worked while nothing happened. (YouTube API can't rename playlist
   *items*; playlist/video title renames go through `cw`.) *Fix: either drop renames from the
   bulk-edit preview/summary, or surface them as an explicit "not applied (unsupported)" result.
-  Small · UX-correctness.*
+  Small · UX-correctness.* **⏭️ Skipped in the 2026-07-07 /goal pass:** the fix embeds a real
+  product decision — DROP bulk rename-detection vs. actually WIRE renames through
+  `rename_playlist`/`update_video_title` (make the feature real). That's a human call, not an
+  obvious mechanical fix; and it touches `app.py`, which the fable-cmdinput agent has open.
 
 ## /goal autonomous pass — status (2026-07-07)
 
