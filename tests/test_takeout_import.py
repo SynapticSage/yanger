@@ -32,6 +32,20 @@ def test_parse_playlist_csv_content_extracts_videos_and_timestamps():
     assert videos[0].added_at is not None  # timestamp parsed
 
 
+def test_parse_playlist_csv_parses_z_suffixed_timestamp():
+    """A trailing 'Z' (UTC) timestamp must parse (fromisoformat rejects 'Z' on Py<3.11); a
+    prior no-op `.replace('+00:00','+00:00')` silently dropped such timestamps to None."""
+    p = TakeoutParser()
+    csv_content = "\n".join([
+        "Video ID,Playlist Video Creation Timestamp",
+        f"{VALID},2024-01-15T12:00:00Z",
+    ])
+    videos = p._parse_playlist_csv_content(csv_content, "PL")
+    assert len(videos) == 1
+    assert videos[0].added_at is not None
+    assert videos[0].added_at.year == 2024
+
+
 def test_parse_playlist_csv_skips_invalid_and_empty_ids():
     p = TakeoutParser()
     csv_content = "\n".join([

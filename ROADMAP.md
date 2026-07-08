@@ -54,12 +54,11 @@ the headline custom-command registry — cheaper and safer to build.
     a `help_overlay`-focus early-return in `on_key` and give `HelpOverlay.on_key` up/down handling.*
     *Impact High (usability) · Effort M · verifiable with the Tier-1 #2 pilot.*
 
-- **⚠️ Tests ran on the WRONG Textual for most of this run (found by the Tier-1 #2 review).**
-  The `.venv` has no `pytest`, so `uv run pytest` silently falls back to homebrew Python 3.10 +
-  **Textual 0.47.1** — 6 majors below the pinned `textual>=0.86` (venv has 6.5.0). The suite passed
-  on both, but Textual-version-sensitive code was validated on an unsupported framework. **Fix: use
-  `uv run --extra dev pytest`** (runs the venv/6.5.0). Consider adding pytest to the venv or a
-  Makefile/tox target so the correct runner is the default. (Project memory updated.)
+- **✅ RESOLVED — Tests ran on the WRONG Textual (found by the Tier-1 #2 review).** The `.venv`
+  had no `pytest`, so `uv run pytest` silently fell back to homebrew Python 3.10 + **Textual 0.47.1**.
+  **Fixed (commit 9d908aa):** pytest/pytest-asyncio added to `[dependency-groups].dev` (uv installs
+  it by default), so plain `uv run pytest` now runs the venv (Python 3.14 / Textual 6.5.0) —
+  verified. Also directly caused a shipped startup crash: see the guard fix (`_apply_colorscheme`).
 
 - **Bulk-edit renames are silently dropped but reported as done.** (Surfaced by the 0.8
   arch review.) The live apply path `operation_history.BulkEditOperation.execute` never

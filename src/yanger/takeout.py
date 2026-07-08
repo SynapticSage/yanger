@@ -311,7 +311,10 @@ class TakeoutParser:
                     added_at = None
                     if timestamp_str:
                         try:
-                            added_at = datetime.fromisoformat(timestamp_str.replace('+00:00', '+00:00'))
+                            # Normalize a trailing 'Z' (Zulu/UTC) to +00:00: datetime.fromisoformat
+                            # rejects 'Z' on Python < 3.11. The old `.replace('+00:00','+00:00')`
+                            # was a no-op, so Z-suffixed watched-at timestamps were silently dropped.
+                            added_at = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
                         except (ValueError, TypeError):
                             pass  # unparseable timestamp -> leave added_at None
                     
