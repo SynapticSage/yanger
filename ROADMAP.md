@@ -23,11 +23,16 @@ the headline custom-command registry — cheaper and safer to build.
 - **✅ RESOLVED — Overlays don't take focus / render (reported 2026-07-02, "never resolved").**
   Turned out to be TWO different failure modes (the pilot harness, Tier-1 #2, diagnosed both by
   booting the app and measuring widget regions):
-  - **(a) command input invisible → FIXED (layout, not CSS).** The `Input` was composited
-    *off-screen* (rows 30-31 on a 30-row terminal): `#command-input` and `#status-bar` both
-    `dock: bottom` collided, and an internal `margin-top` pushed the Input below the viewport.
-    Fix: `#command-input` `margin-bottom: 1` (sit above the status bar) + drop the Input `margin-top`
-    / container `border-top`. The wall of `!important` colour CSS was treating the wrong disease.
+  - **(a) command input invisible → FIXED (commit 3413188, by the fable-cmdinput agent on the
+    REAL Textual 8.2.8 runtime).** My first attempt (the off-screen `margin-bottom` layout fix on
+    Textual 6.5.0) was NOT the user's bug — everyone, me included, debugged the wrong Textual. Real
+    cause on 8.x: `Input:focus { border: tall }` inside a `height:1` Input consumes one row top + one
+    bottom → ZERO content rows → the value text is never composited (Input.value fills invisibly,
+    which is exactly why Enter worked and hid it). Plus a white-on-white `.input--cursor` override
+    and `select_on_focus=True` (selected the pre-filled `:`, so the first keystroke replaced it). Fix:
+    `border:none` on the focused input, remove the cursor override, `select_on_focus=False`. Same
+    fix applied to the search input. Verified on 8.2.8: typed text is actually PAINTED (asserted vs
+    the compositor, not `Input.value`). Lesson: debug/verify on the user's runtime, not the venv.
   - **(b) help ignores arrow/j/k → FIXED (ModalScreen).** `HelpOverlay` is now a `ModalScreen`
     (pushed via `action_help`) that owns the keyboard: focuses its scroll area, scrolls on
     arrow/j/k/pgup/pgdn/home/end, dismisses on escape/?/q, and `event.stop()`s every key so nothing
@@ -79,10 +84,11 @@ Directive: do the obvious, low-human-input roadmap items; skip the rest. On the
 
 - **Done this pass:** YANGER_CACHE_DIR now actually works + dead `settings.cache.directory`
   removed (c92f6c3); Tier-2 cache-blind-spot coverage annotation (fb5a346); Tier-3 guard-favorites
-  verified N/A.
-- **In progress (fable-cmdinput agent):** the command-input "typed text invisible" bug — root cause
-  found: `Input:focus { border: tall }` inside a `height:1` Input clips the content row to zero on
-  Textual 8.x (the user's real runtime), plus `select_on_focus` eating the pre-filled `:`.
+  verified N/A; `pytest` in the uv dev-group so `uv run pytest` uses the venv (9d908aa); Takeout
+  Z-timestamp no-op fixed (6cc03fa); the test-env "wrong Textual" follow-up resolved; and the
+  **command-input "typed text invisible" bug FIXED** by the fable-cmdinput agent — the real cause
+  (`Input:focus { border: tall }` clipping content to zero rows + `select_on_focus`) found and
+  verified on the user's actual Textual 8.2.8 runtime (commit 3413188).
 - **Skipped — needs human judgment / too large (per directive):**
   - Tier-2 **elicitation**, **resources+prompts**, **sampling**, **MCP undo parity** — real MCP
     features needing design/client-capability decisions.
