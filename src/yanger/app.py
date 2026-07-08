@@ -96,9 +96,11 @@ class YouTubeRangerApp(App):
         self.config_dir = config_dir or Path.home() / ".config" / "yanger"
         self.use_cache = use_cache
         
-        # Initialize command logger if log file specified
+        # Initialize command logger if a real log-file path was specified. The isinstance guard
+        # is defensive: only a str/Path should ever init the logger (a truthy non-path like a
+        # Click Sentinel would otherwise raise inside CommandLogger).
         self.command_logger: Optional[CommandLogger] = None
-        if log_file:
+        if log_file and isinstance(log_file, (str, Path)):
             try:
                 self.command_logger = CommandLogger(log_file, log_level)
                 logger.info(f"Command logging enabled to {log_file}")

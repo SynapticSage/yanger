@@ -111,3 +111,29 @@ def test_connect_sets_wal_and_busy_timeout(tmp_path):
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+# ----- no-subcommand path passes real defaults, not Click sentinels ----------------
+
+def test_no_subcommand_passes_real_defaults_not_click_sentinels(monkeypatch):
+    """`yanger` (no subcommand) does ctx.invoke(run), which fills params we don't pass with
+    Click's Sentinel.UNSET — not the options' defaults. Regression: that reached the app as
+    log_file=Sentinel ('Failed to initialize command logger … not Sentinel') and
+    no_cache=Sentinel (truthy -> use_cache=False, silently disabling the cache)."""
+    import yanger.app as appmod
+    from yanger.cli import cli
+
+    captured = {}
+
+    class FakeApp:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(appmod, "YouTubeRangerApp", FakeApp)
+    CliRunner().invoke(cli, [])
+    assert captured["log_file"] is None      # not Sentinel -> no logger-init warning
+    assert captured["use_cache"] is True     # not Sentinel -> cache stays enabled
+    assert captured["log_level"] == "INFO"
