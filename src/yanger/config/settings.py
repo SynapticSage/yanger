@@ -121,6 +121,21 @@ class YouTubeSettings:
 
 
 @dataclass
+class MCPSettings:
+    """MCP server settings.
+
+    ``allow_custom_commands`` is an OPT-IN gate (default False) for the MCP
+    ``run_custom_command`` tool, which lets a connected LLM invoke the user's registered
+    custom commands (arbitrary shell, ``shell=True``) against videos. Off by default because
+    it is LLM-driven shell execution; only the user's own registered templates can run, and a
+    command flagged ``confirm: true`` is still refused over MCP (no interactive prompt exists).
+    NB: enabling this exposes the ENTIRE registry, including any ``YANGER_CMD_*`` inherited from
+    the MCP client's launch environment.
+    """
+    allow_custom_commands: bool = False
+
+
+@dataclass
 class Settings:
     """Main settings container."""
     ui: UISettings = field(default_factory=UISettings)
@@ -128,6 +143,7 @@ class Settings:
     cache: CacheSettings = field(default_factory=CacheSettings)
     transcripts: TranscriptSettings = field(default_factory=TranscriptSettings)
     youtube: YouTubeSettings = field(default_factory=YouTubeSettings)
+    mcp: MCPSettings = field(default_factory=MCPSettings)
     # User-defined custom-command registry: name -> shell template (str) OR a long-form
     # {run, mode, confirm} dict (the ★ headline feature). A plain dict, not a section
     # dataclass, so from_dict/merge/save handle it explicitly. Interpreted by
@@ -177,6 +193,12 @@ class Settings:
                 if hasattr(settings.youtube, key):
                     setattr(settings.youtube, key, value)
 
+        # Update MCP settings
+        if 'mcp' in data:
+            for key, value in data['mcp'].items():
+                if hasattr(settings.mcp, key):
+                    setattr(settings.mcp, key, value)
+
         # Custom-command registry (name -> shell template str, or a {run, mode, confirm} dict).
         # Stored as-is (lowercased key); load_command_registry validates/normalizes. A bad entry
         # (neither str nor dict) is skipped with a warning so it can't break config load.
@@ -192,7 +214,7 @@ class Settings:
     def merge(self, other: 'Settings') -> None:
         """Merge another Settings object into this one."""
         # Merge each section
-        for section in ['ui', 'keybindings', 'cache', 'transcripts', 'youtube']:
+        for section in ['ui', 'keybindings', 'cache', 'transcripts', 'youtube', 'mcp']:
             self_section = getattr(self, section)
             other_section = getattr(other, section)
 
@@ -270,6 +292,11 @@ def load_settings(config_dir: Optional[Path] = None) -> Settings:
     if transcript_cmd := os.environ.get('YANGER_TRANSCRIPT_COMMAND'):
         settings.transcripts.transcript_command = transcript_cmd
 
+    # Opt-in the LLM-driven custom-command tool from the (MCP client's) environment, so it can be
+    # enabled without editing config.yaml. Truthy = 1/true/yes/on (case-insensitive).
+    if (raw := os.environ.get('YANGER_MCP_ALLOW_CUSTOM_COMMANDS')) is not None:
+        settings.mcp.allow_custom_commands = raw.strip().lower() in ('1', 'true', 'yes', 'on')
+
     return settings
 
 
@@ -298,6 +325,7 @@ def save_settings(settings: Settings, config_dir: Optional[Path] = None) -> None
         'cache': vars(settings.cache),
         'transcripts': transcript_data,
         'youtube': vars(settings.youtube),
+        'mcp': vars(settings.mcp),
         'commands': dict(settings.commands),
     }
     

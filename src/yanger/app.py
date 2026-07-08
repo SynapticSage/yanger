@@ -36,7 +36,7 @@ from .core.transcript_command import (
     resolve_transcript_command,
     run_transcript_command,
 )
-from .core.custom_command import load_command_registry, run_command, build_batch_command, MODE_BATCH
+from .core.custom_command import load_command_registry, run_command, resolve_commands
 from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation, BulkEditOperation
 from .command_logger import CommandLogger
 from .export import PlaylistExporter
@@ -2240,10 +2240,9 @@ class YouTubeRangerApp(App):
         suspend() wraps the WHOLE run (not each command) to avoid screen flicker. All injected
         url/id are shlex-quoted by build_command/build_batch_command.
         """
-        if spec.mode == MODE_BATCH:
-            cmds = [build_batch_command(spec.template, videos)]
-        else:
-            cmds = [build_command(spec.template, v) for v in videos]
+        # resolve_commands owns the batch/per-video dispatch (shared with the MCP tool); the TUI
+        # ignores the per-run video_ids and just needs the flat command list to run + count.
+        cmds = [cmd for _ids, cmd in resolve_commands(spec, videos)]
         exit_codes: List[int] = []
         try:
             with self.suspend():

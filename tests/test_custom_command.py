@@ -16,6 +16,7 @@ from yanger.core.custom_command import (
     build_command,
     build_batch_command,
     run_command,
+    resolve_commands,
     load_command_registry,
     CommandSpec,
     MODE_PER_VIDEO,
@@ -164,3 +165,21 @@ def test_transcript_command_delegates_to_custom_command():
     # Same function object -> single implementation, no hand-copied duplicate.
     assert transcript_command.build_command is build_command
     assert transcript_command.run_transcript_command is run_command
+
+
+# --- resolve_commands: the single owner of the mode->builder dispatch (shared TUI + MCP) ---
+
+def test_resolve_commands_per_video_one_pair_each():
+    spec = CommandSpec(name="dl", template="echo {id}", mode=MODE_PER_VIDEO)
+    runs = resolve_commands(spec, [_video("aaa"), _video("bbb")])
+    assert [ids for ids, _cmd in runs] == [["aaa"], ["bbb"]]      # one run per video
+    assert all("echo " in cmd for _ids, cmd in runs)
+
+
+def test_resolve_commands_batch_single_pair_over_all():
+    spec = CommandSpec(name="dlall", template="echo {ids}", mode=MODE_BATCH)
+    runs = resolve_commands(spec, [_video("aaa"), _video("bbb")])
+    assert len(runs) == 1                                          # ONE run for the selection
+    ids, cmd = runs[0]
+    assert ids == ["aaa", "bbb"]
+    assert "aaa" in cmd and "bbb" in cmd

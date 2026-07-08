@@ -71,6 +71,21 @@ def build_batch_command(template: str, videos) -> str:
     return cmd
 
 
+def resolve_commands(spec: "CommandSpec", videos) -> "list[tuple[list[str], str]]":
+    """Resolve a command spec + video selection into runnable ``(video_ids, shell_cmd)`` pairs.
+
+    THE single owner of the mode→builder dispatch, so callers can't drift (the TUI's ``:run`` and
+    the MCP ``run_custom_command`` tool both go through here):
+    - ``batch``: ONE pair over the whole selection (``{urls}``/``{ids}``).
+    - ``per-video``: one pair per video.
+    Each ``shell_cmd`` already has its url/id ``shlex.quote``d by build_command/build_batch_command.
+    ``video_ids`` is per-run attribution: MCP shapes its result rows by it; the TUI ignores it.
+    """
+    if spec.mode == MODE_BATCH:
+        return [([v.id for v in videos], build_batch_command(spec.template, videos))]
+    return [([v.id], build_command(spec.template, v)) for v in videos]
+
+
 def run_command(cmd: str) -> int:
     """Run a resolved command via the shell and return its exit code.
 
@@ -78,6 +93,46 @@ def run_command(cmd: str) -> int:
     the injected url/id are quoted — the rest is the user's own configuration.
     """
     return subprocess.run(cmd, shell=True).returncode
+
+
+# MCP has no TTY, so it can't stream like the TUI's `:run`; a capturing runner is required to
+# return output to the LLM. Bounded by a timeout because `asyncio.to_thread` cannot be cancelled
+# — without it a hung user command (e.g. one waiting on a prompt) would pin an MCP worker forever.
+DEFAULT_CAPTURE_TIMEOUT = 120  # seconds; mirrors the fabric-subprocess bound
+
+
+@dataclass
+class CommandResult:
+    """Outcome of a captured command run. ``stdout``/``stderr`` may be partial on timeout."""
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
+def run_command_capture(cmd: str, timeout: float = DEFAULT_CAPTURE_TIMEOUT) -> CommandResult:
+    """Run a resolved command via the shell and CAPTURE its output (for MCP; the TUI streams).
+
+    Only the delta from ``run_command`` (above) is capture/text/errors/timeout — same shell=True
+    posture, same quoting contract. ``errors='replace'`` so non-UTF-8 tool output can't raise.
+    On timeout the shell is killed and a partial result is returned with ``timed_out=True`` (note
+    a pipeline's orphaned grandchildren may outlive the killed ``/bin/sh`` — a known shell=True limit).
+    """
+    try:
+        proc = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True,
+            errors="replace", timeout=timeout,
+        )
+        return CommandResult(proc.returncode, proc.stdout or "", proc.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        # e.stdout/e.stderr are bytes-or-str depending on platform; normalize to str.
+        def _s(v) -> str:
+            if v is None:
+                return ""
+            return v if isinstance(v, str) else v.decode("utf-8", "replace")
+        return CommandResult(
+            returncode=-1, stdout=_s(e.stdout), stderr=_s(e.stderr), timed_out=True,
+        )
 
 
 @dataclass

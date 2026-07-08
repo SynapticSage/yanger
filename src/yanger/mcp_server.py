@@ -20,6 +20,7 @@ import subprocess
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional, List
 from dataclasses import asdict
 
@@ -45,7 +46,10 @@ from .core.transcript_fetcher import (
 )
 from .core.proxy import ProxySettings as CoreProxySettings
 from .config.settings import load_settings
-from .models import Playlist, Video, PrivacyStatus
+from .core.custom_command import (
+    load_command_registry, resolve_commands, run_command_capture,
+)
+from .models import Playlist, Video, PrivacyStatus, is_valid_video_id
 from .duplicates import DuplicateDetector
 from .statistics import PlaylistAnalyzer
 
@@ -60,6 +64,13 @@ DEFAULT_TRANSCRIPT_MAX_CHARS = 20000
 # is a separate external process (up to 120s); bounding concurrency keeps the
 # batch responsive without spawning an unbounded swarm of LLM subprocesses.
 FABRIC_BATCH_CONCURRENCY = 4
+
+# run_custom_command fan-out cap. The TUI *confirms* before running on more than this many videos
+# (app.py RUN_CONFIRM_THRESHOLD=5); MCP has no human confirm, so we REJECT beyond the cap rather
+# than run a large batch unconfirmed (and it bounds worst-case wall time: per-video mode is N
+# sequential subprocesses x the capture timeout).
+CUSTOM_COMMAND_MAX_VIDEOS = 5
+CUSTOM_COMMAND_MAX_OUTPUT_CHARS = 20000  # default per-stream (stdout/stderr) truncation
 
 # Transcript fetch+cache and its terminal-vs-transient policy now live in one place:
 # core.transcript_fetcher.fetch_and_cache_transcript (Tier 1 #1). Callers here just invoke it.
@@ -161,7 +172,7 @@ class YangerMCPServer:
         @self.server.list_tools()
         async def list_tools() -> list[Tool]:
             """Return list of available tools."""
-            return [
+            static_tools = [
                 # Playlist Management
                 Tool(
                     name="list_playlists",
@@ -600,6 +611,14 @@ class YangerMCPServer:
                 ),
             ]
 
+            # Strictly additive: the gated custom-command tool is APPENDED, and any failure to
+            # probe the gate/registry must never break discovery of the ~20 static tools above.
+            try:
+                static_tools.extend(self._custom_command_tools())
+            except Exception:
+                logger.warning("Failed to probe custom-command tool gate; omitting it", exc_info=True)
+            return static_tools
+
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             """Handle tool calls."""
@@ -623,7 +642,8 @@ class YangerMCPServer:
         # Tools that don't require YouTube API authentication
         no_auth_tools = [
             "get_transcript", "search_transcripts", "batch_fetch_transcripts",
-            "fabric_analyze", "list_fabric_patterns", "fabric_analyze_batch"
+            "fabric_analyze", "list_fabric_patterns", "fabric_analyze_batch",
+            "run_custom_command",  # runs shell on video ids; never calls the YouTube API
         ]
 
         if name not in no_auth_tools:
@@ -664,6 +684,9 @@ class YangerMCPServer:
             "fabric_analyze": self._fabric_analyze,
             "list_fabric_patterns": self._list_fabric_patterns,
             "fabric_analyze_batch": self._fabric_analyze_batch,
+
+            # Custom commands (opt-in; see MCPSettings.allow_custom_commands)
+            "run_custom_command": self._run_custom_command,
         }
 
         handler = handlers.get(name)
@@ -671,6 +694,144 @@ class YangerMCPServer:
             raise ValueError(f"Unknown tool: {name}")
 
         return await handler(arguments)
+
+    # ----- Custom commands (opt-in; MCPSettings.allow_custom_commands) -------------------
+
+    def _custom_command_tools(self) -> list[Tool]:
+        """The gated ``run_custom_command`` tool, or ``[]`` when the opt-in is off / no eligible
+        commands. Excludes ``confirm: true`` commands from the enum: that flag encodes "always
+        ask me", which the coarse global opt-in can't honor without a human, so those are not
+        advertised (and are refused in the handler too, as defense-in-depth)."""
+        settings = self._settings or load_settings()
+        self._settings = settings
+        if not getattr(getattr(settings, "mcp", None), "allow_custom_commands", False):
+            return []
+        registry = load_command_registry(settings)
+        names = sorted(name for name, spec in registry.items() if not spec.confirm)
+        if not names:
+            return []
+        return [
+            Tool(
+                name="run_custom_command",
+                description=(
+                    "Run one of the user's PRE-CONFIGURED custom shell commands (their `commands:` "
+                    "registry) against one or more videos and return its captured output. You may "
+                    "only select a command by name from the enum — you cannot supply an arbitrary "
+                    "command. Opt-in feature (LLM-driven shell execution)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "enum": names,
+                            "description": "Name of a registered custom command to run.",
+                        },
+                        "video_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": CUSTOM_COMMAND_MAX_VIDEOS,
+                            "description": (
+                                f"1..{CUSTOM_COMMAND_MAX_VIDEOS} YouTube video IDs. A per-video "
+                                "command runs once per id; a batch command runs once for all."
+                            ),
+                        },
+                        "max_output_chars": {
+                            "type": "integer",
+                            "description": "Truncate each captured stdout/stderr to this many chars.",
+                            "default": CUSTOM_COMMAND_MAX_OUTPUT_CHARS,
+                        },
+                    },
+                    "required": ["command", "video_ids"],
+                },
+            )
+        ]
+
+    async def _run_custom_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Execute a registered custom command against video ids; capture and return output.
+
+        Security: opt-in gate re-checked here (defense-in-depth); the LLM only selects a
+        registered command by name; every id must be a well-formed YouTube id (11-char charset,
+        no shell metacharacters) BEFORE any command is built — ``shlex.quote`` alone is bypassable
+        when a user's template embeds the placeholder inside quotes (``echo "got {id}"`` +
+        ``$(...)``); ``confirm: true`` commands are refused.
+
+        Expected refusals return a structured ``{"error": <code>, ...}`` (like the fabric tools),
+        so the LLM gets an actionable code rather than a generic exception.
+        """
+        settings = self._settings or load_settings()
+        self._settings = settings
+        if not getattr(getattr(settings, "mcp", None), "allow_custom_commands", False):
+            return {"error": "disabled", "message": (
+                "run_custom_command is disabled. Set `mcp.allow_custom_commands: true` in "
+                "config.yaml (or YANGER_MCP_ALLOW_CUSTOM_COMMANDS=1) to enable it."
+            )}
+
+        name = str(args.get("command", "")).strip().lower()
+        registry = load_command_registry(settings)
+        spec = registry.get(name)
+        if spec is None:
+            return {"error": "unknown_command", "message": f"No custom command named '{name}'.",
+                    "available": sorted(registry)}
+        if spec.confirm:
+            return {"error": "requires_confirmation", "message": (
+                f"Custom command '{name}' is marked confirm:true; run it from the TUI (:run). "
+                "MCP has no interactive confirmation (elicitation not yet supported)."
+            )}
+
+        video_ids = args.get("video_ids") or []
+        if not isinstance(video_ids, list) or not video_ids:
+            return {"error": "invalid_video_ids", "message": "video_ids must be a non-empty list."}
+        if len(video_ids) > CUSTOM_COMMAND_MAX_VIDEOS:
+            return {"error": "too_many_videos", "max": CUSTOM_COMMAND_MAX_VIDEOS, "message": (
+                f"Too many videos ({len(video_ids)} > {CUSTOM_COMMAND_MAX_VIDEOS}); MCP has no "
+                "confirmation for a large batch. Call with fewer ids."
+            )}
+        # SECURITY (critical): ids flow into a shell=True command; shlex.quote is bypassable when a
+        # template embeds the placeholder inside quotes, so a hostile id ($(...), ;, |, backticks,
+        # spaces) could execute. Reject anything that isn't a well-formed YouTube id (also rejects
+        # non-strings) BEFORE building any command.
+        if not all(isinstance(v, str) and is_valid_video_id(v) for v in video_ids):
+            return {"error": "invalid_video_ids", "message": (
+                "Each video_id must be a well-formed YouTube ID (11 chars, letters/digits/_/-)."
+            )}
+
+        max_chars = args.get("max_output_chars", CUSTOM_COMMAND_MAX_OUTPUT_CHARS)
+        if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 1:
+            # Ignore junk / 0 / negative (0 would mean "unlimited" in _truncate_transcript).
+            max_chars = CUSTOM_COMMAND_MAX_OUTPUT_CHARS
+
+        # Minimal stand-in for a Video: resolve_commands/build_* read only `.id`. NOTE: when the
+        # planned {title} placeholder lands (ROADMAP), build_command will read `.title` and this
+        # shim must be replaced with hydrated Video objects (a cache/metadata fetch) for MCP.
+        targets = [SimpleNamespace(id=v) for v in video_ids]
+
+        # resolve_commands is the single owner of the batch/per-video dispatch (shared with the TUI).
+        results: list[dict[str, Any]] = []
+        for ids_for_run, cmd in resolve_commands(spec, targets):
+            cr = await asyncio.to_thread(run_command_capture, cmd)
+            results.append(self._custom_command_result(ids_for_run, cr, max_chars))
+
+        return {
+            "command": name,
+            "mode": spec.mode,
+            "results": results,
+            "truncated": any(r["truncated"] for r in results),
+        }
+
+    def _custom_command_result(self, video_ids, cr, max_chars) -> dict[str, Any]:
+        """Shape one CommandResult into the tool payload, truncating each captured stream."""
+        stdout, t1 = self._truncate_transcript(cr.stdout, max_chars)
+        stderr, t2 = self._truncate_transcript(cr.stderr, max_chars)
+        return {
+            "video_ids": list(video_ids),
+            "returncode": cr.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "timed_out": cr.timed_out,
+            "truncated": t1 or t2,
+        }
 
     def _invalidate_cache(self, *playlist_ids: Optional[str],
                           playlists_list: bool = False) -> None:

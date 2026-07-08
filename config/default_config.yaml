@@ -87,3 +87,15 @@ youtube:
 #   sum: "yeet {url} | fabric -sp summarize"  # pipes work (shell=True; your own config)
 #   dlall: { run: "yt-dlp {urls}", mode: batch }   # one yt-dlp for the whole selection
 #   wipe:  { run: "trash {url}", confirm: true }    # always prompt before running
+
+
+# MCP server settings.
+mcp:
+  # OPT-IN gate for the MCP `run_custom_command` tool, which lets a connected LLM invoke the
+  # custom commands above (arbitrary shell) against videos. OFF by default — it is LLM-driven
+  # shell execution. When enabled, the LLM can only pick a command BY NAME (not supply its own),
+  # and every video id is shell-quoted; a `confirm: true` command is still refused over MCP
+  # (there is no interactive prompt). NB: enabling exposes the ENTIRE registry, including any
+  # YANGER_CMD_* inherited from the MCP client's launch environment. Also settable via the
+  # YANGER_MCP_ALLOW_CUSTOM_COMMANDS=1 env var.
+  allow_custom_commands: false

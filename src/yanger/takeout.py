@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 
+from .models import is_valid_video_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -411,16 +413,9 @@ class TakeoutParser:
                             pass  # non-numeric duration -> leave unset
     
     def _is_valid_video_id(self, video_id: str) -> bool:
-        """Check if a video ID is valid.
-        
-        Args:
-            video_id: YouTube video ID
-            
-        Returns:
-            True if valid
-        """
-        # YouTube video IDs are 11 characters long
-        return bool(video_id and len(video_id) == 11 and re.match(r'^[a-zA-Z0-9_-]+$', video_id))
+        """Check if a video ID is a well-formed YouTube ID. Delegates to the single
+        implementation in models.is_valid_video_id (also used by the MCP command tool)."""
+        return is_valid_video_id(video_id)
     
     def export_to_json(self, playlists: Dict[str, TakeoutPlaylist], output_path: Path) -> None:
         """Export playlists to JSON file.
