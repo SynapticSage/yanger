@@ -263,8 +263,9 @@ def load_settings(config_dir: Optional[Path] = None) -> Settings:
     if api_key := os.environ.get('YOUTUBE_API_KEY'):
         settings.youtube.api_key = api_key
 
-    if cache_dir := os.environ.get('YANGER_CACHE_DIR'):
-        settings.cache.directory = cache_dir
+    # NB: YANGER_CACHE_DIR is honored by cache.default_cache_dir() (the single resolver used by
+    # PersistentCache + `reset`), not here — it used to be assigned to settings.cache.directory,
+    # which nothing ever read, so the env var was silently dead.
 
     if transcript_cmd := os.environ.get('YANGER_TRANSCRIPT_COMMAND'):
         settings.transcripts.transcript_command = transcript_cmd

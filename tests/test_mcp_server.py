@@ -435,6 +435,9 @@ class TestVideoTools:
         # Both playlists have 2 videos each with "Test" in title = 4 total
         assert result["count"] == 4
         assert result["query"] == "test"
+        # Coverage annotation: callers must know this only sees cached playlists.
+        assert result["coverage"]["cached_playlists_searched"] >= 1
+        assert "cached" in result["coverage"]["note"].lower()
 
     @pytest.mark.asyncio
     async def test_search_videos_with_limit(self, mcp_server):

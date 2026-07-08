@@ -16,7 +16,21 @@ from yanger.cache import PersistentCache, default_cache_dir
 def _sandbox_home(monkeypatch, tmp_path):
     """Point $HOME at a temp dir; the path resolvers read it at call time."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("YANGER_CACHE_DIR", raising=False)  # deterministic: HOME-based default
     return tmp_path
+
+
+# ----- YANGER_CACHE_DIR is honored by the single resolver ------------------------
+
+def test_default_cache_dir_honors_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("YANGER_CACHE_DIR", str(tmp_path / "custom-cache"))
+    assert default_cache_dir() == tmp_path / "custom-cache"
+
+
+def test_default_cache_dir_falls_back_to_home(monkeypatch, tmp_path):
+    monkeypatch.delenv("YANGER_CACHE_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert default_cache_dir() == tmp_path / ".cache" / "yanger"
 
 
 # ----- 0.3 reset targets the real paths -----------------------------------------

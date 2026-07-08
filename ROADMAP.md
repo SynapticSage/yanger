@@ -23,11 +23,16 @@ the headline custom-command registry — cheaper and safer to build.
 - **✅ RESOLVED — Overlays don't take focus / render (reported 2026-07-02, "never resolved").**
   Turned out to be TWO different failure modes (the pilot harness, Tier-1 #2, diagnosed both by
   booting the app and measuring widget regions):
-  - **(a) command input invisible → FIXED (layout, not CSS).** The `Input` was composited
-    *off-screen* (rows 30-31 on a 30-row terminal): `#command-input` and `#status-bar` both
-    `dock: bottom` collided, and an internal `margin-top` pushed the Input below the viewport.
-    Fix: `#command-input` `margin-bottom: 1` (sit above the status bar) + drop the Input `margin-top`
-    / container `border-top`. The wall of `!important` colour CSS was treating the wrong disease.
+  - **(a) command input invisible → FIXED (commit 3413188, by the fable-cmdinput agent on the
+    REAL Textual 8.2.8 runtime).** My first attempt (the off-screen `margin-bottom` layout fix on
+    Textual 6.5.0) was NOT the user's bug — everyone, me included, debugged the wrong Textual. Real
+    cause on 8.x: `Input:focus { border: tall }` inside a `height:1` Input consumes one row top + one
+    bottom → ZERO content rows → the value text is never composited (Input.value fills invisibly,
+    which is exactly why Enter worked and hid it). Plus a white-on-white `.input--cursor` override
+    and `select_on_focus=True` (selected the pre-filled `:`, so the first keystroke replaced it). Fix:
+    `border:none` on the focused input, remove the cursor override, `select_on_focus=False`. Same
+    fix applied to the search input. Verified on 8.2.8: typed text is actually PAINTED (asserted vs
+    the compositor, not `Input.value`). Lesson: debug/verify on the user's runtime, not the venv.
   - **(b) help ignores arrow/j/k → FIXED (ModalScreen).** `HelpOverlay` is now a `ModalScreen`
     (pushed via `action_help`) that owns the keyboard: focuses its scroll area, scrolls on
     arrow/j/k/pgup/pgdn/home/end, dismisses on escape/?/q, and `event.stop()`s every key so nothing
@@ -54,12 +59,11 @@ the headline custom-command registry — cheaper and safer to build.
     a `help_overlay`-focus early-return in `on_key` and give `HelpOverlay.on_key` up/down handling.*
     *Impact High (usability) · Effort M · verifiable with the Tier-1 #2 pilot.*
 
-- **⚠️ Tests ran on the WRONG Textual for most of this run (found by the Tier-1 #2 review).**
-  The `.venv` has no `pytest`, so `uv run pytest` silently falls back to homebrew Python 3.10 +
-  **Textual 0.47.1** — 6 majors below the pinned `textual>=0.86` (venv has 6.5.0). The suite passed
-  on both, but Textual-version-sensitive code was validated on an unsupported framework. **Fix: use
-  `uv run --extra dev pytest`** (runs the venv/6.5.0). Consider adding pytest to the venv or a
-  Makefile/tox target so the correct runner is the default. (Project memory updated.)
+- **✅ RESOLVED — Tests ran on the WRONG Textual (found by the Tier-1 #2 review).** The `.venv`
+  had no `pytest`, so `uv run pytest` silently fell back to homebrew Python 3.10 + **Textual 0.47.1**.
+  **Fixed (commit 9d908aa):** pytest/pytest-asyncio added to `[dependency-groups].dev` (uv installs
+  it by default), so plain `uv run pytest` now runs the venv (Python 3.14 / Textual 6.5.0) —
+  verified. Also directly caused a shipped startup crash: see the guard fix (`_apply_colorscheme`).
 
 - **Bulk-edit renames are silently dropped but reported as done.** (Surfaced by the 0.8
   arch review.) The live apply path `operation_history.BulkEditOperation.execute` never
@@ -68,7 +72,33 @@ the headline custom-command registry — cheaper and safer to build.
   bulk editor is told it worked while nothing happened. (YouTube API can't rename playlist
   *items*; playlist/video title renames go through `cw`.) *Fix: either drop renames from the
   bulk-edit preview/summary, or surface them as an explicit "not applied (unsupported)" result.
-  Small · UX-correctness.*
+  Small · UX-correctness.* **⏭️ Skipped in the 2026-07-07 /goal pass:** the fix embeds a real
+  product decision — DROP bulk rename-detection vs. actually WIRE renames through
+  `rename_playlist`/`update_video_title` (make the feature real). That's a human call, not an
+  obvious mechanical fix; and it touches `app.py`, which the fable-cmdinput agent has open.
+
+## /goal autonomous pass — status (2026-07-07)
+
+Directive: do the obvious, low-human-input roadmap items; skip the rest. On the
+`worktree-roadmap-knockout` branch (NOT merged to master pending human approval).
+
+- **Done this pass:** YANGER_CACHE_DIR now actually works + dead `settings.cache.directory`
+  removed (c92f6c3); Tier-2 cache-blind-spot coverage annotation (fb5a346); Tier-3 guard-favorites
+  verified N/A; `pytest` in the uv dev-group so `uv run pytest` uses the venv (9d908aa); Takeout
+  Z-timestamp no-op fixed (6cc03fa); the test-env "wrong Textual" follow-up resolved; and the
+  **command-input "typed text invisible" bug FIXED** by the fable-cmdinput agent — the real cause
+  (`Input:focus { border: tall }` clipping content to zero rows + `select_on_focus`) found and
+  verified on the user's actual Textual 8.2.8 runtime (commit 3413188).
+- **Skipped — needs human judgment / too large (per directive):**
+  - Tier-2 **elicitation**, **resources+prompts**, **sampling**, **MCP undo parity** — real MCP
+    features needing design/client-capability decisions.
+  - The **gated MCP `run_custom_command` tool** — depends on the elicitation gate above.
+  - Tier-3 **decompose app.py** (structural), **takeout improvements** (multi-part, wants real
+    Takeout data), **full path centralization**, **YAML keybindings** (feature-design).
+  - Tier-1 **#3 tail** (~66 more `except` sites) — needs per-site failure-mode judgment; not
+    mechanically obvious.
+  - **All 3 "Decisions needed"** — explicitly human product calls (drop the rich-UI branch; drop
+    vision features; reconcile CLAUDE.md).
 
 ## Changelog
 
@@ -316,9 +346,9 @@ minimal and safe; everything else is an explicit later slice:
   `docs/MCP_SERVER_PLAN.md` Phase 4). *Med · M.*
 - **Sampling** for LLM pipelines using the connected client's model (removes the hard
   local-Fabric/key dependency in `fabric_analyze`). *Med · M.*
-- **Fix cache-only blind spots.** `search_videos` and cross-playlist `find_duplicates`
-  only scan cached playlists and silently return partial results — prime the cache or
-  annotate coverage. *Med · M.*
+- ✅ **DONE — Fix cache-only blind spots.** `search_videos` and cross-playlist `find_duplicates`
+  now return a `coverage` field (cached playlists searched/scanned + a note to run
+  list_playlists/get_playlist) so a partial result isn't read as authoritative. +2 tests. *(commit fb5a346)*
 
 ---
 
@@ -340,8 +370,9 @@ minimal and safe; everything else is an explicit later slice:
   assigned but never passed into any `PersistentCache(...)`, which is why 0.3's `default_cache_dir()`
   is correct today. Centralization must reconcile this: either wire the setting through (and have
   `reset` consume the same resolver) or delete it. Until then it's a latent divergence trap.
-- **Guard deprecated favorites-playlist modification** — ensure no mutation path targets a
-  "favorites" virtual playlist (YouTube API deprecation). *Low · S.*
+- ✅ **N/A (verified 2026-07-07) — Guard deprecated favorites-playlist modification.** A
+  grep for `favorite` across `src/` is empty: yanger has NO favorites-playlist handling, so no
+  mutation path targets one. Nothing to guard. (Re-open only if favorites support is ever added.)
 - **User-editable keybindings (YAML loader)** — the registry is hardcoded; add a
   `config/keybindings.yaml`. *Med · M.*
 

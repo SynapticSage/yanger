@@ -113,6 +113,63 @@ async def test_command_input_is_on_screen_when_typing(app_pilot):
     assert "gt" in iw.value  # typed chars land in (and render in) the visible input
 
 
+def _composited_text(app) -> str:
+    """The text actually PAINTED to the terminal (compositor output), rows joined.
+
+    Input.value can be fully populated while nothing is painted (that trap hid the
+    'typing is invisible' bug behind value-based assertions) — always assert against
+    this, not widget state. `_compositor.render_strips()` is private but stable
+    across the Textual versions we run (6.5.0 venv, 8.2.8 homebrew runtime).
+    """
+    strips = app.screen._compositor.render_strips()
+    return "\n".join("".join(seg.text for seg in strip) for strip in strips)
+
+
+async def test_command_input_typed_text_is_composited(app_pilot):
+    """Regression: `CommandInput > Input:focus { border: tall }` inside height:1 left
+    ZERO content rows — only border glyphs were painted and typed text never appeared
+    on screen (while Input.value filled invisibly)."""
+    app, pilot = app_pilot
+    app.action_command_mode()
+    await pilot.pause()
+    await pilot.press("d", "l")
+    await pilot.pause()
+
+    iw = app.query_one("#command-input").input_widget
+    assert iw.value == ":dl"  # select_on_focus must not eat the pre-filled ':'
+    assert iw.size.height >= 1, f"Input content area collapsed: {iw.size}"
+    assert ":dl" in _composited_text(app), "typed command text was not painted"
+
+
+async def test_command_enter_preserves_colon_prefix(app_pilot):
+    """Regression: select_on_focus selected the pre-filled ':' so the first keystroke
+    replaced it; submissions then failed on_input_submitted's startswith(':') gate and
+    Enter silently did nothing."""
+    app, pilot = app_pilot
+    received = []
+    app.command_input.on_submit_callback = received.append
+    app.action_command_mode()
+    await pilot.pause()
+    await pilot.press("h", "e", "l", "p", "enter")
+    await pilot.pause()
+    assert received == [":help"]
+
+
+async def test_search_input_typed_text_is_composited(app_pilot):
+    """Regression (same family as the command input): SearchInput stacked '/' label and
+    a 3-row bordered Input vertically inside a 1-row content area — the Input's text
+    row was clipped out and typed search text never painted."""
+    app, pilot = app_pilot
+    await pilot.press("slash")
+    await pilot.pause()
+    sinp = app.query_one("#search-input")
+    assert sinp.has_focus
+    await pilot.press("x", "y", "z")
+    await pilot.pause()
+    assert sinp.value == "xyz"
+    assert "xyz" in _composited_text(app), "typed search text was not painted"
+
+
 async def test_confirm_modal_escape_cancels(app_pilot):
     app, pilot = app_pilot
     results = []

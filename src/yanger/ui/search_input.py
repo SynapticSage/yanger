@@ -34,37 +34,41 @@ class SearchInput(Container):
     SearchInput.visible {
         display: block;
     }
-    
+
+    /* "/" label + input + hint share the single content row inside the tall border.
+       (The default vertical layout clipped the Input's text row out of the widget —
+       typed search text was never composited.) */
+    SearchInput .search-container {
+        layout: horizontal;
+        height: 1;
+    }
+
     SearchInput Input {
-        width: 100%;
+        width: 1fr;
+        height: 1;
         background: black !important;
         color: white !important;
         text-style: not dim !important;
-        border: tall $accent;
+        /* No border: it would consume the row above/below and leave 0 content rows
+           at height 1 (same invisibility bug as the command input). */
+        border: none;
     }
-    
+
     SearchInput Input:focus {
-        border: tall $primary;
+        border: none;
         color: white !important;
         background: rgb(20, 20, 20) !important;
         text-style: not dim !important;
     }
-    
-    /* Override ALL internal Input elements */
-    SearchInput Input * {
-        color: white !important;
-    }
-    
+
     /* Target internal input elements */
     SearchInput Input > .input--placeholder {
         color: gray !important;
     }
-    
-    SearchInput Input > .input--cursor {
-        color: white !important;
-        background: white !important;
-    }
-    
+
+    /* NOTE: no .input--cursor override — a past white-on-white one hid the char
+       under the cursor. Theme defaults render it correctly. */
+
     SearchInput Input .input--suggestion {
         color: darkgray !important;
     }
