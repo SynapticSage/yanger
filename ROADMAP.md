@@ -70,6 +70,28 @@ the headline custom-command registry — cheaper and safer to build.
   bulk-edit preview/summary, or surface them as an explicit "not applied (unsupported)" result.
   Small · UX-correctness.*
 
+## /goal autonomous pass — status (2026-07-07)
+
+Directive: do the obvious, low-human-input roadmap items; skip the rest. On the
+`worktree-roadmap-knockout` branch (NOT merged to master pending human approval).
+
+- **Done this pass:** YANGER_CACHE_DIR now actually works + dead `settings.cache.directory`
+  removed (c92f6c3); Tier-2 cache-blind-spot coverage annotation (fb5a346); Tier-3 guard-favorites
+  verified N/A.
+- **In progress (fable-cmdinput agent):** the command-input "typed text invisible" bug — root cause
+  found: `Input:focus { border: tall }` inside a `height:1` Input clips the content row to zero on
+  Textual 8.x (the user's real runtime), plus `select_on_focus` eating the pre-filled `:`.
+- **Skipped — needs human judgment / too large (per directive):**
+  - Tier-2 **elicitation**, **resources+prompts**, **sampling**, **MCP undo parity** — real MCP
+    features needing design/client-capability decisions.
+  - The **gated MCP `run_custom_command` tool** — depends on the elicitation gate above.
+  - Tier-3 **decompose app.py** (structural), **takeout improvements** (multi-part, wants real
+    Takeout data), **full path centralization**, **YAML keybindings** (feature-design).
+  - Tier-1 **#3 tail** (~66 more `except` sites) — needs per-site failure-mode judgment; not
+    mechanically obvious.
+  - **All 3 "Decisions needed"** — explicitly human product calls (drop the rich-UI branch; drop
+    vision features; reconcile CLAUDE.md).
+
 ## Changelog
 
 Completed items land here (newest first) with the commit that shipped them. Full
@@ -316,9 +338,9 @@ minimal and safe; everything else is an explicit later slice:
   `docs/MCP_SERVER_PLAN.md` Phase 4). *Med · M.*
 - **Sampling** for LLM pipelines using the connected client's model (removes the hard
   local-Fabric/key dependency in `fabric_analyze`). *Med · M.*
-- **Fix cache-only blind spots.** `search_videos` and cross-playlist `find_duplicates`
-  only scan cached playlists and silently return partial results — prime the cache or
-  annotate coverage. *Med · M.*
+- ✅ **DONE — Fix cache-only blind spots.** `search_videos` and cross-playlist `find_duplicates`
+  now return a `coverage` field (cached playlists searched/scanned + a note to run
+  list_playlists/get_playlist) so a partial result isn't read as authoritative. +2 tests. *(commit fb5a346)*
 
 ---
 
@@ -340,8 +362,9 @@ minimal and safe; everything else is an explicit later slice:
   assigned but never passed into any `PersistentCache(...)`, which is why 0.3's `default_cache_dir()`
   is correct today. Centralization must reconcile this: either wire the setting through (and have
   `reset` consume the same resolver) or delete it. Until then it's a latent divergence trap.
-- **Guard deprecated favorites-playlist modification** — ensure no mutation path targets a
-  "favorites" virtual playlist (YouTube API deprecation). *Low · S.*
+- ✅ **N/A (verified 2026-07-07) — Guard deprecated favorites-playlist modification.** A
+  grep for `favorite` across `src/` is empty: yanger has NO favorites-playlist handling, so no
+  mutation path targets one. Nothing to guard. (Re-open only if favorites support is ever added.)
 - **User-editable keybindings (YAML loader)** — the registry is hardcoded; add a
   `config/keybindings.yaml`. *Med · M.*
 
