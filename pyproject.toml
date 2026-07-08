@@ -58,6 +58,15 @@ mcp = [
     "mcp>=1.0.0",
 ]
 
+# uv installs this group into the .venv BY DEFAULT (unlike an optional-dependencies extra),
+# so plain `uv run pytest` uses the venv's Python/Textual instead of silently falling back to a
+# system pytest on an unrelated Textual. Keep pytest here in sync with the `dev` extra above.
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+]
+
 [project.scripts]
 yanger = "yanger.cli:main"
 
