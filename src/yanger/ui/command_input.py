@@ -78,29 +78,25 @@ class CommandInput(Container):
         text-style: not dim !important;
         border: none;
     }
-    
+
     CommandInput > Input:focus {
-        border: tall $primary;
+        /* MUST stay border: none. Textual borders consume one full row top AND bottom,
+           so any border inside height:1 leaves 0 content rows — the value text is never
+           composited (the "typing is invisible" bug: only border glyphs were painted). */
+        border: none;
         color: white !important;
         background: rgb(20, 20, 20) !important;
         text-style: not dim !important;
     }
-    
-    /* Override ALL internal Input elements */
-    CommandInput Input * {
-        color: white !important;
-    }
-    
+
     /* Target the actual text content area */
     CommandInput Input > .input--placeholder {
         color: gray !important;
     }
-    
-    CommandInput Input > .input--cursor {
-        color: white !important;
-        background: white !important;
-    }
-    
+
+    /* NOTE: no .input--cursor override here — a past white-on-white one made the
+       character under the cursor invisible. Theme defaults render it correctly. */
+
     CommandInput Input .input--suggestion {
         color: darkgray !important;
     }
@@ -129,7 +125,11 @@ class CommandInput(Container):
         self.input_widget = Input(
             placeholder="Enter command...",
             suggester=CommandSuggester(),
-            id="command-input-field"
+            id="command-input-field",
+            # Focus must NOT select the pre-filled ":" — with select_on_focus the first
+            # keystroke replaced it, so submissions lost their ':' prefix and silently
+            # failed the startswith(":") gate in on_input_submitted.
+            select_on_focus=False,
         )
         # Force dark mode and explicit styles
         self.input_widget.styles.color = "white"

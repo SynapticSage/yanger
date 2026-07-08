@@ -18,19 +18,17 @@ Input:focus {
     text-style: not dim !important;
 }
 
-/* Force all internal Input elements to be visible */
-Input * {
-    color: white !important;
-}
+/* NOTE: no `Input *` colour override — the universal child selector also matches
+   Input's component classes (.input--cursor etc.); a past `color: white !important`
+   here forced the char under the cursor white-on-light (invisible). */
 
 Input > .input--placeholder {
     color: gray !important;
 }
 
-Input > .input--cursor {
-    color: white !important;
-    background: white !important;
-}
+/* NOTE: no .input--cursor override — a past `color: white; background: white`
+   rule made the character under the cursor invisible in every Input.
+   Textual's theme defaults ($input-cursor-*) render it correctly. */
 
 Input .input--suggestion {
     color: darkgray !important;
