@@ -81,6 +81,71 @@ async def test_help_is_modal_and_owns_the_keyboard(app_pilot):
     assert not isinstance(app.screen, HelpOverlay)          # dismissed back to the base screen
 
 
+async def test_help_search_finds_highlights_and_cycles(app_pilot):
+    """less-style help search: `/` opens a search box; typing + Enter finds matches and jumps to
+    the first; n/N cycle. Drives real keystrokes through the modal."""
+    app, pilot = app_pilot
+    app.action_help()
+    await pilot.pause()
+    hs = app.screen
+    assert isinstance(hs, HelpOverlay)
+
+    await pilot.press("slash")
+    await pilot.pause()
+    search = hs.query_one("#help-search")
+    assert search.display and search.has_focus     # search box opened + focused
+
+    for ch in "playlist":                           # a term that appears on many lines
+        await pilot.press(ch)
+    await pilot.pause()
+    assert search.value == "playlist"               # typing landed in the box (not scrolling)
+
+    await pilot.press("enter")
+    await pilot.pause()
+    assert not search.display                        # box closed, pager refocused
+    assert len(hs._matches) >= 2 and hs._match_idx == 0
+    # the footer paints the match position + echoed query ('playlist' only appears there)
+    assert "1/" in _composited_text(app) and "'playlist'" in _composited_text(app)
+
+    await pilot.press("n")
+    await pilot.pause()
+    assert hs._match_idx == 1                         # cycled forward
+    assert "2/" in _composited_text(app)             # painted count updated
+    await pilot.press("N")
+    await pilot.pause()
+    assert hs._match_idx == 0                         # cycled back
+
+
+async def test_help_search_escape_cancels_without_closing_overlay(app_pilot):
+    app, pilot = app_pilot
+    app.action_help()
+    await pilot.pause()
+    hs = app.screen
+    await pilot.press("slash")
+    await pilot.pause()
+    for ch in "zzz":
+        await pilot.press(ch)
+    await pilot.press("escape")
+    await pilot.pause()
+    assert not hs.query_one("#help-search").display
+    assert hs._matches == []
+    assert isinstance(app.screen, HelpOverlay)        # cancel searched, did NOT close help
+
+
+async def test_help_search_no_matches_reports(app_pilot):
+    app, pilot = app_pilot
+    app.action_help()
+    await pilot.pause()
+    hs = app.screen
+    await pilot.press("slash")
+    await pilot.pause()
+    for ch in "qjxqjx":
+        await pilot.press(ch)
+    await pilot.press("enter")
+    await pilot.pause()
+    assert hs._matches == [] and hs._query == "qjxqjx"
+
+
 @pytest.mark.parametrize("dismiss_key", ["escape", "q", "question_mark"])
 async def test_help_dismiss_keys(app_pilot, dismiss_key):
     app, pilot = app_pilot
