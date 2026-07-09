@@ -258,9 +258,13 @@ class CommandInput(Container):
             event.stop()
             
         elif event.key == "tab":
-            # Accept suggestion
-            if self.input_widget and self.input_widget.suggestion:
-                self.input_widget.value = self.input_widget.suggestion
+            # Accept the current auto-suggestion. Textual exposes NO public accessor for the
+            # computed suggestion — it lives on the private reactive `_suggestion` (present on
+            # every Textual we run: 6.5.0 and 8.2.8). There is no `Input.suggestion`, which is
+            # why the old code crashed with AttributeError on any Tab press.
+            suggestion = getattr(self.input_widget, "_suggestion", "") if self.input_widget else ""
+            if suggestion:
+                self.input_widget.value = suggestion
                 self.input_widget.cursor_position = len(self.input_widget.value)
             event.stop()
 

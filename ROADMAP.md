@@ -92,7 +92,15 @@ Directive: do the obvious, low-human-input roadmap items; skip the rest. On the
 - **Skipped — needs human judgment / too large (per directive):**
   - Tier-2 **elicitation**, **resources+prompts**, **sampling**, **MCP undo parity** — real MCP
     features needing design/client-capability decisions.
-  - The **gated MCP `run_custom_command` tool** — depends on the elicitation gate above.
+  - ✅ **DONE (resumed loop 2026-07-08) — the gated MCP `run_custom_command` tool.** Shipped
+    *before* elicitation (deviation from the original sequencing), substituting: opt-in gate
+    (`mcp.allow_custom_commands`, default OFF), `confirm:true` commands excluded-from-enum AND
+    refused, and a fan-out cap that rejects (not truncates). Adversarial-critic + code + arch
+    review; the code review caught a **CRITICAL command-injection** (a template embedding `{id}`
+    inside quotes defeats `shlex.quote`, so a hostile LLM-supplied id `$(...)` executed) — fixed
+    by validating every id to the 11-char YouTube charset via a shared `models.is_valid_video_id`
+    *before* building any command. Clean seam left for elicitation (drop the enum filter, swap the
+    refusal for an elicit). 22 tests. *(worktree; not yet on master)*
   - Tier-3 **decompose app.py** (structural), **takeout improvements** (multi-part, wants real
     Takeout data), **full path centralization**, **YAML keybindings** (feature-design).
   - Tier-1 **#3 tail** (~66 more `except` sites) — needs per-site failure-mode judgment; not

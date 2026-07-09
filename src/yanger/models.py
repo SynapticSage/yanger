@@ -4,10 +4,26 @@ Defines the core data structures used throughout the application.
 """
 # Created: 2025-08-03
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from enum import Enum
+
+
+_VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
+
+
+def is_valid_video_id(video_id: str) -> bool:
+    """True iff ``video_id`` is a well-formed YouTube video ID (exactly 11 chars, [A-Za-z0-9_-]).
+
+    Single source of truth (Takeout import + the MCP run_custom_command tool both use it). For
+    run_custom_command this is a SECURITY control, not just a sanity check: ids flow into a
+    ``shell=True`` command, and ``shlex.quote`` is bypassable when a user's template embeds the
+    placeholder inside quotes (``echo "got {id}"``) — so a hostile id like ``$(...)`` must be
+    rejected *before* any command is built. This charset admits no shell metacharacters.
+    """
+    return bool(video_id) and _VIDEO_ID_RE.fullmatch(video_id) is not None
 
 
 class PrivacyStatus(Enum):

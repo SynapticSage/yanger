@@ -67,9 +67,12 @@ def cli(ctx: click.Context, version: bool, verbose: bool, config_dir: Optional[s
     if config_dir:
         ctx.obj['config_dir'] = Path(config_dir)
     
-    # If no subcommand, run the main TUI
+    # If no subcommand, run the main TUI. Pass explicit defaults: ctx.invoke() fills params we
+    # DON'T pass with Click's Sentinel.UNSET (not the options' real defaults), which reached the
+    # app as log_file=Sentinel (the "Failed to initialize command logger … not 'Sentinel'"
+    # warning) and no_cache=Sentinel (truthy -> use_cache=False, silently disabling the cache).
     if ctx.invoked_subcommand is None:
-        ctx.invoke(run)
+        ctx.invoke(run, no_cache=False, log=None, log_level='INFO')
 
 
 @cli.command()

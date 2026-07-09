@@ -155,6 +155,21 @@ async def test_command_enter_preserves_colon_prefix(app_pilot):
     assert received == [":help"]
 
 
+async def test_command_tab_accepts_suggestion_without_crashing(app_pilot):
+    """Regression: on_key read `Input.suggestion`, which exists on NO Textual we run (6.5.0 and
+    8.2.8 both only have the private `_suggestion`), so ANY Tab press in command mode raised
+    AttributeError. Tab must be safe AND accept the auto-suggestion."""
+    app, pilot = app_pilot
+    app.action_command_mode()
+    await pilot.pause()
+    await pilot.press("t", "r", "a", "n")   # ':tran' -> suggester offers ':transcript'
+    await pilot.pause()
+    await pilot.press("tab")                 # crashed here before the fix
+    await pilot.pause()
+    assert app.is_running
+    assert app.query_one("#command-input").input_widget.value == ":transcript"
+
+
 async def test_search_input_typed_text_is_composited(app_pilot):
     """Regression (same family as the command input): SearchInput stacked '/' label and
     a 3-row bordered Input vertically inside a 1-row content area — the Input's text

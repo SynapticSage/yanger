@@ -36,7 +36,7 @@ from .core.transcript_command import (
     resolve_transcript_command,
     run_transcript_command,
 )
-from .core.custom_command import load_command_registry, run_command, build_batch_command, MODE_BATCH
+from .core.custom_command import load_command_registry, run_command, resolve_commands
 from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation, BulkEditOperation
 from .command_logger import CommandLogger
 from .export import PlaylistExporter
@@ -96,9 +96,11 @@ class YouTubeRangerApp(App):
         self.config_dir = config_dir or Path.home() / ".config" / "yanger"
         self.use_cache = use_cache
         
-        # Initialize command logger if log file specified
+        # Initialize command logger if a real log-file path was specified. The isinstance guard
+        # is defensive: only a str/Path should ever init the logger (a truthy non-path like a
+        # Click Sentinel would otherwise raise inside CommandLogger).
         self.command_logger: Optional[CommandLogger] = None
-        if log_file:
+        if log_file and isinstance(log_file, (str, Path)):
             try:
                 self.command_logger = CommandLogger(log_file, log_level)
                 logger.info(f"Command logging enabled to {log_file}")
@@ -2240,10 +2242,9 @@ class YouTubeRangerApp(App):
         suspend() wraps the WHOLE run (not each command) to avoid screen flicker. All injected
         url/id are shlex-quoted by build_command/build_batch_command.
         """
-        if spec.mode == MODE_BATCH:
-            cmds = [build_batch_command(spec.template, videos)]
-        else:
-            cmds = [build_command(spec.template, v) for v in videos]
+        # resolve_commands owns the batch/per-video dispatch (shared with the MCP tool); the TUI
+        # ignores the per-run video_ids and just needs the flat command list to run + count.
+        cmds = [cmd for _ids, cmd in resolve_commands(spec, videos)]
         exit_codes: List[int] = []
         try:
             with self.suspend():
