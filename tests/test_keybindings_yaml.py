@@ -246,6 +246,7 @@ def _user_pilot(text):
 x_new_playlist = _user_pilot('new_playlist: "x"\n')
 big_q_quit = _user_pilot('quit: "Q"\n')
 malformed = _user_pilot('new_playlist: [x\n')
+comma_search = _user_pilot('search: ","\n')
 
 
 async def test_sequence_override_rebinds_the_key(x_new_playlist):
@@ -303,3 +304,17 @@ async def test_malformed_yaml_warns_and_keeps_defaults(malformed):
     await pilot.press("g", "n")
     await pilot.pause()
     assert calls == [("action_new_playlist", ())]
+
+
+async def test_comma_binding_override_fires_and_replaces_default(comma_search):
+    """',' is Textual's keymap separator; the override must still bind the comma key."""
+    app, pilot, notes = comma_search
+    assert not [n for n in notes if n[1] == "warning"]
+    calls = []
+    _spy(app, calls, "action_search", async_=False)
+    await pilot.press("slash")
+    await pilot.pause()
+    assert calls == []
+    await pilot.press("comma")
+    await pilot.pause()
+    assert calls == [("action_search", ())]

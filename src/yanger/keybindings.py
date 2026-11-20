@@ -58,8 +58,12 @@ _NAMED_KEYS = {
     "enter", "escape", "space", "tab", "backspace", "delete", "insert", "home", "end",
     "pageup", "pagedown", "up", "down", "left", "right",
 } | {f"f{i}" for i in range(1, 25)}
+# Ctrl combos most terminals send as the same byte as another key, so they arrive under that
+# key's name and a binding to them would never fire (it would also dodge the reserved and
+# conflict checks): ctrl+i is the tab byte, ctrl+m the enter byte, ctrl+h the backspace byte.
+_TERMINAL_ALIASES = {"ctrl+i": "tab", "ctrl+m": "enter", "ctrl+h": "backspace"}
 # Modifier combos Textual can deliver ("ctrl+r", "shift+up"...).
-_MODIFIER_KEYS = {k.value for k in _TextualKeys if "+" in k.value}
+_MODIFIER_KEYS = {k.value for k in _TextualKeys if "+" in k.value} - set(_TERMINAL_ALIASES)
 # Keys Textual itself owns (focus, copy / quit hint, command palette, quit): never user-bound.
 RESERVED_KEYS = {"tab", "shift+tab", "ctrl+c", "ctrl+p", "ctrl+q"}
 
@@ -83,7 +87,11 @@ def canonical_token(token: str) -> Optional[str]:
 
 
 def _bad_token_warning(action: str, token: str) -> str:
-    hint = 'a key is one character or a key name such as "enter", "pageup", "ctrl+r"'
+    if token in _TERMINAL_ALIASES:
+        return (f'keybindings.yaml: "{action}": "{token}" reaches the app as '
+                f'"{_TERMINAL_ALIASES[token]}" on most terminals, so it would never fire. '
+                'Keeping its defaults.')
+    hint ='a key is one character or a key name such as "enter", "pageup", "ctrl+r"'
     if "+" not in token and token.isprintable() and len(token) > 1:
         hint += f'; separate the keys of a sequence with spaces (did you mean "{" ".join(token)}"?)'
     return f'keybindings.yaml: "{action}": unknown key "{token}" ({hint}). Keeping its defaults.'
@@ -147,7 +155,9 @@ class KeybindingRegistry:
     """Central registry for all keybindings and commands."""
     
     def __init__(self):
-        self.keybindings: Dict[str, Keybinding] = {}  # display key -> binding (help reads this)
+        # action id -> binding (help reads .values()). Not keyed by display string: two
+        # different sequences can display alike ("f1" the F1 key, "f 1" f then 1).
+        self.keybindings: Dict[str, Keybinding] = {}
         self._actions: Dict[str, Keybinding] = {}     # action id -> binding
         self._defaults: Dict[str, List[str]] = {}     # action id -> default key sequences
         self._overridden: set = set()                 # action ids whose keys are user overrides
@@ -393,7 +403,7 @@ class KeybindingRegistry:
         )
         self._actions[action] = binding
         self._defaults[action] = list(keys)
-        self.keybindings[binding.key] = binding
+        self.keybindings[action] = binding
 
     def get_action(self, action: str) -> Keybinding:
         """The binding registered under ``action`` (KeyError if unknown)."""
@@ -442,7 +452,6 @@ class KeybindingRegistry:
             binding.keys = [" ".join(seq) for seq in effective[action]]
             binding.key = display_keys(binding.keys)
         self._overridden = set(accepted)
-        self.keybindings = {b.key: b for b in self._actions.values()}
         return warnings
 
     def _parse_override(self, action: str, values, rebind_bindings: bool,
@@ -510,9 +519,12 @@ class KeybindingRegistry:
                 yield action, (key,), other, seq
 
     def binding_keymap(self) -> Dict[str, str]:
-        """Textual keymap ({binding id: "k1,k2"}) for the overridden BINDING-kind actions."""
+        """Textual keymap ({binding id: "k1,k2"}) for the overridden BINDING-kind actions.
+
+        Textual splits the value on ",", so the comma key goes by its Textual name.
+        """
         return {
-            a: ",".join(self._actions[a].keys)
+            a: ",".join("comma" if k == "," else k for k in self._actions[a].keys)
             for a in sorted(self._overridden) if self._actions[a].kind == BINDING
         }
 

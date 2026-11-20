@@ -128,7 +128,7 @@ quit: "Q"                    # a single-key Textual binding (also help, command_
 ```
 
 - A listed action's keys **replace** its defaults. You cannot unbind an action.
-- Startup never fails on a bad entry. yanger shows a warning and that action keeps its defaults. Bad entries include an unknown action or key (such as `"dd"` for `"d d"`), a reserved key (`tab`, `ctrl+c`, `ctrl+p`, `ctrl+q`), or two actions on the same keys.
+- Startup never fails on a bad entry. yanger shows a warning and that action keeps its defaults. Bad entries include an unknown action or key (such as `"dd"` for `"d d"`), a reserved key (`tab`, `ctrl+c`, `ctrl+p`, `ctrl+q`), a key most terminals send as another key (`ctrl+i` is tab, `ctrl+m` is enter, `ctrl+h` is backspace), or two actions on the same keys.
 - You cannot change the sort-menu keys after `o`, the keys inside dialogs, or the help screen's keys. If you move navigation off the arrow keys, the arrows still scroll the column without moving the selection.
 - yanger does not read the `keybindings:` section of `config.yaml`.
 

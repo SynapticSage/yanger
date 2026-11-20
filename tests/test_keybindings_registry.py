@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from yanger.keybindings import (
-    BINDING, SEQUENCE, KeySequenceMatcher, MatchResult, display_keys,
+    BINDING, SEQUENCE, KeySequenceMatcher, MatchResult, canonical_token, display_keys,
     load_keybinding_overrides, registry,
 )
 
@@ -25,13 +25,18 @@ def _restore_registry_defaults():
     registry.apply_overrides({})
 
 
+def _by_display():
+    """Help display key -> binding (registry.keybindings is keyed by action id)."""
+    return {b.key: b for b in registry.keybindings.values()}
+
+
 def test_refresh_all_documented_as_gR():
-    assert "gR" in registry.keybindings
-    assert "refresh" in registry.keybindings["gR"].description.lower()
+    assert "gR" in _by_display()
+    assert "refresh" in _by_display()["gR"].description.lower()
 
 
 def test_undeliverable_chord_removed_from_help():
-    assert "ctrl+shift+r" not in registry.keybindings
+    assert "ctrl+shift+r" not in _by_display()
 
 
 # --- Roadmap 3.5: action ids and the sequence matcher ------------------------------------
@@ -46,7 +51,7 @@ _PRE_3_5_DISPLAY_KEYS = {
 
 def test_display_keys_unchanged_plus_paging():
     """Help keeps every key it showed; pageup/pagedown (handled, never listed) now appear."""
-    assert set(registry.keybindings) == _PRE_3_5_DISPLAY_KEYS | {"pageup", "pagedown"}
+    assert set(_by_display()) == _PRE_3_5_DISPLAY_KEYS | {"pageup", "pagedown"}
 
 
 def test_every_binding_has_a_unique_action_id():
@@ -165,17 +170,17 @@ def test_defaults_are_conflict_free():
 def test_override_replaces_defaults_and_empty_restores():
     assert registry.apply_overrides({"new_playlist": ["x"]}) == []
     assert _keys("new_playlist") == ["x"]
-    assert registry.keybindings["x"].description == "Create new playlist"
-    assert "gn" not in registry.keybindings
+    assert _by_display()["x"].description == "Create new playlist"
+    assert "gn" not in _by_display()
     assert registry.apply_overrides({}) == []
     assert _keys("new_playlist") == ["g n"]
-    assert "gn" in registry.keybindings and "x" not in registry.keybindings
+    assert "gn" in _by_display() and "x" not in _by_display()
 
 
 def test_override_accepts_alternatives_and_named_keys():
     assert registry.apply_overrides({"move_down": ["j", "down", "ctrl+n"]}) == []
     assert _keys("move_down") == ["j", "down", "ctrl+n"]
-    assert registry.keybindings["j/↓/ctrl+n"].action == "move_down"
+    assert _by_display()["j/↓/ctrl+n"].action == "move_down"
 
 
 @pytest.mark.parametrize("overrides, needle", [
@@ -306,3 +311,31 @@ def test_template_lists_every_action_with_its_defaults_and_loads_as_nothing():
     assert set(listed) == set(actions)
     for action, value in listed.items():
         assert (value if isinstance(value, list) else [value]) == actions[action], action
+
+
+# --- 3.5 review fixes --------------------------------------------------------------------
+
+@pytest.mark.parametrize("alias, delivered", [
+    ("ctrl+i", "tab"), ("ctrl+m", "enter"), ("ctrl+h", "backspace"),
+])
+def test_terminal_aliased_ctrl_keys_are_refused(alias, delivered):
+    """Most terminals send ctrl+i/ctrl+m/ctrl+h as tab/enter/backspace: it never fires, so refuse."""
+    assert canonical_token(alias) is None
+    [warning] = registry.apply_overrides({"move_down": [alias]})
+    assert alias in warning and f'"{delivered}"' in warning
+    assert _keys("move_down") == ["j", "down"]
+
+
+def test_help_lists_both_actions_when_display_strings_collide():
+    """"f1" (the F1 key) and "f 1" (f then 1) both display "f1"; neither may vanish from help."""
+    assert registry.apply_overrides({"bulk_edit": ["f1"], "sort_menu": ["f 1"]}) == []
+    listed = {b.action for bs in registry.get_bindings_by_category().values() for b in bs}
+    assert {"bulk_edit", "sort_menu"} <= listed
+
+
+def test_comma_binding_key_uses_textual_name_in_keymap():
+    """Textual splits keymap values on ',', so a bare ',' would unbind the action."""
+    assert registry.apply_overrides({"search": [","]}) == []
+    assert registry.binding_keymap() == {"search": "comma"}
+    assert registry.apply_overrides({"search": ["comma"]}) == []
+    assert registry.binding_keymap() == {"search": "comma"}
