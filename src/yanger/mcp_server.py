@@ -16,6 +16,7 @@ This module reuses existing yanger components:
 import asyncio
 import json
 import logging
+import re
 import subprocess
 import shutil
 import sys
@@ -42,6 +43,13 @@ try:
     from mcp.types import ElicitationCapability
 except ImportError:
     ElicitationCapability = None
+
+# Sampling (a server-to-client "run a completion on your model" request). These types exist on
+# mcp 0.9.1 and 1.25, but stay guarded: a version pin is not a runtime guarantee.
+try:
+    from mcp.types import SamplingCapability, SamplingMessage, ModelPreferences, ModelHint
+except ImportError:
+    SamplingCapability = None
 
 from .auth import YouTubeAuth, resolve_token_file, resolve_client_secrets_file
 from .api_client import YouTubeAPIClient, QuotaExceededError
@@ -96,6 +104,36 @@ CONFIRM_SCHEMA = {
 # How long to wait for the human's answer. The SDK sets no read timeout on elicit_form, so a client
 # that declares elicitation but never answers would hang the tool call forever; past this, refuse.
 CONFIRM_TIMEOUT_SECONDS = 300
+
+# fabric_analyze's sampling backend (the connected client's model runs the pattern prompt).
+SAMPLING_MAX_TOKENS = 4096
+# The client may ask its human to approve each sampling request and the SDK sets no read timeout,
+# so (as with CONFIRM_TIMEOUT_SECONDS) an unanswered request would otherwise hang the tool call.
+SAMPLING_TIMEOUT_SECONDS = 300
+
+FABRIC_NOT_INSTALLED = {
+    "error": "fabric_not_installed",
+    "message": "Fabric is not installed. Install from: https://github.com/danielmiessler/fabric",
+    "install_instructions": "go install github.com/danielmiessler/fabric@latest",
+}
+
+
+BACKEND_DESCRIPTION = (
+    "Runs on the connected client's own model via MCP sampling when the client supports it "
+    "(no local Fabric or API key needed; uses the pattern prompts in "
+    "~/.config/fabric/patterns/<name>/system.md), otherwise with local Fabric.")
+BACKEND_SCHEMA = {
+    "type": "string",
+    "enum": ["auto", "fabric", "sampling"],
+    "default": "auto",
+    "description": "auto: the client's model via MCP sampling if it supports it, else local "
+                   "Fabric. fabric / sampling force one (an error if it is unavailable).",
+}
+
+
+def _fabric_patterns_dir() -> Path:
+    """Where Fabric keeps its pattern prompts (<name>/system.md); the sampling backend reads them."""
+    return Path.home() / ".config" / "fabric" / "patterns"
 
 
 def _one_line(text: Any, limit: int = 120) -> str:
@@ -574,7 +612,8 @@ class YangerMCPServer:
                                 "Fabric provides curated AI prompts for tasks like summarization, "
                                 "extracting wisdom, finding insights, and more. "
                                 "Common patterns: extract_wisdom, summarize, extract_insights, "
-                                "analyze_claims, extract_recommendations, create_summary.",
+                                "analyze_claims, extract_recommendations, create_summary. "
+                                + BACKEND_DESCRIPTION,
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -590,6 +629,7 @@ class YangerMCPServer:
                                 "type": "string",
                                 "description": "Optional: specific model to use with Fabric",
                             },
+                            "backend": BACKEND_SCHEMA,
                         },
                         "required": ["video_id", "pattern"],
                     },
@@ -606,7 +646,8 @@ class YangerMCPServer:
                     name="fabric_analyze_batch",
                     description="Apply a Fabric pattern to analyze multiple YouTube video transcripts. "
                                 "Provide either a playlist_id to analyze all videos in a playlist, "
-                                "or a list of video_ids. Returns aggregated results for each video.",
+                                "or a list of video_ids. Returns aggregated results for each video. "
+                                + BACKEND_DESCRIPTION,
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -627,6 +668,7 @@ class YangerMCPServer:
                                 "type": "string",
                                 "description": "Optional: specific model to use with Fabric",
                             },
+                            "backend": BACKEND_SCHEMA,
                             "limit": {
                                 "type": "integer",
                                 "description": "Maximum number of videos to analyze",
@@ -788,6 +830,95 @@ class YangerMCPServer:
         return {"error": "not_confirmed", "action": r.action, "message": (
             "The user did not approve this action; it was NOT performed."
         )}
+
+    # ----- LLM backend: local Fabric or the client's model via MCP sampling ---------------
+
+    @staticmethod
+    def _supports_sampling(caps: Any) -> bool:
+        """True only when the client declared sampling. Fails closed like
+        ``_supports_form_elicitation``: no SDK type, no field, or a raw dict all mean "cannot"."""
+        if SamplingCapability is None or caps is None:
+            return False
+        return isinstance(getattr(caps, "sampling", None), SamplingCapability)
+
+    def _sampling_context(self):
+        """The current MCP request context if its client can run a sampling request, else None
+        (also None outside an MCP request and for server sessions without ``create_message``)."""
+        try:
+            ctx = self.server.request_context
+        except LookupError:
+            return None
+        if not callable(getattr(ctx.session, "create_message", None)):
+            return None
+        params = ctx.session.client_params
+        if params is None or not self._supports_sampling(params.capabilities):
+            return None
+        return ctx
+
+    def _resolve_llm_backend(self, requested: str):
+        """Pick the backend once, up front: ``(backend, ctx, error)``, exactly one of
+        backend/error set. ``auto`` = client sampling, else local Fabric, else an error naming
+        both remedies. A backend that is chosen and then fails is never swapped for the other."""
+        if requested not in ("auto", "fabric", "sampling"):
+            return None, None, {"error": "invalid_arguments", "message": (
+                f"Unknown backend {requested!r}; use 'auto', 'fabric' or 'sampling'")}
+        ctx = None if requested == "fabric" else self._sampling_context()
+        if ctx is not None:
+            return "sampling", ctx, None
+        if requested == "sampling":
+            return None, None, {"error": "sampling_unsupported", "message": (
+                "This MCP client did not declare sampling support, so its model cannot run the "
+                "pattern; use backend='fabric' or a client that supports MCP sampling")}
+        if shutil.which("fabric"):
+            return "fabric", None, None
+        error = dict(FABRIC_NOT_INSTALLED)
+        if requested == "auto":
+            error["message"] += (
+                ". This MCP client also does not support sampling, so its own model cannot run "
+                "the pattern either: install Fabric, or use a client that supports MCP sampling")
+        return None, None, error
+
+    async def _load_pattern_prompt(self, pattern: str):
+        """``(system_prompt, error)`` for a Fabric pattern, read from its system.md."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", pattern):
+            return None, {"error": "invalid_arguments", "message": (
+                f"Invalid pattern name {pattern!r}: use letters, digits, '_' or '-'")}
+        path = _fabric_patterns_dir() / pattern / "system.md"
+        try:
+            text = await asyncio.to_thread(path.read_text, encoding="utf-8")
+        except FileNotFoundError:
+            text = ""
+        if not text.strip():
+            return None, {"error": "pattern_not_found", "pattern": pattern, "message": (
+                f"No pattern prompt at {path}. Patterns come from Fabric's repo "
+                "(https://github.com/danielmiessler/fabric) or `fabric --setup`.")}
+        return text, None
+
+    async def _sample_pattern(self, ctx, prompt: str, transcript_text: str,
+                              model: Optional[str]) -> dict[str, Any]:
+        """Run one pattern on the client's model: the result fields, or a structured error."""
+        try:
+            r = await asyncio.wait_for(
+                ctx.session.create_message(
+                    [SamplingMessage(role="user",
+                                     content=TextContent(type="text", text=transcript_text))],
+                    max_tokens=SAMPLING_MAX_TOKENS,
+                    system_prompt=prompt,
+                    model_preferences=(ModelPreferences(hints=[ModelHint(name=model)])
+                                       if model else None),
+                ),
+                timeout=SAMPLING_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:  # distinct from builtin TimeoutError on Python 3.10
+            return {"error": "timeout", "message": (
+                f"The client did not answer the sampling request within "
+                f"{SAMPLING_TIMEOUT_SECONDS}s")}
+        except Exception as e:  # McpError when the client declines or fails
+            return {"error": "sampling_error", "message": f"{type(e).__name__}: {e}"}
+        if not isinstance(r.content, TextContent):
+            return {"error": "sampling_error", "message": (
+                f"The client's model returned {type(r.content).__name__}, not text")}
+        return {"result": r.content.text, "sampled_model": r.model, "stop_reason": r.stopReason}
 
     # ----- Custom commands (opt-in; MCPSettings.allow_custom_commands) -------------------
 
@@ -1810,19 +1941,19 @@ class YangerMCPServer:
     # --- Fabric Integration ---
 
     async def _fabric_analyze(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Apply a Fabric pattern to analyze a video transcript."""
+        """Apply a Fabric pattern to a video transcript, on local Fabric or the client's model."""
         video_id = args["video_id"]
         pattern = args["pattern"]
         model = args.get("model")
 
-        # Check if fabric is installed
-        fabric_path = shutil.which("fabric")
-        if not fabric_path:
-            return {
-                "error": "fabric_not_installed",
-                "message": "Fabric is not installed. Install from: https://github.com/danielmiessler/fabric",
-                "install_instructions": "go install github.com/danielmiessler/fabric@latest",
-            }
+        backend, ctx, error = self._resolve_llm_backend(args.get("backend", "auto"))
+        if error:
+            return error
+        if backend == "sampling":
+            # Fail fast on a bad pattern, before fetching the transcript.
+            prompt, error = await self._load_pattern_prompt(pattern)
+            if error:
+                return error
 
         # Get transcript (uncapped: fabric needs the full text, not a
         # context-capped excerpt, and the output goes to the subprocess).
@@ -1840,6 +1971,19 @@ class YangerMCPServer:
             }
 
         transcript_text = transcript_result["transcript"]
+
+        if backend == "sampling":
+            sampled = await self._sample_pattern(ctx, prompt, transcript_text, model)
+            if "error" in sampled:
+                return {**sampled, "pattern": pattern, "video_id": video_id}
+            return {
+                "video_id": video_id,
+                "pattern": pattern,
+                "model": model,
+                **sampled,
+                "transcript_language": transcript_result.get("language"),
+                "backend": "sampling",
+            }
 
         # Build fabric command
         cmd = ["fabric", "--pattern", pattern]
@@ -1872,6 +2016,7 @@ class YangerMCPServer:
                 "model": model,
                 "result": process.stdout,
                 "transcript_language": transcript_result.get("language"),
+                "backend": "fabric",
             }
 
         except subprocess.TimeoutExpired:
@@ -1894,6 +2039,16 @@ class YangerMCPServer:
         # Check if fabric is installed
         fabric_path = shutil.which("fabric")
         if not fabric_path:
+            # No binary, but the prompts on disk are what the sampling backend runs.
+            patterns_dir = _fabric_patterns_dir()
+            if patterns_dir.is_dir():
+                patterns = sorted(p.name for p in patterns_dir.iterdir()
+                                  if (p / "system.md").is_file())
+                out = {"patterns": patterns, "count": len(patterns), "source": "filesystem"}
+                if self._sampling_context() is None:
+                    out["note"] = ("Fabric is not installed and this MCP client does not support "
+                                   "sampling, so fabric_analyze cannot run these patterns here.")
+                return out
             return {
                 "error": "fabric_not_installed",
                 "message": "Fabric is not installed. Install from: https://github.com/danielmiessler/fabric",
@@ -1922,7 +2077,7 @@ class YangerMCPServer:
 
             if process.returncode != 0:
                 # Fallback: try to list patterns from ~/.config/fabric/patterns
-                patterns_dir = Path.home() / ".config" / "fabric" / "patterns"
+                patterns_dir = _fabric_patterns_dir()
                 if patterns_dir.exists():
                     patterns = [p.name for p in patterns_dir.iterdir() if p.is_dir()]
                     return {
@@ -1960,7 +2115,7 @@ class YangerMCPServer:
             }
 
     async def _fabric_analyze_batch(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Apply a Fabric pattern to analyze multiple video transcripts."""
+        """Apply a Fabric pattern to multiple video transcripts (local Fabric or client model)."""
         pattern = args["pattern"]
         playlist_id = args.get("playlist_id")
         video_ids = args.get("video_ids", [])
@@ -1968,14 +2123,15 @@ class YangerMCPServer:
         limit = args.get("limit", 10)
         skip_errors = args.get("skip_errors", True)
 
-        # Check if fabric is installed
-        fabric_path = shutil.which("fabric")
-        if not fabric_path:
-            return {
-                "error": "fabric_not_installed",
-                "message": "Fabric is not installed. Install from: https://github.com/danielmiessler/fabric",
-                "install_instructions": "go install github.com/danielmiessler/fabric@latest",
-            }
+        # Resolve once, before any auth/playlist (quota) work; each video then uses this backend.
+        # request_ctx is a ContextVar, so the gather tasks below inherit the sampling context.
+        backend, _ctx, error = self._resolve_llm_backend(args.get("backend", "auto"))
+        if error:
+            return error
+        if backend == "sampling":
+            _prompt, error = await self._load_pattern_prompt(pattern)
+            if error:
+                return error
 
         # Get video IDs to analyze
         if playlist_id:
@@ -2026,12 +2182,17 @@ class YangerMCPServer:
                     "message": result.get("message", "Unknown error"),
                 })
                 return True
-            results.append({
+            entry = {
                 "video_id": video_id,
                 "pattern": pattern,
                 "result": result["result"],
                 "transcript_language": result.get("transcript_language"),
-            })
+            }
+            # Sampling-only fields: keep maxTokens truncation visible per video.
+            for key in ("sampled_model", "stop_reason"):
+                if key in result:
+                    entry[key] = result[key]
+            results.append(entry)
             return False
 
         if skip_errors:
@@ -2044,6 +2205,7 @@ class YangerMCPServer:
                         "video_id": video_id,
                         "pattern": pattern,
                         "model": model,
+                        "backend": backend,
                     })
 
             analyses = await asyncio.gather(
@@ -2060,6 +2222,7 @@ class YangerMCPServer:
                         "video_id": video_id,
                         "pattern": pattern,
                         "model": model,
+                        "backend": backend,
                     })
                 except Exception as e:
                     result = e
@@ -2075,6 +2238,7 @@ class YangerMCPServer:
             "results": results,
             "errors": errors,
             "source": playlist_id or "video_ids",
+            "backend": backend,
         }
 
     async def run(self) -> None:

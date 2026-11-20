@@ -444,7 +444,7 @@ async def connect_yanger():
 | `search_transcripts` | Search within transcripts |
 | `find_duplicates` | Find duplicate videos |
 | `analyze_playlist` | Get playlist statistics |
-| `fabric_analyze` | Analyze video with Fabric AI patterns |
+| `fabric_analyze` | Analyze video with Fabric patterns (the client's model via MCP sampling, or local Fabric) |
 | `check_quota` | Check API quota usage |
 
 **Confirmations (MCP elicitation)**: when the MCP client supports elicitation (it can show you a
@@ -464,7 +464,13 @@ as before: no prompt for delete/remove, and `confirm: true` commands stay hidden
 
 **Fabric Integration**:
 
-If [Fabric](https://github.com/danielmiessler/fabric) is installed, yanger can analyze video transcripts with AI patterns:
+`fabric_analyze` and `fabric_analyze_batch` run a [Fabric](https://github.com/danielmiessler/fabric)
+pattern over video transcripts. When the MCP client supports sampling (it lets the server use the
+client's own model), the client's model runs the pattern prompt from
+`~/.config/fabric/patterns/<name>/system.md`: no Fabric binary or API key is needed, and the client
+may ask you to approve each request. Otherwise, with Fabric installed, it runs locally as before.
+Pass `backend: "fabric"` or `backend: "sampling"` to force one. With neither available, the tool
+returns an error naming both options; a chosen backend that fails reports its own error.
 ```
 "Analyze this video with the extract_wisdom pattern"
 "Summarize all videos in my 'To Review' playlist"
