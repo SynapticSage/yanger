@@ -47,6 +47,10 @@ def patterns(tmp_path, monkeypatch):
     (d / "no_prompt").mkdir()                       # no system.md: not a usable prompt
     (d / "empty_prompt").mkdir()
     (d / "empty_prompt" / "system.md").write_text("")  # empty: get_prompt would reject it
+    (d / "blank_prompt").mkdir()
+    (d / "blank_prompt" / "system.md").write_text("  \n\t\n")  # whitespace only: rejected too
+    (d / "latin1_prompt").mkdir()
+    (d / "latin1_prompt" / "system.md").write_bytes(b"caf\xe9")  # not UTF-8: rejected too
     (d / "bad name").mkdir()
     (d / "bad name" / "system.md").write_text(PROMPT)  # name fails the pattern charset
     monkeypatch.setattr(mod, "_fabric_patterns_dir", lambda: d)
@@ -204,6 +208,33 @@ async def test_lazy_cache_is_built_without_cleanup(tmp_path, patterns, monkeypat
     out = await _read_json(srv, "yanger://playlists")
     assert out["cached"] is False
     assert made == [{"auto_cleanup": False}]
+    # Kept apart from self.cache, so a later tool path still builds its cleanup-on-start cache.
+    assert srv.cache is None
+
+
+async def test_commands_gate_and_registry_load_off_the_event_loop(s, monkeypatch):
+    """load_settings (YAML) and load_command_registry are file I/O: run them in a worker thread,
+    as the rest of the resource path does."""
+    import threading
+    loop_thread = threading.get_ident()
+    seen = []
+    real_gate, real_load = YangerMCPServer._commands_exposed, mod.load_command_registry
+
+    def gate(self):
+        seen.append(("gate", threading.get_ident()))
+        return real_gate(self)
+
+    def load(settings):
+        seen.append(("load", threading.get_ident()))
+        return real_load(settings)
+
+    monkeypatch.setattr(YangerMCPServer, "_commands_exposed", gate)
+    monkeypatch.setattr(mod, "load_command_registry", load)
+    _enable_commands(s, {"dl": "yt-dlp {url}"})
+    assert "yanger://commands" in await _uris(s)
+    await _read_json(s, "yanger://commands")
+    assert {k for k, _ in seen} == {"gate", "load"}
+    assert all(t != loop_thread for _, t in seen)
 
 
 # ---- (d) yanger://playlists/{id} ----------------------------------------------------------
@@ -340,6 +371,30 @@ async def test_list_prompts_lists_usable_patterns_only(s):
     assert [p.name for p in prompts] == ["extract_wisdom"]
     (arg,) = prompts[0].arguments
     assert arg.name == "video_id" and arg.required is False
+
+
+async def test_list_prompts_skips_an_unreadable_pattern(s, patterns, monkeypatch):
+    """One pattern whose system.md raises (e.g. EACCES) is skipped, not fatal to the listing."""
+    (patterns / "locked").mkdir()
+    (patterns / "locked" / "system.md").write_text(PROMPT)
+    real = mod.Path.read_text
+
+    def read_text(self, *a, **k):
+        if self.parent.name == "locked":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(mod.Path, "read_text", read_text)
+    async with _session(s) as c:
+        assert [p.name for p in (await c.list_prompts()).prompts] == ["extract_wisdom"]
+
+
+@pytest.mark.parametrize("name", ["blank_prompt", "latin1_prompt"])
+async def test_get_prompt_rejects_what_the_listing_skips(s, name):
+    async def call(c):
+        await c.get_prompt(name, None)
+    call.srv = s
+    assert "No usable pattern" in await _error(call)
 
 
 async def test_list_prompts_missing_dir_is_empty(s, tmp_path, monkeypatch):

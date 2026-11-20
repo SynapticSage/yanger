@@ -175,6 +175,7 @@ class YangerMCPServer:
         self.server = Server("yanger")
         self.api_client: Optional[YouTubeAPIClient] = None
         self.cache: Optional[PersistentCache] = None
+        self._resource_only_cache: Optional[PersistentCache] = None  # see _resource_cache
         self.transcript_fetcher: Optional[TranscriptFetcher] = None
         self._authenticated = False
         self._settings = None
@@ -829,11 +830,15 @@ class YangerMCPServer:
             return await self._get_prompt(name, arguments)
 
     def _resource_cache(self) -> PersistentCache:
-        """The cache, built lazily like get_transcript does but without the startup cleanup
-        DELETE, so a resource read stays read-only. Never authenticates."""
-        if not self.cache:
-            self.cache = PersistentCache(auto_cleanup=False)
-        return self.cache
+        """The tools' cache if one exists, else a lazily built one without the startup cleanup
+        DELETE, so a resource read deletes nothing (it still inits the schema and WAL mode, and
+        get_videos bumps access stats). Kept out of self.cache so a later tool path still builds
+        its cleanup-on-start cache. Never authenticates."""
+        if self.cache:
+            return self.cache
+        if not self._resource_only_cache:
+            self._resource_only_cache = PersistentCache(auto_cleanup=False)
+        return self._resource_only_cache
 
     def _commands_exposed(self) -> bool:
         """The custom-command opt-in (MCPSettings.allow_custom_commands). Raises if the settings
@@ -863,7 +868,7 @@ class YangerMCPServer:
             description="Index of cached transcripts; read yanger://transcripts/{video_id}"))
         # Strictly additive, as in list_tools: a broken config drops only this entry.
         try:
-            commands = self._commands_exposed()
+            commands = await asyncio.to_thread(self._commands_exposed)
         except Exception:
             logger.warning("Failed to probe custom-command gate; omitting yanger://commands",
                            exc_info=True)
@@ -914,10 +919,10 @@ class YangerMCPServer:
                 more="the get_transcript tool's max_chars returns more")
             return text, "text/plain"
         # commands: the gate is re-checked on read (defense-in-depth); a load failure raises.
-        if not self._commands_exposed():
+        if not await asyncio.to_thread(self._commands_exposed):
             raise ValueError("Custom commands are not exposed over MCP "
                              "(mcp.allow_custom_commands is off)")
-        registry = load_command_registry(self._settings)
+        registry = await asyncio.to_thread(load_command_registry, self._settings)
         # Templates are left out: the opt-in is consent to RUN commands, and templates (notably
         # YANGER_CMD_* from the launch environment) may hold secrets.
         data = {"commands": [{"name": spec.name, "mode": spec.mode, "confirm": spec.confirm}
@@ -993,15 +998,20 @@ class YangerMCPServer:
 
     @staticmethod
     def _scan_patterns() -> list[str]:
-        """Fabric patterns usable as prompts: a well-named dir with a non-empty system.md."""
+        """Fabric patterns usable as prompts: a well-named dir whose system.md _load_pattern_prompt
+        would accept (readable UTF-8, not blank). An unreadable entry is skipped, not fatal."""
         root = _fabric_patterns_dir()
         if not root.is_dir():
             return []
         names = []
         for d in sorted(root.iterdir()):
-            md = d / "system.md"
-            if (re.fullmatch(r"[A-Za-z0-9_-]+", d.name) and md.is_file()
-                    and md.stat().st_size > 0):
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", d.name):
+                continue
+            try:
+                text = (d / "system.md").read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):  # missing, a directory, unreadable, not UTF-8
+                continue
+            if text.strip():
                 names.append(d.name)
         return names
 
