@@ -5,6 +5,7 @@ Coordinates the overall application flow and UI components.
 # Created: 2025-08-03
 
 import asyncio
+import inspect
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
@@ -24,7 +25,7 @@ except ImportError:  # Textual < 2.0 parses Rich markup (the pin allows >=0.86)
 from .auth import YouTubeAuth
 from .api_client import YouTubeAPIClient
 from .models import Playlist, Video, Clipboard, PrivacyStatus
-from .ui.miller_view import MillerView, PlaylistSelected, VideoSelected, RangerCommand, MarksChanged, SearchStatusUpdate, SortMenuRequest
+from .ui.miller_view import MillerView, PlaylistSelected, VideoSelected, MarksChanged, SearchStatusUpdate, SortMenuRequest
 from .ui.status_bar import StatusBar
 from .ui.help_overlay import HelpOverlay
 from .ui.command_input import CommandInput, parse_command
@@ -33,7 +34,7 @@ from .ui.rename_modal import RenameModal, ItemRenamed
 from .ui.confirmation_modal import ConfirmationModal, ConfirmationResult
 from .ui.bulkedit_preview import BulkEditPreview, BulkEditConfirmed, BulkEditCancelled
 from .cache import PersistentCache
-from .keybindings import registry
+from .keybindings import registry, KeySequenceMatcher, MatchResult
 from .config.settings import load_settings, save_user_setting
 from .core.transcript_command import (
     build_command,
@@ -65,6 +66,47 @@ def _load_run_registry(settings, transcript_override: Optional[str]):
     transcript_template = resolve_transcript_command(settings, runtime_override=transcript_override)
     registry = load_command_registry(settings, transcript_template=transcript_template)
     return registry, transcript_template
+
+
+# SEQUENCE-kind action id -> the key it forwards to MillerView.handle_key. Navigation and the
+# column-local keys reuse the miller view's own handling (and guards) under its canonical key,
+# whatever key the user bound the action to.
+_MILLER_KEY_ACTIONS = {
+    "move_left": "h", "move_down": "j", "move_up": "k", "move_right": "l",
+    "go_top": "g", "go_bottom": "G", "select": "enter", "page_up": "pageup",
+    "page_down": "pagedown", "toggle_mark": "space", "visual_mode": "V",
+    "invert_selection": "v", "next_match": "n", "prev_match": "N", "cancel": "escape",
+    "sort_menu": "o",
+}
+
+# SEQUENCE-kind action id -> (app method name, args). Resolved with getattr at call time, and
+# awaited only when the handler is async (the handlers are a mix of sync and async).
+_APP_KEY_ACTIONS = {
+    "refresh_all": ("action_refresh_all", ()),
+    "new_playlist": ("action_new_playlist", ()),
+    "delete_playlist": ("handle_delete_playlist", ()),
+    "rename": ("action_rename", ()),
+    "undo": ("action_undo", ()),
+    "unmark_all": ("_unmark_all_videos", ()),
+    "visual_unmark": ("_enter_visual_unmark", ()),
+    "cut": ("execute_ranger_command", ("d",)),
+    "copy": ("execute_ranger_command", ("y",)),
+    "paste": ("execute_ranger_command", ("p",)),
+    "delete_videos": ("handle_delete_videos", ()),
+    "bulk_edit": ("execute_bulkedit", ()),
+    "fetch_transcript": ("fetch_transcript_for_current_video", ()),
+    "toggle_auto_transcript": ("toggle_auto_fetch_transcript", ()),
+    "export_transcript": ("export_transcript", ()),
+}
+
+
+def _key_token(event: events.Key) -> str:
+    """The registry token for a keypress: the character itself when it is a single printable
+    non-space character ("?", "G"), otherwise Textual's key name ("space", "up", "ctrl+r")."""
+    char = event.character
+    if char and len(char) == 1 and char.isprintable() and not char.isspace():
+        return char
+    return event.key
 
 
 class YouTubeRangerApp(App):
@@ -148,10 +190,11 @@ class YouTubeRangerApp(App):
         self.settings = load_settings()
         
         # Ranger command state
-        self._pending_command: Optional[str] = None
         self._pending_sort: bool = False
-        self._pending_u: bool = False  # 'u' prefix: awaiting v/V (unmark) or timeout->undo
-        self._pending_u_timer = None
+        # SEQUENCE-kind keys (gn, dd, u*, hjkl...) dispatch through the registry's matcher.
+        self._key_matcher = KeySequenceMatcher(registry.sequence_bindings())
+        # Armed while a prefix that is also an action (bare 'u' = undo) waits for a follow-up.
+        self._pending_key_timer = None
         
         # UI components
         self.miller_view: Optional[MillerView] = None
@@ -1188,122 +1231,98 @@ class YouTubeRangerApp(App):
                 await self.handle_sort_key(event.key)
             self._pending_sort = False
             event.stop()
-        # SECOND: Check for pending double-key ranger commands
-        elif hasattr(self, '_pending_command') and self._pending_command:
-            if self._pending_command == 'd' and event.key == 'D':
-                # dD - delete videos
-                await self.handle_delete_videos()
-            elif self._pending_command == event.key:  # Double key pressed (dd, yy, pp)
-                await self.execute_ranger_command(self._pending_command)
-            else:
-                # Cancel pending command if different key pressed
-                if self.status_bar:
-                    self.status_bar.update_status("", "")
-            self._pending_command = None
-            event.stop()
-        # Resolve a pending 'u' prefix: uv = unmark all, uV = visual unmark,
-        # any other key = the bare 'u' was an undo (then this key is consumed).
-        elif self._pending_u:
-            self._cancel_pending_u_timer()
-            self._pending_u = False
-            if self.status_bar:
-                self.status_bar.update_status("", "")
-            video_column = self.miller_view.video_column if self.miller_view else None
-            if event.key == 'v' and video_column:
-                video_column.unselect_all()
-                self.post_message(MarksChanged(0))
-                self.notify("Unmarked all videos", timeout=2)
-            elif event.key == 'V' and video_column:
-                if not video_column.visual_mode:
-                    video_column.enter_visual_mode(unmark_mode=True)
-            else:
-                # Bare 'u' resolved by a different key -> undo
-                self.action_undo()
-            event.stop()
-        # Check for single 'g' - wait for second key for 'gn' (new playlist) or 'gd' (delete playlist)
-        elif event.key == 'g' and not getattr(self, '_pending_g', False):
-            self._pending_g = True
-            if self.status_bar:
-                self.status_bar.update_status("Press 'n':new 'd':delete 't':transcript 'T':auto-fetch 'e':export 'R':refresh-all 'g':top", "")
-            event.stop()
-        # Check for 'gn' or 'gd' or 'gt' or 'gT' or 'ge' or 'gR' commands
-        elif hasattr(self, '_pending_g') and self._pending_g:
-            if event.key == 'n':
-                self.action_new_playlist()
-            elif event.key == 'd':
-                await self.handle_delete_playlist()
-            elif event.key == 't':
-                await self.fetch_transcript_for_current_video()
-            elif event.key == 'T':
-                await self.toggle_auto_fetch_transcript()
-            elif event.key == 'e':
-                await self.export_transcript()
-            elif event.key == 'R':
-                # Reachable refresh-all: terminals can't deliver the Ctrl+Shift+R
-                # chord, so this g-prefix alias is the supported path (Tier 0.7).
-                await self.action_refresh_all()
-            elif event.key == 'g':
-                # Double 'g' - pass to miller view for go to top
-                if self.miller_view:
-                    await self.miller_view.handle_key('g')
-            else:
-                # Cancel 'g' command if different key pressed
-                if self.status_bar:
-                    self.status_bar.update_status("", "")
-            self._pending_g = False
-            event.stop()
-        # Check for single 'c' - wait for second key for 'cw' (rename)
-        elif event.key == 'c' and not getattr(self, '_pending_c', False):
-            self._pending_c = True
-            if self.status_bar:
-                self.status_bar.update_status("Press 'w' to rename", "")
-            event.stop()
-        # Check for 'cw' - rename
-        elif hasattr(self, '_pending_c') and self._pending_c:
-            if event.key == 'w':
-                self.action_rename()
-            else:
-                # Cancel 'c' command if different key pressed
-                if self.status_bar:
-                    self.status_bar.update_status("", "")
-            self._pending_c = False
-            event.stop()
-        # Check for single 'u' - ranger prefix: wait briefly for v/V (unmark),
-        # otherwise (timeout or another key) it resolves to a plain undo.
-        elif event.key == 'u':
-            self._pending_u = True
-            self._cancel_pending_u_timer()
-            self._pending_u_timer = self.set_timer(0.4, self._resolve_bare_undo)
-            if self.status_bar:
-                self.status_bar.update_status("Press 'v':unmark all 'V':visual unmark (or wait for undo)", "")
-            event.stop()
-        # Check for 'B' - bulk edit
-        elif event.key == 'B':
-            await self.execute_bulkedit()
-            event.stop()
-        # THEN: Let miller view handle navigation keys, ranger commands, search, and visual mode
-        # V = visual mode, v = invert selection, space = toggle mark (no auto-advance)
-        # pageup/pagedown for pagination
-        # Note: 'u' is now handled at app level for undo, not passed to miller_view
-        # Note: 'g' and 'c' are now intercepted for special commands
-        elif self.miller_view and event.key in ['h', 'j', 'k', 'l', 'up', 'down', 'left', 'right', 'G', 'enter', 'space', 'd', 'y', 'p', 'n', 'N', 'v', 'V', 'escape', 'o', 'pageup', 'pagedown']:
-            await self.miller_view.handle_key(event.key)
-            event.stop()
+        # THEN: SEQUENCE-kind keys (gn, dd, cw, u*, B, hjkl...) via the registry's matcher.
+        else:
+            await self._dispatch_key_sequence(event)
 
-    def _cancel_pending_u_timer(self) -> None:
-        """Stop any in-flight 'u'-prefix timer."""
-        if self._pending_u_timer is not None:
-            self._pending_u_timer.stop()
-            self._pending_u_timer = None
+    async def _dispatch_key_sequence(self, event: events.Key) -> None:
+        """Feed one keypress to the sequence matcher and act on the result.
 
-    def _resolve_bare_undo(self) -> None:
-        """Timer callback: a 'u' with no follow-up key resolves to a plain undo."""
-        if self._pending_u:
-            self._pending_u = False
-            self._pending_u_timer = None
+        A key no sequence starts with is left alone (no event.stop()), so Textual BINDINGS
+        such as ':' and '/' still fire. Note event.stop() does not block App BINDINGS either:
+        they run from App._on_key after this handler; the registry keeps BINDING keys out of
+        every sequence so one key never does both.
+        """
+        was_pending = self._key_matcher.pending
+        result = self._key_matcher.feed(_key_token(event), self._key_action_enabled)
+        if result.kind == MatchResult.NONE:
+            return
+        event.stop()
+        self._cancel_pending_key_timer()
+        if result.kind == MatchResult.PENDING:
             if self.status_bar:
-                self.status_bar.update_status("", "")
-            self.action_undo()
+                self.status_bar.update_status(self._pending_key_hint(result), "")
+            if result.action:  # a prefix that is also an action: fire it if nothing follows
+                self._pending_key_timer = self.set_timer(0.4, self._resolve_pending_key)
+            return
+        if was_pending and self.status_bar:
+            self.status_bar.update_status("", "")  # clear the prefix hint
+        if result.action:
+            await self._run_key_action(result.action)
+
+    def _pending_key_hint(self, result: MatchResult) -> str:
+        """Status-bar hint for a pending prefix, generated from the registry descriptions."""
+        hint = " ".join(
+            f"'{token}':{registry.get_action(action).description}"
+            for token, action in result.children
+        )
+        if result.action:
+            hint += f" (or wait: {registry.get_action(result.action).description})"
+        return hint
+
+    def _key_action_enabled(self, action: str) -> bool:
+        """Context guards, matching where each key armed before 3.5's matcher existed."""
+        mv = self.miller_view
+        if action in _MILLER_KEY_ACTIONS:
+            return mv is not None
+        if action in ("cut", "copy", "delete_videos"):
+            return bool(mv and mv.focused_column == 1 and mv.video_column)
+        if action == "paste":
+            return bool(mv and mv.focused_column == 1)
+        if action in ("unmark_all", "visual_unmark"):
+            return bool(mv and mv.video_column)
+        return True
+
+    async def _run_key_action(self, action: str) -> None:
+        """Run a SEQUENCE-kind action by id."""
+        if action in _MILLER_KEY_ACTIONS:
+            if self.miller_view:
+                await self.miller_view.handle_key(_MILLER_KEY_ACTIONS[action])
+            return
+        name, args = _APP_KEY_ACTIONS[action]
+        result = getattr(self, name)(*args)
+        if inspect.isawaitable(result):
+            await result
+
+    def _unmark_all_videos(self) -> None:
+        """uv: clear every mark in the video column."""
+        video_column = self.miller_view.video_column
+        video_column.unselect_all()
+        self.post_message(MarksChanged(0))
+        self.notify("Unmarked all videos", timeout=2)
+
+    def _enter_visual_unmark(self) -> None:
+        """uV: visual mode that unmarks the range."""
+        video_column = self.miller_view.video_column
+        if not video_column.visual_mode:
+            video_column.enter_visual_mode(unmark_mode=True)
+
+    def _cancel_pending_key_timer(self) -> None:
+        """Stop any in-flight pending-prefix timer."""
+        if self._pending_key_timer is not None:
+            self._pending_key_timer.stop()
+            self._pending_key_timer = None
+
+    async def _resolve_pending_key(self) -> None:
+        """Timer callback: a prefix with no follow-up key fires its own action (bare u = undo)."""
+        self._pending_key_timer = None
+        if not self._key_matcher.pending:
+            return
+        action = self._key_matcher.timeout(self._key_action_enabled)
+        if self.status_bar:
+            self.status_bar.update_status("", "")
+        if action:
+            await self._run_key_action(action)
 
     def on_playlist_selected(self, message: PlaylistSelected) -> None:
         """Handle playlist selection message."""
@@ -1428,18 +1447,6 @@ class YouTubeRangerApp(App):
         except Exception as e:
             logger.error(f"Error auto-fetching metadata: {e}")
             # Don't notify on auto-fetch errors to avoid annoying the user
-    
-    def on_ranger_command(self, message: RangerCommand) -> None:
-        """Handle ranger-style command initiation."""
-        self._pending_command = message.command
-        # Show hint in status bar
-        if self.status_bar:
-            hints = {
-                'd': "Press 'd' to cut or 'D' to delete",
-                'y': "Press 'y' again to copy", 
-                'p': "Press 'p' again to paste"
-            }
-            self.status_bar.update_status(hints.get(message.command, ""), "")
     
     def on_marks_changed(self, message: MarksChanged) -> None:
         """Handle marks changed message."""
