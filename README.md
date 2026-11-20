@@ -205,11 +205,13 @@ commands:
   dlall: { run: "xargs -n1 yt-dlp", mode: batch, stdin: true }  # one run, URLs on stdin
 ```
 
-`{title}` is sanitized (letters, digits, space and `_ . , -` are kept, everything else becomes
-`_`, and no word starts with `-`), then shell-quoted, so write it unquoted: inside `"..."` the
-quote marks would end up in the filename. A video with no title refuses the whole run.
-`stdin: true` (or `urls`, or `ids`) works with `mode: batch` only and pipes one URL/id per line;
-the command then reads a pipe, not the terminal. Both are TUI-only; the MCP tool refuses them.
+`{title}` is sanitized to one word (letters, digits and `_ . , -` are kept, everything else,
+spaces included, becomes `_`; it never starts with `-` and is never `.`/`..`), then shell-quoted,
+so write it unquoted, as an argument and never as the command itself: inside `"..."` the quote
+marks would end up in the filename. A video with no title refuses the whole run. A template
+with `{title}` but neither `{url}` nor `{id}` gets no URL appended, so add `{url}` yourself.
+`stdin: true` (unquoted; or `urls`, or `ids`) works with `mode: batch` only and pipes one URL/id
+per line; the command then reads a pipe, not the terminal. Both are TUI-only; the MCP tool refuses them.
 
 ### Cache Behavior
 

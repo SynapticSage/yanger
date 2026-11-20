@@ -13,9 +13,10 @@ Safety posture (same as the transcript hook): the command runs with ``shell=True
 it is the user's own configuration and may contain pipes; only the injected ``{url}``/``{id}``
 are ``shlex.quote``d. Placeholders must sit as standalone arguments, not inside quotes.
 
-``{title}`` (per-video) is uploader-controlled, so it is SANITIZED by ``safe_title`` before it
-is quoted, which keeps it inert even inside quotes. Batch ``stdin`` pipes newline-joined
-URLs/ids into the command. Both are TUI-only: ``resolve_commands`` refuses them unless the
+``{title}`` (per-video) is uploader-controlled, so it is SANITIZED by ``safe_title`` to one
+inert shell word before it is quoted, which keeps it a single argument even inside quotes. It
+must sit in argument position, never as the command (``eval {title}``, ``sh -c {title}``).
+Batch ``stdin`` pipes newline-joined URLs/ids into the command. Both are TUI-only: ``resolve_commands`` refuses them unless the
 caller passes ``interactive=True`` (the MCP tool does not).
 """
 
@@ -45,25 +46,29 @@ ENV_PREFIX = "YANGER_CMD_"
 STDIN_URLS = "urls"
 STDIN_IDS = "ids"
 
-_TITLE_EXTRA = frozenset("_ .,-")
+_TITLE_EXTRA = frozenset("_.,-")
 
 
 def safe_title(title: str) -> str:
     """Reduce an uploader-controlled title to characters that are inert to the shell.
 
     Every character that is not a letter, mark or digit (unicodedata L*/M*/N*) and not one of
-    ``_ .,-`` or a plain space becomes ``_``; then a ``-`` that starts a word becomes ``_``.
+    ``_.,-`` becomes ``_`` (spaces included); a leading ``-`` becomes ``_``; an all-dots result
+    (``.``, ``..``) becomes underscores.
 
-    Invariant: the output holds no ASCII shell metacharacter, quote, ``$``, backtick,
-    backslash, newline, tab, glob or ``=``, and no word starts with ``-``. It is therefore inert in
-    every quote context and under re-parsing (``sh -c "..."``, ``eval``, ``xargs``). The worst a
-    template that misuses quotes can see is word splitting on spaces; option injection is ruled
-    out because no word starts with ``-``.
+    Invariant: the output is ONE shell word with no ASCII whitespace, shell metacharacter, quote,
+    ``$``, backtick, backslash, glob, ``=`` or ``/``; it does not start with ``-`` and is not
+    ``.``/``..``. So in ARGUMENT position it stays exactly one inert argument in every quote
+    context and under re-parsing (``sh -c "..."``, ``eval``, ``xargs``): no word splitting, no
+    option injection, no path traversal. It is NOT safe as the command word itself (``eval
+    {title}`` would run a title like ``reboot``); templates must not put it there.
     """
     s = "".join(
         c if c in _TITLE_EXTRA or unicodedata.category(c)[0] in "LMN" else "_" for c in title
     )
-    return re.sub(r"(^| )-", r"\1_", s)
+    if set(s) == {"."}:
+        return "_" * len(s)
+    return re.sub(r"^-", "_", s)
 
 
 def build_command(template: str, video, *, allow_title: bool = False) -> str:
@@ -135,7 +140,8 @@ def resolve_commands(
             raise ValueError(f"command '{spec.name}' uses {{title}} or stdin, which is TUI-only "
                              "(:run); not available to non-interactive callers")
     elif spec.stdin is not None and spec.stdin not in (STDIN_URLS, STDIN_IDS):
-        raise ValueError(f"unknown stdin value '{spec.stdin}' (use true, urls or ids)")
+        raise ValueError(f"unknown stdin value '{spec.stdin}' "
+                         "(use YAML boolean true, unquoted, or urls or ids)")
     elif spec.stdin is not None and spec.mode != MODE_BATCH:
         raise ValueError("stdin needs mode: batch")
     elif spec.mode == MODE_BATCH and "{title}" in spec.template:

@@ -172,7 +172,7 @@ async def test_per_video_title_run_quotes_sanitized_title(monkeypatch):
     app = _runner_app([0])
     spec = CommandSpec(name="t", template="echo {title}")
     await YouTubeRangerApp.run_custom_command(app, spec, [_titled("a", "My Video")])
-    assert seen == [("echo 'My Video'", None)]
+    assert seen == [("echo My_Video", None)]
 
 
 async def test_empty_title_refuses_before_suspend(monkeypatch):

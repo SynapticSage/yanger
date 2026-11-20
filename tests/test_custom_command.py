@@ -6,8 +6,6 @@ the fact that core/transcript_command now delegates to this module (single imple
 The TUI `:run` wiring is a separate slice.
 """
 
-import json
-import re
 import shlex
 from types import SimpleNamespace
 
@@ -193,8 +191,8 @@ def test_resolve_commands_batch_single_pair_over_all():
 
 
 # ===== H.7 (batch stdin) + H.8 ({title}) ===========================================
-# {title} is uploader-controlled, so it is SANITIZED (letters/marks/digits + `_ .,-` and space,
-# no word-leading `-`) and then shlex-quoted. Both features are TUI-only: resolve_commands
+# {title} is uploader-controlled, so it is SANITIZED to one word (letters/marks/digits + `_.,-`,
+# no leading `-`, never `.`/`..`) and then shlex-quoted. Both features are TUI-only: resolve_commands
 # refuses them unless the caller passes interactive=True (the MCP tool never does).
 
 VID = "dQw4w9WgXcQ"
@@ -205,16 +203,20 @@ def _tvideo(title, vid=VID):
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ("Rick Astley - Never Gonna (Official) [4K]", "Rick Astley _ Never Gonna _Official_ _4K_"),
-    ("東京の夜 ナイト", "東京の夜 ナイト"),
-    ("हिन्दी गाना", "हिन्दी गाना"),          # Devanagari incl. combining marks (category M)
+    ("Rick Astley - Never Gonna (Official) [4K]", "Rick_Astley_-_Never_Gonna__Official___4K_"),
+    ("東京の夜 ナイト", "東京の夜_ナイト"),
+    ("हिन्दी गाना", "हिन्दी_गाना"),          # Devanagari incl. combining marks (category M)
     ("-rf", "_rf"),
-    ("a --exec=x", "a _-exec_x"),
+    ("a --exec=x", "a_--exec_x"),        # one word, so only a LEADING '-' could be an option
     ("$(x)", "__x_"),
     ("`x`", "_x_"),
     ("a'b\"c", "a_b_c"),
     ("a\nb\tc", "a_b_c"),
-    ("v1.2, final", "v1.2, final"),
+    ("v1.2, final", "v1.2,_final"),
+    (".", "_"),                          # an all-dots title is no path component (traversal)
+    ("..", "__"),
+    ("...", "___"),
+    ("..x", "..x"),
 ])
 def test_safe_title_table(raw, expected):
     assert safe_title(raw) == expected
@@ -222,8 +224,8 @@ def test_safe_title_table(raw, expected):
 
 def test_safe_title_ascii_output_is_only_the_allowlist():
     out = safe_title("".join(chr(c) for c in range(128)))
-    assert set(out) <= set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ .,-")
-    assert not re.search(r"(^|\s)-", out)
+    assert set(out) <= set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.,-")
+    assert not out.startswith("-")
 
 
 HOSTILE_TITLES = [
@@ -256,9 +258,25 @@ def test_title_injection_proof_real_shell(tmp_path, monkeypatch, template, title
     monkeypatch.chdir(tmp_path)
     spec = CommandSpec(name="t", template=template)
     [(_ids, cmd)] = resolve_commands(spec, [_tvideo(title)], interactive=True)
-    assert not re.search(r"(^|\s)-", safe_title(title))   # no option injection either
+    assert not safe_title(title).startswith("-")   # one word, no option injection either
     run_command_capture(cmd, timeout=10)
     assert not (tmp_path / "PWNED").exists(), cmd
+
+
+@pytest.mark.parametrize("template", [
+    "set -- {title}; printf %s $#",
+    'set -- "{title}"; printf %s $#',
+    "set -- '{title}'; printf %s $#",
+    'set -- "x{title}y"; printf %s $#',
+    "eval set -- {title}; printf %s $#",
+])
+@pytest.mark.parametrize("title", ["x important.txt", "a b  c", "a\tb\nc"])
+def test_title_is_exactly_one_argument_in_any_quote_context(template, title):
+    """Review finding 0: a spaced title must not word-split into extra positional arguments."""
+    [(_ids, cmd)] = resolve_commands(
+        CommandSpec(name="t", template=template), [_tvideo(title)], interactive=True)
+    res = run_command_capture(cmd, timeout=10)
+    assert res.stdout == "1", cmd
 
 
 def test_title_injection_control_shlex_quote_alone_is_bypassable(tmp_path, monkeypatch):
@@ -271,7 +289,7 @@ def test_title_injection_control_shlex_quote_alone_is_bypassable(tmp_path, monke
 def test_title_only_template_does_not_append_url():
     [(_ids, cmd)] = resolve_commands(
         CommandSpec(name="t", template="echo {title}"), [_tvideo("My Video")], interactive=True)
-    assert cmd == "echo 'My Video'"
+    assert cmd == "echo My_Video"
 
 
 def test_build_command_without_allow_title_leaves_title_literal():
@@ -312,6 +330,14 @@ def test_interactive_per_video_stdin_refused():
     spec = CommandSpec(name="t", template="cat", stdin="urls")
     with pytest.raises(ValueError, match="batch"):
         resolve_commands(spec, [_tvideo("x")], interactive=True)
+
+
+def test_quoted_true_stdin_message_names_the_yaml_boolean():
+    """Review finding 5: `stdin: "true"` (a string) must not be told to "use true"."""
+    reg = load_command_registry(SimpleNamespace(commands={
+        "x": {"run": "cat", "mode": "batch", "stdin": "true"}}))
+    with pytest.raises(ValueError, match="unquoted"):
+        resolve_commands(reg["x"], [_tvideo("x")], interactive=True)
 
 
 def test_interactive_unknown_stdin_value_refused():
@@ -388,6 +414,6 @@ async def test_mcp_tool_refuses_title_and_stdin_commands(tmp_path, monkeypatch, 
     handler = s.server.request_handlers[t.CallToolRequest]
     res = await handler(t.CallToolRequest(method="tools/call", params=t.CallToolRequestParams(
         name="run_custom_command", arguments={"command": command, "video_ids": [VID]})))
-    payload = json.loads(res.root.content[0].text)
-    assert payload["error"] == "ValueError" and "TUI-only" in payload["message"]
+    # Only the refusal's meaning is pinned, not its error shape (owned by the mcp chain).
+    assert "TUI-only" in res.root.content[0].text
     assert not (tmp_path / "RAN").exists()
