@@ -163,3 +163,99 @@ class TestPasteCutRedo:
         assert client.video_ids_in("DST") == ["vid1"]
         assert client.video_ids_in("SRC") == []
         assert len(op.added_item_ids) == 1
+
+
+# ---- ROADMAP 2.2 (MCP undo parity): OperationStack.record + DeleteVideos redo -----------
+
+from fakes import FakeYouTubeAPIClient  # noqa: E402
+from yanger.operation_history import OperationStack, CreatePlaylistOperation, RenameOperation  # noqa: E402
+
+
+class TestDeleteVideosRedo:
+    """Undo re-adds the video under a NEW playlist item id; redo must remove that one."""
+
+    def test_execute_undo_redo_leaves_video_removed(self):
+        api = FakeYouTubeAPIClient()
+        api.seed_playlist("PL", video_ids=["vid1"])
+        video = api.get_playlist_items("PL")[0]
+
+        op = DeleteVideosOperation(api, "PL", [video])
+        assert op.execute() is True
+        assert op.undo() is True
+        assert api.video_ids_in("PL") == ["vid1"]
+        # Previously raised KeyError: unknown playlist_item_id (the pre-undo id).
+        assert op.execute() is True
+        assert api.video_ids_in("PL") == []
+
+
+class TestOperationStackRecord:
+    """record() logs an operation that already ran elsewhere (the MCP server makes the API call
+    itself so its errors reach the MCP error contract), with execute()'s stack bookkeeping."""
+
+    def _executed_create(self, api, title="T"):
+        op = CreatePlaylistOperation(api, title)
+        assert op.execute() is True
+        return op
+
+    def test_record_pushes_and_clears_redo(self):
+        api = FakeYouTubeAPIClient()
+        stack = OperationStack()
+        first = self._executed_create(api, "A")
+        stack.record(first)
+        assert stack.undo() is first
+        assert stack.can_redo()
+
+        second = self._executed_create(api, "B")
+        stack.record(second)
+        assert stack.undo_stack == [second]
+        assert not stack.can_redo()
+
+    def test_record_refuses_unexecuted_op(self):
+        stack = OperationStack()
+        with pytest.raises(ValueError):
+            stack.record(CreatePlaylistOperation(FakeYouTubeAPIClient(), "never ran"))
+        assert stack.undo_stack == []
+
+    def test_record_trims_to_max_size(self):
+        api = FakeYouTubeAPIClient()
+        stack = OperationStack(max_size=2)
+        ops = [self._executed_create(api, str(i)) for i in range(3)]
+        for op in ops:
+            stack.record(op)
+        assert stack.undo_stack == ops[1:]
+
+    def test_unexpected_exception_in_undo_keeps_op_on_stack(self):
+        """An error the Operation does not catch (ValueError 'Playlist not found' from
+        update_playlist, a fake's KeyError) must not drop the op from both stacks."""
+        class _Raises(FakeYouTubeAPIClient):
+            def rename_playlist(self, playlist_id, new_title):
+                raise ValueError(f"Playlist {playlist_id} not found")
+
+        api = FakeYouTubeAPIClient()
+        api.seed_playlist("PL", title="old")
+        op = RenameOperation(api, "playlist", "PL", "old", "new")
+        assert op.execute() is True
+        stack = OperationStack()
+        stack.record(op)
+
+        op.api_client = _Raises()
+        with pytest.raises(ValueError):
+            stack.undo()
+        assert stack.undo_stack == [op] and stack.redo_stack == []
+
+    def test_unexpected_exception_in_redo_keeps_op_on_stack(self):
+        class _Raises(FakeYouTubeAPIClient):
+            def rename_playlist(self, playlist_id, new_title):
+                raise ValueError(f"Playlist {playlist_id} not found")
+
+        api = FakeYouTubeAPIClient()
+        api.seed_playlist("PL", title="old")
+        op = RenameOperation(api, "playlist", "PL", "old", "new")
+        stack = OperationStack()
+        assert stack.execute(op) is True
+        assert stack.undo() is op
+
+        op.api_client = _Raises()
+        with pytest.raises(ValueError):
+            stack.redo()
+        assert stack.redo_stack == [op] and stack.undo_stack == []

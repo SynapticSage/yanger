@@ -464,9 +464,11 @@ class DeleteVideosOperation(Operation):
             return False
             
         try:
-            # Re-add videos to the playlist
-            for video_data in self.deleted_videos_data:
-                self.api_client.add_video_to_playlist(
+            # Re-add videos to the playlist. Re-adding mints a NEW playlist item id, so
+            # capture it back onto the video (as PasteOperation.undo does); otherwise a
+            # redo would try to remove the now-invalid original id.
+            for video, video_data in zip(self.videos, self.deleted_videos_data):
+                video.playlist_item_id = self.api_client.add_video_to_playlist(
                     video_data['video_id'],
                     self.playlist_id
                 )
@@ -503,19 +505,31 @@ class OperationStack:
             True if successful, False otherwise
         """
         if operation.execute():
-            # Add to undo stack
-            self.undo_stack.append(operation)
-            
-            # Limit stack size
-            if len(self.undo_stack) > self.max_size:
-                self.undo_stack.pop(0)
-            
-            # Clear redo stack (new operation invalidates redo history)
-            self.redo_stack.clear()
-            
-            logger.debug(f"Operation executed: {operation}")
+            self.record(operation)
             return True
         return False
+
+    def record(self, operation: Operation) -> None:
+        """Add an operation that has ALREADY been executed to the undo stack.
+
+        For callers that make the API call themselves (the MCP server, so the call's
+        exceptions reach its error contract) and then build the matching operation.
+
+        Raises:
+            ValueError: if the operation is not marked executed (it could not be undone).
+        """
+        if not operation.executed:
+            raise ValueError(f"Cannot record an operation that has not run: {operation}")
+        self.undo_stack.append(operation)
+
+        # Limit stack size
+        if len(self.undo_stack) > self.max_size:
+            self.undo_stack.pop(0)
+
+        # Clear redo stack (new operation invalidates redo history)
+        self.redo_stack.clear()
+
+        logger.debug(f"Operation recorded: {operation}")
     
     def undo(self) -> Optional[Operation]:
         """Undo the last operation.
@@ -527,7 +541,14 @@ class OperationStack:
             return None
         
         operation = self.undo_stack.pop()
-        if operation.undo():
+        try:
+            undone = operation.undo()
+        except BaseException:
+            # An error the operation does not catch (a bug, or e.g. ValueError "playlist
+            # not found"): keep the op where it was rather than drop it from both stacks.
+            self.undo_stack.append(operation)
+            raise
+        if undone:
             self.redo_stack.append(operation)
             logger.debug(f"Operation undone: {operation}")
             return operation
@@ -546,7 +567,12 @@ class OperationStack:
             return None
         
         operation = self.redo_stack.pop()
-        if operation.execute():
+        try:
+            redone = operation.execute()
+        except BaseException:
+            self.redo_stack.append(operation)  # as in undo(): never lose the op
+            raise
+        if redone:
             self.undo_stack.append(operation)
             logger.debug(f"Operation redone: {operation}")
             return operation

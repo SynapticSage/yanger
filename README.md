@@ -439,6 +439,7 @@ async def connect_yanger():
 | `add_video` / `remove_video` | Add or remove videos |
 | `move_video` | Move video between playlists |
 | `copy_videos` | Copy videos to another playlist |
+| `undo` / `redo` | Undo or redo this MCP session's create/rename playlist and add/remove/move/copy changes (asks you first) |
 | `search_videos` | Search across all playlists |
 | `get_transcript` | Fetch video transcript |
 | `search_transcripts` | Search within transcripts |
@@ -458,7 +459,9 @@ names (not their templates). See `docs/MCP_SERVER_PLAN.md`.
 confirm form), `delete_playlist` and `remove_video` ask you to approve first, and custom commands
 marked `confirm: true` are offered to the model and run only after you approve the exact command
 lines. Only an explicit approval with the box ticked proceeds; no answer within 5 minutes refuses. Clients without elicitation behave
-as before: no prompt for delete/remove, and `confirm: true` commands stay hidden and refused.
+as before: no prompt for delete/remove, and `confirm: true` commands stay hidden and refused. `undo`/`redo` always
+need an elicitation confirm and are refused without one; their history lives in the MCP server's
+memory for that session only and is not shared with the TUI's `u`/`U`.
 
 **Example Prompts**:
 ```
