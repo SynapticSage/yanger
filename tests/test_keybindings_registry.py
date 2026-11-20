@@ -6,9 +6,23 @@ KeySequenceMatcher) is pinned end to end in tests/test_keybindings_yaml.py; this
 help/registry contract that users and the help overlay read, and the pure matcher.
 """
 
+import re
+from pathlib import Path
+
+import pytest
+import yaml
+
 from yanger.keybindings import (
-    BINDING, SEQUENCE, KeySequenceMatcher, MatchResult, display_keys, registry,
+    BINDING, SEQUENCE, KeySequenceMatcher, MatchResult, display_keys,
+    load_keybinding_overrides, registry,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_registry_defaults():
+    """apply_overrides mutates the process-global registry; reset it after every test."""
+    yield
+    registry.apply_overrides({})
 
 
 def test_refresh_all_documented_as_gR():
@@ -136,3 +150,159 @@ def test_default_sequences_resolve():
                 m.reset()
             else:
                 assert (r.kind, r.action) == (MatchResult.MATCH, b.action)
+
+
+# --- Roadmap 3.5: user overrides (apply_overrides, the YAML loader, the template) ----------
+
+def _keys(action):
+    return registry.get_action(action).keys
+
+
+def test_defaults_are_conflict_free():
+    assert registry.apply_overrides({}) == []
+
+
+def test_override_replaces_defaults_and_empty_restores():
+    assert registry.apply_overrides({"new_playlist": ["x"]}) == []
+    assert _keys("new_playlist") == ["x"]
+    assert registry.keybindings["x"].description == "Create new playlist"
+    assert "gn" not in registry.keybindings
+    assert registry.apply_overrides({}) == []
+    assert _keys("new_playlist") == ["g n"]
+    assert "gn" in registry.keybindings and "x" not in registry.keybindings
+
+
+def test_override_accepts_alternatives_and_named_keys():
+    assert registry.apply_overrides({"move_down": ["j", "down", "ctrl+n"]}) == []
+    assert _keys("move_down") == ["j", "down", "ctrl+n"]
+    assert registry.keybindings["j/↓/ctrl+n"].action == "move_down"
+
+
+@pytest.mark.parametrize("overrides, needle", [
+    ({"no_such_action": ["x"]}, "no_such_action"),
+    ({"cut": []}, "cut"),
+    ({"cut": [1]}, "cut"),
+    ({"cut": "x"}, "cut"),                   # apply_overrides takes lists; the loader normalizes
+    ({"cut": [""]}, "cut"),
+    ({"quit": ["Q Q"]}, "single key"),       # BINDINGS-kind keys cannot be sequences
+    ({"new_playlist": ["tab"]}, "reserved"),
+])
+def test_bad_entries_warn_and_keep_defaults(overrides, needle):
+    before = {b.action: list(b.keys) for b in registry.keybindings.values()}
+    warnings = registry.apply_overrides(overrides)
+    assert len(warnings) == 1 and needle in warnings[0]
+    assert {b.action: list(b.keys) for b in registry.keybindings.values()} == before
+
+
+@pytest.mark.parametrize("token", ["dd", "gR", "shift+g", "foo", "ctrl+", "\t"])
+def test_undeliverable_tokens_are_refused(token):
+    """Fail closed: a token no keypress can produce must not replace a working default."""
+    warnings = registry.apply_overrides({"cut": [token]})
+    assert len(warnings) == 1
+    assert _keys("cut") == ["d d"]
+
+
+def test_glued_sequence_gets_a_spacing_hint():
+    [warning] = registry.apply_overrides({"cut": ["dd"]})
+    assert '"d d"' in warning
+
+
+def test_textual_key_aliases_canonicalize_to_the_character():
+    assert registry.apply_overrides({"help": ["question_mark"]}) == []
+    assert _keys("help") == ["?"]
+    warnings = registry.apply_overrides({"new_playlist": ["slash"]})  # "/" is search's key
+    assert warnings and "search" in warnings[0]
+    assert _keys("new_playlist") == ["g n"]
+
+
+def test_duplicate_sequence_is_reverted_naming_both_actions():
+    [warning] = registry.apply_overrides({"new_playlist": ["d d"]})
+    assert "new_playlist" in warning and "cut" in warning
+    assert _keys("new_playlist") == ["g n"]
+    assert _keys("cut") == ["d d"]
+
+
+def test_binding_key_clashing_with_a_later_sequence_token_is_reverted():
+    """event.stop() in on_key does NOT stop App BINDINGS, so redo on 'w' would fire on the
+    w of `c w` as well as rename: any token of any sequence counts as a clash."""
+    [warning] = registry.apply_overrides({"redo": ["w"]})
+    assert "redo" in warning and "rename" in warning
+    assert _keys("redo") == ["U"]
+
+
+def test_binding_vs_binding_clash_is_reverted():
+    warnings = registry.apply_overrides({"redo": ["r"]})
+    assert warnings and "open_in_browser" in warnings[0]
+    assert _keys("redo") == ["U"]
+
+
+def test_conflict_reverts_cascade():
+    """quit/new_playlist clash on x -> both revert -> new_playlist's default g n now clashes
+    with cut's override -> cut reverts too."""
+    warnings = registry.apply_overrides(
+        {"new_playlist": ["x"], "quit": ["x"], "cut": ["g n"]})
+    assert len(warnings) >= 2
+    assert (_keys("new_playlist"), _keys("quit"), _keys("cut")) == (["g n"], ["q"], ["d d"])
+
+
+def test_swap_is_accepted():
+    assert registry.apply_overrides({"cut": ["y y"], "copy": ["d d"]}) == []
+    assert (_keys("cut"), _keys("copy")) == (["y y"], ["d d"])
+
+
+def test_binding_keymap_holds_only_overridden_binding_actions():
+    assert registry.binding_keymap() == {}
+    registry.apply_overrides({"quit": ["Q"], "new_playlist": ["x"]})
+    assert registry.binding_keymap() == {"quit": "Q"}
+    registry.apply_overrides({})
+    assert registry.binding_keymap() == {}
+
+
+def test_binding_overrides_refused_when_textual_cannot_rebind():
+    [warning] = registry.apply_overrides({"quit": ["Q"]}, rebind_bindings=False)
+    assert "quit" in warning
+    assert _keys("quit") == ["q"]
+
+
+def test_loader_missing_file(tmp_path):
+    assert load_keybinding_overrides(tmp_path / "keybindings.yaml") == ({}, [])
+
+
+def test_loader_empty_or_comment_only_file(tmp_path):
+    p = tmp_path / "keybindings.yaml"
+    p.write_text("# nothing here\n")
+    assert load_keybinding_overrides(p) == ({}, [])
+
+
+@pytest.mark.parametrize("text", ["cut: [d d\n", "- cut\n- copy\n", "just a string\n"])
+def test_loader_parse_error_or_non_mapping_warns(tmp_path, text):
+    p = tmp_path / "keybindings.yaml"
+    p.write_text(text)
+    overrides, warnings = load_keybinding_overrides(p)
+    assert overrides == {} and len(warnings) == 1
+
+
+def test_loader_normalizes_and_skips_bad_values(tmp_path):
+    p = tmp_path / "keybindings.yaml"
+    p.write_text('cut: "x x"\ncopy: ["y y", "c c"]\nquit: on\nselect: 1\n')
+    overrides, warnings = load_keybinding_overrides(p)
+    assert overrides == {"cut": ["x x"], "copy": ["y y", "c c"]}
+    assert len(warnings) == 2 and "quit" in warnings[0] and "select" in warnings[1]
+
+
+_TEMPLATE = Path(__file__).resolve().parent.parent / "config" / "keybindings.yaml"
+
+
+def test_template_lists_every_action_with_its_defaults_and_loads_as_nothing():
+    text = _TEMPLATE.read_text()
+    assert yaml.safe_load(text) is None          # all commented out: changes nothing
+    listed = {}
+    for line in text.splitlines():
+        m = re.match(r"^#\s*([a-z_]+):\s*([\"\[].*)$", line)
+        if m:
+            assert m.group(1) not in listed, f"{m.group(1)} listed twice"
+            listed[m.group(1)] = yaml.safe_load(m.group(2))
+    actions = {b.action: b.keys for b in registry.keybindings.values()}
+    assert set(listed) == set(actions)
+    for action, value in listed.items():
+        assert (value if isinstance(value, list) else [value]) == actions[action], action

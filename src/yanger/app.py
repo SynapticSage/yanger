@@ -34,7 +34,7 @@ from .ui.rename_modal import RenameModal, ItemRenamed
 from .ui.confirmation_modal import ConfirmationModal, ConfirmationResult
 from .ui.bulkedit_preview import BulkEditPreview, BulkEditConfirmed, BulkEditCancelled
 from .cache import PersistentCache
-from .keybindings import registry, KeySequenceMatcher, MatchResult
+from .keybindings import registry, KeySequenceMatcher, MatchResult, load_keybinding_overrides
 from .config.settings import load_settings, save_user_setting
 from .core.transcript_command import (
     build_command,
@@ -100,6 +100,19 @@ _APP_KEY_ACTIONS = {
 }
 
 
+# Textual's keymap (Binding.id + App.set_keymap) rebinds BINDINGS keys from keybindings.yaml.
+# Checked at runtime, not trusted to the pyproject pin: without it, BINDING-kind overrides are
+# refused with a warning and the defaults stay.
+_KEYMAP_SUPPORTED = "id" in getattr(Binding, "__dataclass_fields__", {}) and hasattr(App, "set_keymap")
+
+
+def _binding(key: str, action: str, description: str, **kwargs) -> Binding:
+    """A Binding whose id is its action (= the registry's action id), so set_keymap can rebind it."""
+    if _KEYMAP_SUPPORTED:
+        kwargs["id"] = action
+    return Binding(key, action, description, **kwargs)
+
+
 def _key_token(event: events.Key) -> str:
     """The registry token for a keypress: the character itself when it is a single printable
     non-space character ("?", "G"), otherwise Textual's key name ("space", "up", "ctrl+r")."""
@@ -118,20 +131,20 @@ class YouTubeRangerApp(App):
     
     # Keybindings
     BINDINGS = [
-        Binding("q", "quit", "Quit", priority=True),
-        Binding("?", "help", "Help"),
-        Binding(":", "command_mode", "Command"),
-        Binding("/", "search", "Search"),
-        Binding("r", "open_in_browser", "Open in Browser"),
+        _binding("q", "quit", "Quit", priority=True),
+        _binding("?", "help", "Help"),
+        _binding(":", "command_mode", "Command"),
+        _binding("/", "search", "Search"),
+        _binding("r", "open_in_browser", "Open in Browser"),
         # 'u' is intentionally NOT a binding: it's a ranger-style prefix handled
         # in on_key (uv = unmark all, uV = visual unmark, bare u = undo). A
         # binding would fire undo before the follow-up key, making uv/uV unreachable.
-        Binding("U", "redo", "Redo"),
-        Binding("ctrl+r", "refresh", "Refresh"),
+        _binding("U", "redo", "Redo"),
+        _binding("ctrl+r", "refresh", "Refresh"),
         # refresh_all is reached via 'gR' in on_key, NOT a Binding: terminals can't
         # deliver the Ctrl+Shift+R chord, so advertising it in the footer/palette was
         # misleading (Tier 0.7).
-        Binding("ctrl+q", "force_quit", "Force Quit", show=False),
+        _binding("ctrl+q", "force_quit", "Force Quit", show=False),
     ]
     
     # Reactive attributes
@@ -189,6 +202,15 @@ class YouTubeRangerApp(App):
         # Settings
         self.settings = load_settings()
         
+        # User key overrides (roadmap 3.5). Applied on every construction, which also resets
+        # the process-global registry; warnings are logged now and shown once in on_mount.
+        overrides, self._keybinding_warnings = load_keybinding_overrides(
+            self.config_dir / "keybindings.yaml")
+        self._keybinding_warnings += registry.apply_overrides(
+            overrides, rebind_bindings=_KEYMAP_SUPPORTED)
+        for warning in self._keybinding_warnings:
+            logger.warning(warning)
+
         # Ranger command state
         self._pending_sort: bool = False
         # SEQUENCE-kind keys (gn, dd, u*, hjkl...) dispatch through the registry's matcher.
@@ -259,6 +281,11 @@ class YouTubeRangerApp(App):
     async def on_mount(self) -> None:
         """Initialize the application after mounting."""
         self._apply_colorscheme()
+        keymap = registry.binding_keymap()  # empty unless _KEYMAP_SUPPORTED (see __init__)
+        if keymap:
+            self.set_keymap(keymap)
+        for warning in self._keybinding_warnings:
+            self.notify(warning, severity="warning", timeout=10)
         try:
             # Best-effort: ensure our CSS is loaded even when running from a
             # different working directory (e.g. editable installs, tests)

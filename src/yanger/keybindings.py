@@ -13,8 +13,19 @@ Two kinds of action exist:
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from enum import Enum
+
+import yaml
+
+try:
+    from textual.keys import Keys as _TextualKeys, REPLACED_KEYS as _REPLACED_KEYS, key_to_character
+except ImportError:  # fail closed: without Textual's key tables only characters/named keys validate
+    _TextualKeys, _REPLACED_KEYS = (), {}
+
+    def key_to_character(key: str) -> Optional[str]:
+        return None
 
 
 class KeyContext(Enum):
@@ -40,6 +51,73 @@ def display_keys(keys: Sequence[str]) -> str:
     return "/".join(
         "".join(_DISPLAY_TOKENS.get(tok, tok) for tok in seq.split()) for seq in keys
     )
+
+
+# Named keys a token may use (what Textual reports as event.key for non-printing keys).
+_NAMED_KEYS = {
+    "enter", "escape", "space", "tab", "backspace", "delete", "insert", "home", "end",
+    "pageup", "pagedown", "up", "down", "left", "right",
+} | {f"f{i}" for i in range(1, 25)}
+# Modifier combos Textual can deliver ("ctrl+r", "shift+up"...).
+_MODIFIER_KEYS = {k.value for k in _TextualKeys if "+" in k.value}
+# Keys Textual itself owns (focus, copy / quit hint, command palette, quit): never user-bound.
+RESERVED_KEYS = {"tab", "shift+tab", "ctrl+c", "ctrl+p", "ctrl+q"}
+
+
+def canonical_token(token: str) -> Optional[str]:
+    """The token as the matcher sees it, or None if no keypress can produce it.
+
+    Single printable characters stand for themselves; Textual's names for them
+    ("question_mark", "slash") map back to the character, so "?" and "question_mark" compare
+    equal. Named keys and Textual's modifier combos pass through.
+    """
+    if len(token) == 1:
+        return token if token.isprintable() and not token.isspace() else None
+    if token in _NAMED_KEYS or token in _MODIFIER_KEYS:
+        return token
+    if "+" not in token:
+        char = key_to_character(_REPLACED_KEYS.get(token, token))
+        if char and len(char) == 1 and char.isprintable() and not char.isspace():
+            return char
+    return None
+
+
+def _bad_token_warning(action: str, token: str) -> str:
+    hint = 'a key is one character or a key name such as "enter", "pageup", "ctrl+r"'
+    if "+" not in token and token.isprintable() and len(token) > 1:
+        hint += f'; separate the keys of a sequence with spaces (did you mean "{" ".join(token)}"?)'
+    return f'keybindings.yaml: "{action}": unknown key "{token}" ({hint}). Keeping its defaults.'
+
+
+def load_keybinding_overrides(path: Path) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Read ``action_id: "keys" | ["keys", ...]`` from a user keybindings.yaml.
+
+    Shape checks only (``registry.apply_overrides`` validates ids and keys). A missing file
+    means no overrides; an unreadable/unparsable file or a non-mapping top level means no
+    overrides plus one warning; an entry of the wrong type is skipped with a warning.
+    """
+    if not path.exists():
+        return {}, []
+    try:
+        data = yaml.safe_load(path.read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+        return {}, [f"{path}: could not be read ({e}); using the default keys."]
+    if data is None:
+        return {}, []
+    if not isinstance(data, dict):
+        return {}, [f"{path}: expected a mapping of action: keys; using the default keys."]
+    overrides: Dict[str, List[str]] = {}
+    warnings: List[str] = []
+    for action, value in data.items():
+        if isinstance(value, str):
+            value = [value]
+        if not (isinstance(action, str) and isinstance(value, list)
+                and all(isinstance(v, str) for v in value)):
+            warnings.append(
+                f'{path}: "{action}" must map to a quoted key string or a list of them; ignored.')
+            continue
+        overrides[action] = value
+    return overrides, warnings
 
 
 @dataclass
@@ -72,6 +150,7 @@ class KeybindingRegistry:
         self.keybindings: Dict[str, Keybinding] = {}  # display key -> binding (help reads this)
         self._actions: Dict[str, Keybinding] = {}     # action id -> binding
         self._defaults: Dict[str, List[str]] = {}     # action id -> default key sequences
+        self._overridden: set = set()                 # action ids whose keys are user overrides
         self.commands: Dict[str, Command] = {}
         self._initialize_default_bindings()
         self._initialize_default_commands()
@@ -319,6 +398,123 @@ class KeybindingRegistry:
     def get_action(self, action: str) -> Keybinding:
         """The binding registered under ``action`` (KeyError if unknown)."""
         return self._actions[action]
+
+    def apply_overrides(self, overrides: Dict[str, List[str]],
+                        rebind_bindings: bool = True) -> List[str]:
+        """Make ``overrides`` (action id -> key sequences) the effective keys; return warnings.
+
+        Always recomputed from the defaults, so ``apply_overrides({})`` restores them. A listed
+        action's keys REPLACE its defaults. Fail closed: an entry that is unknown, malformed,
+        undeliverable, reserved, or (for BINDING kind) a multi-key sequence, or that
+        ``rebind_bindings=False`` forbids, is skipped and the action keeps its defaults.
+        Overrides involved in a conflict are reverted until no conflict remains; the defaults
+        are conflict-free, so this ends.
+        """
+        warnings: List[str] = []
+        accepted: Dict[str, List[Tuple[str, ...]]] = {}
+        for action, values in overrides.items():
+            if action not in self._actions:
+                warnings.append(f'keybindings.yaml: unknown action "{action}"; ignored.')
+                continue
+            seqs = self._parse_override(action, values, rebind_bindings, warnings)
+            if seqs is not None:
+                accepted[action] = seqs
+
+        while True:
+            effective = {a: accepted.get(a) or [tuple(s.split()) for s in d]
+                         for a, d in self._defaults.items()}
+            reverted = set()
+            for a, sa, b, sb in self._conflicts(effective):
+                involved = {x for x in (a, b) if x in accepted}
+                if not involved:
+                    continue
+                reverted |= involved
+                warnings.append(
+                    f'keybindings.yaml: "{a}" ({" ".join(sa)}) conflicts with "{b}" '
+                    f'({" ".join(sb)}); keeping the default keys of '
+                    f'{" and ".join(sorted(involved))}.')
+            if not reverted:
+                break
+            for a in reverted:
+                del accepted[a]
+
+        for action, binding in self._actions.items():
+            binding.keys = [" ".join(seq) for seq in effective[action]]
+            binding.key = display_keys(binding.keys)
+        self._overridden = set(accepted)
+        self.keybindings = {b.key: b for b in self._actions.values()}
+        return warnings
+
+    def _parse_override(self, action: str, values, rebind_bindings: bool,
+                        warnings: List[str]) -> Optional[List[Tuple[str, ...]]]:
+        """One override entry as canonical token tuples, or None (with a warning)."""
+        binding = self._actions[action]
+        if binding.kind == BINDING and not rebind_bindings:
+            warnings.append(f'keybindings.yaml: "{action}" cannot be rebound with this Textual '
+                            '(no keymap support); keeping its defaults.')
+            return None
+        if not (isinstance(values, list) and values and all(isinstance(v, str) for v in values)):
+            warnings.append(f'keybindings.yaml: "{action}" needs at least one key string '
+                            '(an empty list cannot unbind); keeping its defaults.')
+            return None
+        defaults = {tok for seq in self._defaults[action] for tok in seq.split()}
+        seqs: List[Tuple[str, ...]] = []
+        for value in values:
+            tokens = value.split()
+            if not tokens:
+                warnings.append(f'keybindings.yaml: "{action}" has an empty key; '
+                                'keeping its defaults.')
+                return None
+            canon = []
+            for tok in tokens:
+                c = canonical_token(tok)
+                if c is None:
+                    warnings.append(_bad_token_warning(action, tok))
+                    return None
+                if c in RESERVED_KEYS and c not in defaults:
+                    warnings.append(f'keybindings.yaml: "{action}": "{c}" is reserved by '
+                                    'Textual; keeping its defaults.')
+                    return None
+                canon.append(c)
+            if binding.kind == BINDING and len(canon) > 1:
+                warnings.append(f'keybindings.yaml: "{action}" takes a single key, not the '
+                                f'sequence "{value}"; keeping its defaults.')
+                return None
+            if tuple(canon) not in seqs:
+                seqs.append(tuple(canon))
+        return seqs
+
+    def _conflicts(self, effective: Dict[str, List[Tuple[str, ...]]]):
+        """(action, seq, other action, other seq) for every clash in ``effective``.
+
+        Clashes: the same sequence on two actions, the same BINDING key on two actions, and a
+        BINDING key equal to ANY token of a SEQUENCE: Textual runs App BINDINGS even after
+        on_key calls event.stop(), so that key would fire both actions.
+        """
+        seq_owner: Dict[Tuple[str, ...], str] = {}
+        binding_owner: Dict[str, str] = {}
+        token_users: Dict[str, List[Tuple[str, Tuple[str, ...]]]] = {}
+        for action, seqs in effective.items():
+            is_binding = self._actions[action].kind == BINDING
+            for seq in seqs:
+                owners = binding_owner if is_binding else seq_owner
+                key = seq[0] if is_binding else seq
+                other = owners.setdefault(key, action)
+                if other != action:
+                    yield other, seq, action, seq
+                if not is_binding:
+                    for tok in seq:
+                        token_users.setdefault(tok, []).append((action, seq))
+        for key, action in binding_owner.items():
+            for other, seq in token_users.get(key, []):
+                yield action, (key,), other, seq
+
+    def binding_keymap(self) -> Dict[str, str]:
+        """Textual keymap ({binding id: "k1,k2"}) for the overridden BINDING-kind actions."""
+        return {
+            a: ",".join(self._actions[a].keys)
+            for a in sorted(self._overridden) if self._actions[a].kind == BINDING
+        }
 
     def sequence_bindings(self) -> List[Tuple[Tuple[str, ...], str]]:
         """(token tuple, action id) for every effective SEQUENCE-kind key sequence."""

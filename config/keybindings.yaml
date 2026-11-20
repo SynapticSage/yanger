@@ -1,0 +1,73 @@
+# YouTube Ranger keybindings: reference template.
+#
+# yanger reads your overrides from ~/.config/yanger/keybindings.yaml (next to config.yaml),
+# not from this file. Copy the lines you want to change there and uncomment them. Everything
+# below is commented out, so this file binds nothing and lists the defaults.
+#
+# Format:  action_id: "keys"   or   action_id: ["keys", "other keys"]
+#   - Separate the keys of a sequence with spaces: "g n" is g then n. "gn" is refused.
+#   - A key is one character ("x", "?", "G") or a key name: enter, escape, space,
+#     backspace, delete, insert, home, end, pageup, pagedown, up, down, left, right, f1-f24,
+#     or a modifier combo such as "ctrl+r" or "shift+up". Always quote the value.
+#   - A listed action's keys REPLACE its defaults. Unlisted actions keep theirs. An action
+#     cannot be unbound: an empty list is refused.
+#   - Actions marked "single key" are Textual bindings and take a single key, not a sequence.
+#
+# Bad entries never break startup. yanger shows a warning and that action keeps its default
+# keys. This happens for an unknown action, an unknown key, a reserved key (tab, shift+tab,
+# ctrl+c, ctrl+p, ctrl+q), or two actions on the same keys. A "single key" action also
+# conflicts with any sequence that contains its key. The sort menu keys after "o" (t d p v D)
+# and the keys inside dialogs and the help screen cannot be changed.
+
+# --- Application ---
+# quit: "q"   # single key
+# help: "?"   # single key
+# command_mode: ":"   # single key
+# refresh: "ctrl+r"   # single key
+# refresh_all: "g R"
+# force_quit: "ctrl+q"   # single key
+
+# --- Navigation ---
+# move_left: ["h", "left"]
+# move_down: ["j", "down"]
+# move_up: ["k", "up"]
+# move_right: ["l", "right"]
+# go_top: "g g"
+# go_bottom: "G"
+# select: "enter"
+# page_up: "pageup"
+# page_down: "pagedown"
+
+# --- Selection (video column) ---
+# toggle_mark: "space"
+# visual_mode: "V"
+# invert_selection: "v"
+# unmark_all: "u v"
+# visual_unmark: "u V"
+
+# --- Operations ---
+# cut: "d d"
+# delete_videos: "d D"
+# copy: "y y"
+# paste: "p p"
+# undo: "u"
+# redo: "U"   # single key
+# rename: "c w"
+# sort_menu: "o"
+# open_in_browser: "r"   # single key
+# bulk_edit: "B"
+
+# --- Search ---
+# search: "/"   # single key
+# next_match: "n"
+# prev_match: "N"
+# cancel: "escape"
+
+# --- Playlist ---
+# new_playlist: "g n"
+# delete_playlist: "g d"
+
+# --- Transcript ---
+# fetch_transcript: "g t"
+# toggle_auto_transcript: "g T"
+# export_transcript: "g e"

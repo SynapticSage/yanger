@@ -117,6 +117,21 @@ yanger  # Will authenticate on first run
 | `Ctrl+R` | Refresh current view |
 | `gR` | Refresh all (clear cache) |
 
+### Customizing keys
+
+Put overrides in `~/.config/yanger/keybindings.yaml`. [`config/keybindings.yaml`](config/keybindings.yaml) lists every action id and its default keys. Each entry is `action_id: "keys"` or a list of alternatives. Separate the keys of a sequence with spaces:
+
+```yaml
+new_playlist: "x"            # was g n
+move_down: ["j", "ctrl+n"]   # was j / down
+quit: "Q"                    # a single-key Textual binding (also help, command_mode, search, ...)
+```
+
+- A listed action's keys **replace** its defaults. You cannot unbind an action.
+- Startup never fails on a bad entry. yanger shows a warning and that action keeps its defaults. Bad entries include an unknown action or key (such as `"dd"` for `"d d"`), a reserved key (`tab`, `ctrl+c`, `ctrl+p`, `ctrl+q`), or two actions on the same keys.
+- You cannot change the sort-menu keys after `o`, the keys inside dialogs, or the help screen's keys. If you move navigation off the arrow keys, the arrows still scroll the column without moving the selection.
+- yanger does not read the `keybindings:` section of `config.yaml`.
+
 ## 💬 Command Mode
 
 Press `:` for tab-completed commands:
