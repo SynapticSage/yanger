@@ -4,7 +4,7 @@ Provides a command line interface similar to vim/ranger.
 """
 # Modified: 2025-08-08
 
-from typing import Callable, Optional, List
+from typing import Callable, Iterable, Optional, List
 import shlex
 import logging
 
@@ -21,8 +21,18 @@ logger = logging.getLogger(__name__)
 
 
 class CommandSuggester(Suggester):
-    """Provides command suggestions based on registered commands."""
-    
+    """Provides command suggestions based on registered commands.
+
+    Completes the verb (``:tra`` -> ``:transcript``) and, given ``run_names``, the custom
+    command name after ``:run `` (``:run d`` -> ``:run dl``). ``run_names`` is called on every
+    keystroke, so commands added mid-session (``:set commands.<name>``) are offered at once.
+    """
+
+    def __init__(self, run_names: Optional[Callable[[], Iterable[str]]] = None) -> None:
+        # No cache: the :run registry changes at runtime, and a cached miss would hide new names.
+        super().__init__(use_cache=False)
+        self.run_names = run_names
+
     async def get_suggestion(self, value: str) -> Optional[str]:
         """Get suggestion for current input."""
         if not value or not value.startswith(":"):
@@ -39,7 +49,17 @@ class CommandSuggester(Suggester):
             return None
             
         cmd_name = parts[0].lower()
-        
+
+        if cmd_name == "run" and len(parts) == 2:
+            # Complete only a single, still-being-typed name token (`:run` takes one name).
+            prefix = parts[1]
+            if not self.run_names or " " in prefix or value.endswith(" "):
+                return None
+            for name in sorted(self.run_names()):
+                if name.startswith(prefix) and name != prefix:
+                    return value[:len(value) - len(prefix)] + name
+            return None
+
         # Find matching commands
         for name, cmd in registry.commands.items():
             if name.startswith(cmd_name) and name != cmd_name:
@@ -111,8 +131,10 @@ class CommandInput(Container):
     def __init__(self, 
                  on_submit: Optional[Callable[[str], None]] = None,
                  on_cancel: Optional[Callable[[], None]] = None,
+                 run_names: Optional[Callable[[], Iterable[str]]] = None,
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.run_names = run_names
         self.on_submit_callback = on_submit
         self.on_cancel_callback = on_cancel
         self.command_history: List[str] = []
@@ -124,7 +146,7 @@ class CommandInput(Container):
         """Create command input layout."""
         self.input_widget = Input(
             placeholder="Enter command...",
-            suggester=CommandSuggester(),
+            suggester=CommandSuggester(run_names=self.run_names),
             id="command-input-field",
             # Focus must NOT select the pre-filled ":" — with select_on_focus the first
             # keystroke replaced it, so submissions lost their ':' prefix and silently
@@ -146,6 +168,9 @@ class CommandInput(Container):
         self.add_class("visible")
         if self.input_widget:
             self.input_widget.value = initial_text
+            # Setting value does not move the cursor: after hide() cleared it, the cursor sat at 0
+            # and the next keystrokes went BEFORE the ':' (the submission then failed the gate).
+            self.input_widget.cursor_position = len(initial_text)
 
             # Force styles directly on the Input widget after showing
             self.input_widget.styles.color = "white"

@@ -57,6 +57,16 @@ logger = logging.getLogger(__name__)
 RUN_CONFIRM_THRESHOLD = 5
 
 
+def _load_run_registry(settings, transcript_override: Optional[str]):
+    """The `:run` registry and the resolved transcript template it was built with.
+
+    Shared by `:run` and its Tab-completion (H.10) so both always see the same command names.
+    """
+    transcript_template = resolve_transcript_command(settings, runtime_override=transcript_override)
+    registry = load_command_registry(settings, transcript_template=transcript_template)
+    return registry, transcript_template
+
+
 class YouTubeRangerApp(App):
     """Main application class for YouTube Ranger."""
     
@@ -161,6 +171,9 @@ class YouTubeRangerApp(App):
         self.command_input = CommandInput(
             on_submit=lambda cmd: self.call_later(self.execute_command, cmd),
             on_cancel=self.cancel_command,
+            run_names=lambda: _load_run_registry(  # H.10: Tab-complete `:run <name>`
+                self.settings, self._transcript_command_override
+            )[0],
             id="command-input"
         )
         yield self.command_input
@@ -2198,10 +2211,9 @@ class YouTubeRangerApp(App):
         current video, and confirms before running on a large selection. `:run` with no/unknown
         name surfaces the available command names.
         """
-        transcript_template = resolve_transcript_command(
-            self.settings, runtime_override=self._transcript_command_override
+        registry, transcript_template = _load_run_registry(
+            self.settings, self._transcript_command_override
         )
-        registry = load_command_registry(self.settings, transcript_template=transcript_template)
         if not registry:
             self._notify_status(
                 "No custom commands configured. Add a 'commands:' map to config.yaml "
