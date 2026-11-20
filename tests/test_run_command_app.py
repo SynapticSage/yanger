@@ -238,6 +238,18 @@ async def test_run_transcript_explicit_command_keeps_its_confirm_gate():
     assert app._pending_run_spec.template == "mine {url}"
 
 
+async def test_transcript_mismatch_warns_only_on_run_transcript(caplog):
+    app = _fake_app(transcript_command="t {url}", selection=[_video("a")],
+                    commands={"transcript": "mine {url}", "dl": "yt-dlp {url}"})
+    with caplog.at_level("WARNING"):
+        await YouTubeRangerApp.handle_run_command(app, ["dl"])
+    assert caplog.text == ""
+    with caplog.at_level("WARNING"):
+        await YouTubeRangerApp.handle_run_command(app, ["transcript"])
+    assert "mine {url}" in caplog.text and "t {url}" in caplog.text
+    assert app.ran[-1][0].template == "mine {url}"
+
+
 # ----- H.9: `:set commands.<name> <template>` -----------------------------------
 
 def _set_app(tmp_path, commands=None):
@@ -299,6 +311,39 @@ def test_set_command_refuses_long_form_entry(tmp_path):
     msg, err = app.notes[-1]
     assert err is True and "config.yaml" in msg
     assert app.settings.commands["wipe"] == long_form and not (tmp_path / "config.yaml").exists()
+
+
+def test_set_command_message_with_markup_brackets_renders(tmp_path, monkeypatch):
+    """A template like tr '[/]' must not crash the markup-parsing status bar or toast."""
+    from textual.markup import to_content
+    _no_cmd_env(monkeypatch)
+    template = "tr '[/]' _ {url}"
+    _, args = parse_command(f':set commands.fix "{template}"')
+    app = _set_app(tmp_path)
+    YouTubeRangerApp.handle_set_command(app, args)
+    msg, err = app.notes[-1]
+    assert err is False and template in to_content(msg).plain
+
+
+def test_set_command_name_with_markup_brackets_renders(tmp_path, monkeypatch):
+    from textual.markup import to_content
+    _no_cmd_env(monkeypatch)
+    app = _set_app(tmp_path)
+    YouTubeRangerApp.handle_set_command(app, ["commands.[/]", "echo {url}"])
+    assert "[/]" in to_content(app.notes[-1][0]).plain
+
+
+def test_set_command_on_disk_refusal_leaves_memory_unchanged(tmp_path, monkeypatch):
+    """config.yaml gained a long-form entry mid-session: refused, and memory is not replaced."""
+    _no_cmd_env(monkeypatch)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"commands": {"dl": {"run": "yt-dlp {url}", "confirm": True}}})
+    )
+    app = _set_app(tmp_path, commands={"dl": "old {url}"})
+    YouTubeRangerApp.handle_set_command(app, ["commands.dl", "new {url}"])
+    msg, err = app.notes[-1]
+    assert err is True and "long-form" in msg and "Set in memory" not in msg
+    assert app.settings.commands["dl"] == "old {url}"
 
 
 def test_set_command_persist_failure_reports(tmp_path, monkeypatch):

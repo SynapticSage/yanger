@@ -305,16 +305,12 @@ def load_command_registry(
             if key:
                 registry[key] = CommandSpec(name=key, template=value)
 
-    if transcript_template:
+    if transcript_template and transcript_template.strip():
         # An explicit `transcript` entry wins (back-compat: its confirm gate is never dropped).
-        existing = registry.setdefault(
+        # `:run transcript` warns when the two differ (see app.handle_run_command).
+        registry.setdefault(
             TRANSCRIPT_COMMAND_NAME,
             CommandSpec(name=TRANSCRIPT_COMMAND_NAME, template=transcript_template),
         )
-        if existing.template != transcript_template:
-            logger.warning(
-                f"custom command '{TRANSCRIPT_COMMAND_NAME}' ({existing.template!r}) overrides "
-                f"transcript_command ({transcript_template!r}) for :run; :transcript still runs the latter"
-            )
 
     return registry

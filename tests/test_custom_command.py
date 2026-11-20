@@ -107,8 +107,17 @@ def test_registry_missing_commands_attr_is_empty():
 def test_registry_default_call_never_injects_transcript(monkeypatch):
     """MCP's call (no transcript_template) is unchanged even with the env hook set."""
     monkeypatch.setenv("YANGER_TRANSCRIPT_COMMAND", "summarize {url}")
-    monkeypatch.delenv("YANGER_CMD_TRANSCRIPT", raising=False)
+    for k in [k for k in os.environ if k.startswith("YANGER_CMD_")]:
+        monkeypatch.delenv(k)
     assert load_command_registry(SimpleNamespace(commands={})) == {}
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_registry_ignores_blank_transcript_template(monkeypatch, blank):
+    """A whitespace-only transcript_command is unset, like every other blank template."""
+    monkeypatch.delenv("YANGER_CMD_TRANSCRIPT", raising=False)
+    reg = load_command_registry(SimpleNamespace(commands={}), transcript_template=blank)
+    assert "transcript" not in reg
 
 
 def test_registry_injects_transcript_template(monkeypatch):
@@ -128,7 +137,8 @@ def test_registry_explicit_transcript_entry_wins_and_keeps_confirm(monkeypatch, 
     with caplog.at_level("WARNING"):
         reg = load_command_registry(settings, transcript_template="t {url}")
     assert reg["transcript"].template == "mine {url}" and reg["transcript"].confirm is True
-    assert "mine {url}" in caplog.text and "t {url}" in caplog.text
+    # The mismatch is warned by `:run transcript` only, not on every registry build.
+    assert caplog.text == ""
 
 
 def test_registry_env_transcript_entry_wins(monkeypatch, caplog):
@@ -136,7 +146,7 @@ def test_registry_env_transcript_entry_wins(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         reg = load_command_registry(SimpleNamespace(commands={}), transcript_template="t {url}")
     assert reg["transcript"].template == "envt {url}"
-    assert "envt {url}" in caplog.text
+    assert caplog.text == ""
 
 
 def test_registry_same_template_no_warning(monkeypatch, caplog):

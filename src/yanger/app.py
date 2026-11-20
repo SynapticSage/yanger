@@ -16,6 +16,10 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Header, Static
 from textual.reactive import reactive
 from textual import events
+try:
+    from textual.markup import escape as escape_markup
+except ImportError:  # Textual < 2.0 parses Rich markup (the pin allows >=0.86)
+    from rich.markup import escape as escape_markup
 
 from .auth import YouTubeAuth
 from .api_client import YouTubeAPIClient
@@ -38,6 +42,7 @@ from .core.transcript_command import (
 )
 from .core.custom_command import (
     load_command_registry, run_command, resolve_commands, build_stdin, shadowing_env_var,
+    TRANSCRIPT_COMMAND_NAME,
 )
 from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation, BulkEditOperation
 from .command_logger import CommandLogger
@@ -2193,12 +2198,10 @@ class YouTubeRangerApp(App):
         current video, and confirms before running on a large selection. `:run` with no/unknown
         name surfaces the available command names.
         """
-        registry = load_command_registry(
-            self.settings,
-            transcript_template=resolve_transcript_command(
-                self.settings, runtime_override=self._transcript_command_override
-            ),
+        transcript_template = resolve_transcript_command(
+            self.settings, runtime_override=self._transcript_command_override
         )
+        registry = load_command_registry(self.settings, transcript_template=transcript_template)
         if not registry:
             self._notify_status(
                 "No custom commands configured. Add a 'commands:' map to config.yaml "
@@ -2217,6 +2220,12 @@ class YouTubeRangerApp(App):
         if spec is None:
             self._notify_status(f"Unknown command '{name}'. Available: {available}", error=True)
             return
+        if (name == TRANSCRIPT_COMMAND_NAME and transcript_template
+                and spec.template != transcript_template):
+            logger.warning(
+                f"custom command '{name}' ({spec.template!r}) overrides transcript_command "
+                f"({transcript_template!r}) for :run; :transcript still runs the latter"
+            )
 
         videos = self._marked_or_current_videos()
         if not videos:
@@ -2322,23 +2331,32 @@ class YouTubeRangerApp(App):
             if not name or not value.strip():
                 self._notify_status('Usage: :set commands.<name> "<template>"', error=True)
                 return
+            # Status bar and toast parse markup: escape user text (a '[/]' would crash them).
+            shown = escape_markup(name)
             if isinstance(self.settings.commands.get(name), dict):
                 # Overwriting would silently drop its mode/confirm/stdin keys.
                 self._notify_status(
-                    f"commands.{name} is a long-form entry; edit it in config.yaml", error=True
+                    f"commands.{shown} is a long-form entry; edit it in config.yaml", error=True
+                )
+                return
+            try:
+                save_user_setting(f"commands.{name}", value, self.config_dir)
+            except ValueError as e:
+                # Refused by the on-disk state (long-form entry, non-mapping commands:): no change.
+                self._notify_status(f"Not set: {escape_markup(str(e))}", error=True)
+                return
+            except Exception as e:
+                logger.error(f"Failed to persist commands.{name}: {e}")
+                self.settings.commands[name] = value
+                self._notify_status(
+                    f"Set in memory, but failed to persist: {escape_markup(str(e))}", error=True
                 )
                 return
             self.settings.commands[name] = value  # usable by :run at once
-            try:
-                save_user_setting(f"commands.{name}", value, self.config_dir)
-            except Exception as e:
-                logger.error(f"Failed to persist commands.{name}: {e}")
-                self._notify_status(f"Set in memory, but failed to persist: {e}", error=True)
-                return
             # Echo the stored template: parse_command's shlex drops unprotected inner quotes.
-            msg = f"Set commands.{name} = {value} (persisted to user config)"
+            msg = f"Set commands.{shown} = {escape_markup(value)} (persisted to user config)"
             if env_key := shadowing_env_var(name):
-                msg += f" (shadowed this session by {env_key})"
+                msg += f" (shadowed this session by {escape_markup(env_key)})"
             self._notify_status(msg)
         else:
             self._notify_status(f"Unknown setting: {key}", error=True)
