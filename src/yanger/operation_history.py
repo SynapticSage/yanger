@@ -125,10 +125,11 @@ class PasteOperation(Operation):
             return False
             
         try:
-            # Remove added videos from target
-            for item_id in self.added_item_ids:
-                self.api_client.remove_video_from_playlist(item_id)
-            self.added_item_ids = []
+            # Remove added videos from target, dropping each id as it goes so a retry
+            # after a part-way failure resumes instead of re-removing a gone item.
+            while self.added_item_ids:
+                self.api_client.remove_video_from_playlist(self.added_item_ids[0])
+                self.added_item_ids.pop(0)
 
             # If cut operation, restore to source. Re-adding mints a NEW
             # playlist item id, so capture it back onto the video — otherwise a

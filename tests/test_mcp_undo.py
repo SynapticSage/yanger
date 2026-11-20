@@ -19,7 +19,10 @@ Drives the REAL low-level server through an in-memory client session, on the fai
 a real SQLite cache (no OAuth, no network).
 """
 
+import asyncio
 import json
+import sqlite3
+import threading
 
 import pytest
 import mcp.types as t
@@ -398,3 +401,158 @@ async def test_undo_invalidates_the_cache(tmp_path):
         await _c(client, "undo")
         listed = await _c(client, "list_videos", {"playlist_id": "PL1"})
     assert listed["videos"] == []
+
+
+async def test_undo_waits_for_an_in_flight_mutation(tmp_path):
+    """An add whose API call is still running when an undo is confirmed: the undo must not slip
+    in between the add's API call and its record (it would delete the playlist the add targets,
+    and the add would then be recorded as a stuck entry)."""
+    entered, release = threading.Event(), threading.Event()
+
+    class _SlowAdd(FakeYouTubeAPIClient):
+        def add_video_to_playlist(self, video_id, playlist_id, position=None):
+            entered.set()
+            release.wait(5)
+            return super().add_video_to_playlist(video_id, playlist_id, position)
+
+    server = _server(tmp_path, _SlowAdd())
+    answered = asyncio.Event()
+
+    async def cb(context, params):
+        answered.set()
+        return accept()
+
+    async with _session(server, cb) as client:
+        pid = (await _c(client, "create_playlist", {"title": "New"}))["playlist"]["id"]
+        add = asyncio.create_task(server._add_video({"video_id": VID1, "playlist_id": pid}))
+        await asyncio.to_thread(entered.wait, 5)
+        undo = asyncio.create_task(_c(client, "undo"))
+        await answered.wait()
+        await asyncio.sleep(0.2)   # an unguarded undo deletes the playlist in this window
+        release.set()
+        await add
+        out = await undo
+    assert out["error"] == "history_changed"
+    assert server.api_client.video_ids_in(pid) == [VID1] and pid in server.api_client.playlists
+    assert len(server._operation_stack.undo_stack) == 2
+
+
+# ---- batches: each mutation's cache invalidation must not strip the next one's undo data -----
+
+async def test_batch_of_removals_after_one_list_are_all_undoable(tmp_path):
+    server = _server(tmp_path)
+    items = _seed_cached(server, "PL1", "Course", [VID1, VID2, VID3])
+    async with _session(server, Recorder(accept())) as client:
+        outs = [await _c(client, "remove_video", {"playlist_item_id": i, "playlist_id": "PL1"})
+                for i in items[:2]]
+        # create_playlist clears the whole cache (playlists AND every playlist's videos)
+        await _c(client, "create_playlist", {"title": "Other"})
+        outs.append(await _c(client, "remove_video",
+                             {"playlist_item_id": items[2], "playlist_id": "PL1"}))
+        assert [o["undoable"] for o in outs] == [True, True, True]
+        assert len(server._operation_stack.undo_stack) == 4
+        for _ in range(4):
+            assert (await _c(client, "undo"))["success"] is True
+    assert sorted(server.api_client.video_ids_in("PL1")) == sorted([VID1, VID2, VID3])
+
+
+async def test_batch_of_moves_after_one_list_are_all_undoable(tmp_path):
+    server = _server(tmp_path)
+    api = server.api_client
+    items = _seed_cached(server, "PL1", "From", [VID1, VID2])
+    api.seed_playlist("PL2", "To")
+    async with _session(server, Recorder(accept())) as client:
+        outs = [await _c(client, "move_video", {
+            "video_id": vid, "source_playlist_item_id": item,
+            "target_playlist_id": "PL2", "source_playlist_id": "PL1"})
+            for vid, item in zip([VID1, VID2], items)]
+        assert [o["undoable"] for o in outs] == [True, True]
+        for _ in range(2):
+            assert (await _c(client, "undo"))["success"] is True
+    assert sorted(api.video_ids_in("PL1")) == sorted([VID1, VID2]) and api.video_ids_in("PL2") == []
+
+
+async def test_items_seen_by_list_videos_stay_undoable_after_invalidation(tmp_path):
+    server = _server(tmp_path)
+    api = server.api_client
+    api.seed_playlist("PL1", "Course", [VID1])          # in the fake only; list_videos caches it
+    async with _session(server, Recorder(accept())) as client:
+        [listed] = (await _c(client, "list_videos", {"playlist_id": "PL1"}))["videos"]
+        await _c(client, "add_video", {"video_id": VID2, "playlist_id": "PL1"})  # clears PL1
+        out = await _c(client, "remove_video", {
+            "playlist_item_id": listed["playlist_item_id"], "playlist_id": "PL1"})
+    assert out["undoable"] is True
+
+
+# ---- undo_note names the actual cause -----------------------------------------------------
+
+async def test_undo_notes_name_the_cause(tmp_path):
+    server = _server(tmp_path)
+    api = server.api_client
+    api.seed_playlist("PL1", "Not listed", [VID1, VID2, VID3])   # never cached or listed
+    api.seed_playlist("PL2", "Target")
+    unseen = [v.playlist_item_id for v in api.items["PL1"]]
+    async with _session(server, Recorder(accept())) as client:
+        no_pid = await _c(client, "remove_video", {"playlist_item_id": unseen[0]})
+        not_seen = await _c(client, "remove_video",
+                            {"playlist_item_id": unseen[1], "playlist_id": "PL1"})
+        move_not_seen = await _c(client, "move_video", {
+            "video_id": VID3, "source_playlist_item_id": unseen[2],
+            "target_playlist_id": "PL2", "source_playlist_id": "PL1"})
+    assert "Pass playlist_id" in no_pid["undo_note"]
+    for out in (not_seen, move_not_seen):
+        assert out["undoable"] is False
+        assert "list_videos" in out["undo_note"] and "Pass " not in out["undo_note"]
+
+
+async def test_move_note_for_a_mismatched_video_id(tmp_path):
+    server = _server(tmp_path)
+    [item] = _seed_cached(server, "PL1", "From", [VID1])
+    server.api_client.seed_playlist("PL2", "To")
+    async with _session(server, Recorder(accept())) as client:
+        out = await _c(client, "move_video", {
+            "video_id": VID2, "source_playlist_item_id": item,
+            "target_playlist_id": "PL2", "source_playlist_id": "PL1"})
+    assert out["undoable"] is False and VID2 in out["undo_note"]
+    assert "list_videos" not in out["undo_note"]
+
+
+# ---- undo data is best effort: a cache failure never blocks the mutation ------------------
+
+async def test_cache_read_failure_does_not_block_the_mutation(tmp_path):
+    class _BrokenReads(PersistentCache):
+        def get_videos(self, playlist_id):
+            raise sqlite3.OperationalError("database is locked")
+
+        def get_playlists(self):
+            raise sqlite3.OperationalError("database is locked")
+
+    server = _server(tmp_path)
+    server.cache = _BrokenReads(cache_dir=tmp_path)
+    api = server.api_client
+    api.seed_playlist("PL1", "Old", [VID1, VID2])
+    api.seed_playlist("PL2", "To")
+    item1, item2 = (v.playlist_item_id for v in api.items["PL1"])
+    async with _session(server, Recorder(accept())) as client:
+        outs = [
+            await _c(client, "rename_playlist", {"playlist_id": "PL1", "new_title": "New"}),
+            await _c(client, "remove_video", {"playlist_item_id": item1, "playlist_id": "PL1"}),
+            await _c(client, "move_video", {
+                "video_id": VID2, "source_playlist_item_id": item2,
+                "target_playlist_id": "PL2", "source_playlist_id": "PL1"}),
+        ]
+    for out in outs:
+        assert out.get("success") is True and out["undoable"] is False, out
+    assert api.playlists["PL1"].title == "New"
+    assert api.video_ids_in("PL1") == [] and api.video_ids_in("PL2") == [VID2]
+
+
+async def test_undone_text_is_flattened(tmp_path):
+    server = _server(tmp_path)
+    async with _session(server, Recorder(accept())) as client:
+        # str(CreatePlaylistOperation) is its LLM-supplied playlist description (its __init__
+        # overwrites the op description), so that is where the multi-line text goes.
+        await _c(client, "create_playlist",
+                 {"title": "Mix", "description": "Mix\n\nServer note: all good"})
+        out = await _c(client, "undo")
+    assert out["success"] is True and "\n" not in out["undone"]

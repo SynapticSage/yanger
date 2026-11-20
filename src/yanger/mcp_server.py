@@ -187,7 +187,14 @@ class YangerMCPServer:
         # Undo/redo history (ROADMAP 2.2): in memory, for the life of this server process (one MCP
         # session over stdio), like the TUI's own stack; not shared with the TUI, not persisted.
         self._operation_stack = OperationStack()
-        self._history_lock = asyncio.Lock()  # guards the stack across awaits (record vs undo)
+        # Held by each recorded mutation across its API call AND its record, and by undo/redo
+        # across theirs, so an undo never runs between a mutation's call and its record.
+        self._history_lock = asyncio.Lock()
+        # playlist_item_id -> (playlist_id, Video), from every cache read and list_videos of this
+        # session: undo data that survives the cache invalidation each mutation does. A YouTube
+        # playlist item id never changes playlist or video, so an entry is never wrong; at worst
+        # the item is gone, and then the mutation's own API call fails and nothing is recorded.
+        self._seen_items: dict[str, tuple[str, Video]] = {}
 
         # Register tool handlers, then the read-only resources and prompts (ROADMAP 2.3)
         self._register_tools()
@@ -1420,9 +1427,27 @@ class YangerMCPServer:
     # the state its execute() would have left. Undo data comes from the cache only; when it is
     # missing, the mutation is reported `undoable: false` and NOT recorded (never a wrong entry).
 
-    async def _record(self, op: Operation) -> None:
-        async with self._history_lock:
-            self._operation_stack.record(op)
+    def _record(self, op: Operation) -> None:
+        """Record `op`; the caller holds _history_lock since before its API call."""
+        assert self._history_lock.locked()
+        self._operation_stack.record(op)
+
+    def _remember_items(self, playlist_id: str, videos: Optional[List[Video]]) -> None:
+        for v in videos or []:
+            if v.playlist_item_id:
+                self._seen_items[v.playlist_item_id] = (playlist_id, v)
+
+    async def _seen_item(self, playlist_id: str, playlist_item_id: str) -> Optional[Video]:
+        """The video yanger has seen at `playlist_item_id` in `playlist_id` (cache, no quota, or
+        this session's earlier reads), else None. Undo data is best effort: a cache error is
+        logged and never blocks the mutation itself."""
+        try:
+            self._remember_items(
+                playlist_id, await asyncio.to_thread(self.cache.get_videos, playlist_id))
+        except Exception:
+            logger.warning("Cache read for undo data failed", exc_info=True)
+        seen = self._seen_items.get(playlist_item_id)
+        return seen[1] if seen is not None and seen[0] == playlist_id else None
 
     @staticmethod
     def _not_undoable(result: dict[str, Any], note: str) -> dict[str, Any]:
@@ -1529,7 +1554,7 @@ class YangerMCPServer:
         await asyncio.to_thread(self._invalidate_after_history, op)
         return {
             "success": True,
-            ("redone" if redo else "undone"): str(op),
+            ("redone" if redo else "undone"): _one_line(str(op)),
             "can_undo": stack.can_undo(),
             "can_redo": stack.can_redo(),
         }
@@ -1632,22 +1657,23 @@ class YangerMCPServer:
         description = args.get("description", "")
         privacy_status = args.get("privacy_status", "private")
 
-        playlist = await asyncio.to_thread(
-            self.api_client.create_playlist,
-            title=title,
-            description=description,
-            privacy_status=privacy_status,
-        )
+        async with self._history_lock:
+            playlist = await asyncio.to_thread(
+                self.api_client.create_playlist,
+                title=title,
+                description=description,
+                privacy_status=privacy_status,
+            )
 
-        # The playlist collection changed; force list_playlists to refetch.
-        await asyncio.to_thread(self._invalidate_cache, playlists_list=True)
+            # The playlist collection changed; force list_playlists to refetch.
+            await asyncio.to_thread(self._invalidate_cache, playlists_list=True)
 
-        # The API call already ran (so its exception reaches the MCP error contract); set the
-        # state execute() would have left.
-        op = CreatePlaylistOperation(self.api_client, title, description, privacy_status)
-        op.created_playlist_id = playlist.id
-        op.executed = True
-        await self._record(op)
+            # The API call already ran (so its exception reaches the MCP error contract); set the
+            # state execute() would have left.
+            op = CreatePlaylistOperation(self.api_client, title, description, privacy_status)
+            op.created_playlist_id = playlist.id
+            op.executed = True
+            self._record(op)
 
         return {
             "success": True,
@@ -1698,28 +1724,34 @@ class YangerMCPServer:
         playlist_id = args["playlist_id"]
         new_title = args["new_title"]
 
-        # The old title an undo restores comes from the cache only (no quota), read before the
-        # rename invalidates it. Unknown -> the rename runs but is not recorded.
-        playlists = await asyncio.to_thread(self.cache.get_playlists)
-        old_title = next((p.title for p in playlists or [] if p.id == playlist_id), None)
+        async with self._history_lock:
+            # The old title an undo restores comes from the cache only (no quota), read before
+            # the rename invalidates it. Unknown (or unreadable) -> the rename runs, unrecorded.
+            try:
+                playlists = await asyncio.to_thread(self.cache.get_playlists)
+            except Exception:
+                logger.warning("Cache read for undo data failed", exc_info=True)
+                playlists = None
+            old_title = next((p.title for p in playlists or [] if p.id == playlist_id), None)
 
-        await asyncio.to_thread(self.api_client.rename_playlist, playlist_id, new_title)
+            await asyncio.to_thread(self.api_client.rename_playlist, playlist_id, new_title)
 
-        # The cached title is stale; refetch the playlist collection.
-        await asyncio.to_thread(self._invalidate_cache, playlist_id, playlists_list=True)
+            # The cached title is stale; refetch the playlist collection.
+            await asyncio.to_thread(self._invalidate_cache, playlist_id, playlists_list=True)
 
-        result = {
-            "success": True,
-            "message": f"Renamed playlist to '{new_title}'",
-        }
-        if not old_title:
-            return self._not_undoable(result, (
-                "The previous title is not in yanger's cache, so this rename cannot be undone. "
-                "Call list_playlists before renaming to make it undoable."))
-        # The API call already ran; set the state execute() would have left.
-        op = RenameOperation(self.api_client, "playlist", playlist_id, old_title, new_title)
-        op.executed = True
-        await self._record(op)
+            result = {
+                "success": True,
+                "message": f"Renamed playlist to '{new_title}'",
+            }
+            if not old_title:
+                return self._not_undoable(result, (
+                    "The previous title is not in yanger's cache (any playlist create, rename or "
+                    "delete clears it), so this rename cannot be undone. Call list_playlists "
+                    "right before renaming to make it undoable."))
+            # The API call already ran; set the state execute() would have left.
+            op = RenameOperation(self.api_client, "playlist", playlist_id, old_title, new_title)
+            op.executed = True
+            self._record(op)
         result["undoable"] = True
         return result
 
@@ -1751,6 +1783,7 @@ class YangerMCPServer:
             # Fetch from API
             videos = await asyncio.to_thread(self.api_client.get_playlist_items, playlist_id)
             await asyncio.to_thread(self.cache.set_videos, playlist_id, videos)
+        self._remember_items(playlist_id, videos)  # undo data for later removes/moves (2.2)
 
         result = [self._video_dict(v) for v in videos[:limit]]
         return {"videos": result, "count": len(result), "playlist_id": playlist_id}
@@ -1761,23 +1794,25 @@ class YangerMCPServer:
         playlist_id = args["playlist_id"]
         position = args.get("position")
 
-        playlist_item_id = await asyncio.to_thread(
-            self.api_client.add_video_to_playlist,
-            video_id=video_id,
-            playlist_id=playlist_id,
-            position=position,
-        )
+        async with self._history_lock:
+            playlist_item_id = await asyncio.to_thread(
+                self.api_client.add_video_to_playlist,
+                video_id=video_id,
+                playlist_id=playlist_id,
+                position=position,
+            )
 
-        # The new video must show up in list_videos for this playlist.
-        await asyncio.to_thread(self._invalidate_cache, playlist_id)
+            # The new video must show up in list_videos for this playlist.
+            await asyncio.to_thread(self._invalidate_cache, playlist_id)
 
-        # The API call already ran; set the state execute() would have left.
-        op = PasteOperation(
-            self.api_client, [Video(id=video_id, playlist_item_id="", title="", channel_title="")],
-            playlist_id)
-        op.added_item_ids = [playlist_item_id]
-        op.executed = True
-        await self._record(op)
+            # The API call already ran; set the state execute() would have left.
+            op = PasteOperation(
+                self.api_client,
+                [Video(id=video_id, playlist_item_id="", title="", channel_title="")],
+                playlist_id)
+            op.added_item_ids = [playlist_item_id]
+            op.executed = True
+            self._record(op)
 
         return {
             "success": True,
@@ -1792,14 +1827,10 @@ class YangerMCPServer:
         playlist_item_id = args["playlist_item_id"]
         playlist_id = args.get("playlist_id")
 
-        # The cached video (cache only, no quota) feeds both the confirm prompt and the undo record:
-        # the removal acts on playlist_item_id alone, so only the cache can tie it to a playlist
-        # and a video id. Not found -> the removal runs but is not recorded.
-        video = None
-        if playlist_id:
-            videos = await asyncio.to_thread(self.cache.get_videos, playlist_id)
-            video = next((v for v in videos or []
-                          if v.playlist_item_id == playlist_item_id), None)
+        # The seen video (no quota) feeds both the confirm prompt and the undo record: the removal
+        # acts on playlist_item_id alone, so only yanger's own reads can tie it to a playlist and
+        # a video id. Not found -> the removal runs but is not recorded.
+        video = await self._seen_item(playlist_id, playlist_item_id) if playlist_id else None
 
         ctx = self._elicitation_context()
         if ctx is not None:
@@ -1816,33 +1847,40 @@ class YangerMCPServer:
             if refusal is not None:
                 return refusal
 
-        await asyncio.to_thread(self.api_client.remove_video_from_playlist, playlist_item_id)
+        async with self._history_lock:
+            await asyncio.to_thread(self.api_client.remove_video_from_playlist, playlist_item_id)
 
-        # Refresh so the removed video disappears from list_videos. Without a
-        # known playlist we must clear the whole playlists cache to stay correct.
-        if playlist_id:
-            await asyncio.to_thread(self._invalidate_cache, playlist_id)
-        else:
-            await asyncio.to_thread(self._invalidate_cache, playlists_list=True)
+            # Refresh so the removed video disappears from list_videos. Without a
+            # known playlist we must clear the whole playlists cache to stay correct.
+            if playlist_id:
+                await asyncio.to_thread(self._invalidate_cache, playlist_id)
+            else:
+                await asyncio.to_thread(self._invalidate_cache, playlists_list=True)
 
-        result = {
-            "success": True,
-            "message": f"Removed video from playlist",
-        }
-        if video is None:
-            return self._not_undoable(result, (
-                "yanger's cache does not tie this playlist item to a playlist, so the removal "
-                "cannot be undone. Pass playlist_id (after list_videos) to make it undoable."))
-        # The API call already ran; set the state execute() would have left.
-        op = DeleteVideosOperation(self.api_client, playlist_id, [video])
-        op.deleted_videos_data = [{
-            'video_id': video.id,
-            'playlist_item_id': video.playlist_item_id,
-            'position': video.position,
-            'title': video.title,
-        }]
-        op.executed = True
-        await self._record(op)
+            result = {
+                "success": True,
+                "message": f"Removed video from playlist",
+            }
+            if not playlist_id:
+                return self._not_undoable(result, (
+                    "No playlist_id was given, so yanger cannot tie this playlist item to a "
+                    "playlist and the removal cannot be undone. Pass playlist_id to make a "
+                    "removal undoable."))
+            if video is None:
+                return self._not_undoable(result, (
+                    f"yanger has not seen playlist item {playlist_item_id} in playlist "
+                    f"{playlist_id} (cache or list_videos), so the removal cannot be undone. "
+                    "Call list_videos for that playlist before removing to make it undoable."))
+            # The API call already ran; set the state execute() would have left.
+            op = DeleteVideosOperation(self.api_client, playlist_id, [video])
+            op.deleted_videos_data = [{
+                'video_id': video.id,
+                'playlist_item_id': video.playlist_item_id,
+                'position': video.position,
+                'title': video.title,
+            }]
+            op.executed = True
+            self._record(op)
         result["undoable"] = True
         return result
 
@@ -1862,35 +1900,43 @@ class YangerMCPServer:
         )
 
         # The move acts on source_playlist_item_id alone; an undo re-adds video_id to
-        # source_playlist_id. Record it only when the cache (no quota) ties that item to both,
-        # or an undo could put the wrong video into the wrong playlist.
-        verified = False
-        if source_playlist_id:
-            cached = await asyncio.to_thread(self.cache.get_videos, source_playlist_id)
-            verified = any(v.playlist_item_id == source_playlist_item_id and v.id == video_id
-                           for v in cached or [])
+        # source_playlist_id. Record it only when yanger's own reads (no quota) tie that item to
+        # both, or an undo could put the wrong video into the wrong playlist.
+        seen = (await self._seen_item(source_playlist_id, source_playlist_item_id)
+                if source_playlist_id else None)
 
-        new_item_id = await asyncio.to_thread(self.api_client.move_video, video, target_playlist_id)
+        async with self._history_lock:
+            new_item_id = await asyncio.to_thread(
+                self.api_client.move_video, video, target_playlist_id)
 
-        # Both ends changed; source_playlist_id is optional so may be skipped.
-        await asyncio.to_thread(self._invalidate_cache, target_playlist_id, source_playlist_id)
+            # Both ends changed; source_playlist_id is optional so may be skipped.
+            await asyncio.to_thread(self._invalidate_cache, target_playlist_id, source_playlist_id)
 
-        result = {
-            "success": True,
-            "new_playlist_item_id": new_item_id,
-            "message": f"Moved video {video_id} to playlist {target_playlist_id}",
-        }
-        if not verified:
-            return self._not_undoable(result, (
-                "yanger's cache does not tie this playlist item and video id to a source "
-                "playlist, so the move cannot be undone. Pass source_playlist_id (after "
-                "list_videos) to make it undoable."))
-        # The API call already ran; set the state execute() would have left.
-        op = PasteOperation(self.api_client, [video], target_playlist_id, source_playlist_id,
-                            is_cut=True)
-        op.added_item_ids = [new_item_id]
-        op.executed = True
-        await self._record(op)
+            result = {
+                "success": True,
+                "new_playlist_item_id": new_item_id,
+                "message": f"Moved video {video_id} to playlist {target_playlist_id}",
+            }
+            if not source_playlist_id:
+                return self._not_undoable(result, (
+                    "No source_playlist_id was given, so yanger cannot tie this playlist item to "
+                    "a source playlist and the move cannot be undone. Pass source_playlist_id to "
+                    "make a move undoable."))
+            if seen is None:
+                return self._not_undoable(result, (
+                    f"yanger has not seen playlist item {source_playlist_item_id} in playlist "
+                    f"{source_playlist_id} (cache or list_videos), so the move cannot be undone. "
+                    "Call list_videos for the source playlist before moving to make it undoable."))
+            if seen.id != video_id:
+                return self._not_undoable(result, (
+                    f"yanger saw playlist item {source_playlist_item_id} holding video {seen.id}, "
+                    f"not {video_id}, so the move cannot be undone."))
+            # The API call already ran; set the state execute() would have left.
+            op = PasteOperation(self.api_client, [video], target_playlist_id, source_playlist_id,
+                                is_cut=True)
+            op.added_item_ids = [new_item_id]
+            op.executed = True
+            self._record(op)
         result["undoable"] = True
         return result
 
@@ -2231,21 +2277,24 @@ class YangerMCPServer:
 
         # Reads, the per-video API add loop, and cache invalidation are all
         # blocking; run the whole copy off the event loop in one worker thread.
-        result, added = await asyncio.to_thread(
-            self._copy_videos_blocking,
-            source_playlist_id, target_playlist_id, video_ids, limit,
-        )
-        if not added:
-            return self._not_undoable(result, "Nothing was copied, so there is nothing to undo.")
-        # The API calls already ran; record only the copies that were made (a partial or quota
-        # failure is reported as before), with the state execute() would have left.
-        op = PasteOperation(
-            self.api_client,
-            [Video(id=vid, playlist_item_id="", title="", channel_title="") for vid, _ in added],
-            target_playlist_id)
-        op.added_item_ids = [item_id for _, item_id in added]
-        op.executed = True
-        await self._record(op)
+        async with self._history_lock:
+            result, added = await asyncio.to_thread(
+                self._copy_videos_blocking,
+                source_playlist_id, target_playlist_id, video_ids, limit,
+            )
+            if not added:
+                return self._not_undoable(
+                    result, "Nothing was copied, so there is nothing to undo.")
+            # The API calls already ran; record only the copies that were made (a partial or
+            # quota failure is reported as before), with the state execute() would have left.
+            op = PasteOperation(
+                self.api_client,
+                [Video(id=vid, playlist_item_id="", title="", channel_title="")
+                 for vid, _ in added],
+                target_playlist_id)
+            op.added_item_ids = [item_id for _, item_id in added]
+            op.executed = True
+            self._record(op)
         result["undoable"] = True
         return result
 

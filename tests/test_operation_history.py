@@ -259,3 +259,32 @@ class TestOperationStackRecord:
         with pytest.raises(ValueError):
             stack.redo()
         assert stack.redo_stack == [op] and stack.undo_stack == []
+
+
+class TestPasteUndoResumesAfterPartialFailure:
+    """A copy undo that fails part-way must not retry the removals that already succeeded:
+    each retry would fail on the first, already-removed item and never finish."""
+
+    def test_retry_removes_only_the_remaining_items(self):
+        from yanger.api_client import QuotaExceededError
+
+        class _QuotaOnSecondRemove(FakeYouTubeAPIClient):
+            removes = 0
+
+            def remove_video_from_playlist(self, playlist_item_id):
+                self.removes += 1
+                if self.removes == 2:
+                    raise QuotaExceededError("YouTube API quota exceeded")
+                return super().remove_video_from_playlist(playlist_item_id)
+
+        api = _QuotaOnSecondRemove()
+        api.seed_playlist("PL")
+        videos = [Video(id=v, playlist_item_id="", title="", channel_title="")
+                  for v in ("vid1", "vid2", "vid3")]
+        op = PasteOperation(api, videos, "PL")
+        assert op.execute() is True
+
+        assert op.undo() is False                       # quota hit on the second removal
+        assert api.video_ids_in("PL") == ["vid2", "vid3"]
+        assert op.undo() is True                        # the retry resumes, it does not restart
+        assert api.video_ids_in("PL") == []
