@@ -29,7 +29,8 @@ yanger sync
 If the export isn't ready before the wait elapses, that's expected for large
 accounts — the routine exits and the wrapper tells you to finish from the
 "Your Google data is ready" email: download the zip and run
-`yanger takeout ~/Downloads/takeout-XXXX.zip`.
+`yanger takeout ~/Downloads/takeout-XXXX.zip`, or run `yanger sync --resume`, which
+imports a zip already in the download dir or waits for one without re-submitting.
 
 ## Running the routine directly
 
@@ -59,6 +60,7 @@ node refresh.js \
 | `--download-dir`   | `./takeout-downloads`   | Folder watched for the finished `.zip`.                     |
 | `--wait-minutes`   | `20`                 | How long to watch for the download (`0` = configure only).     |
 | `--configure-only` | off                  | Submit the export and exit; download/import later.             |
+| `--download-only`  | off                  | Submit nothing; open the export list and wait for the zip (`yanger sync --resume`). |
 
 ### Output
 

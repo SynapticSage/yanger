@@ -20,7 +20,13 @@
  *     and clicks the final "Create export" — that confirmation is the safety net
  *     if a selector drifts.
  *
+ * With --download-only (`yanger sync --resume`) phase 1 is skipped: no new
+ * export is submitted; the routine opens the export list and only watches
+ * for the download of an export that was already requested.
+ *
  * IO contract with the Python wrapper:
+ *   - Flags: --browser-url, --download-dir, --wait-minutes, --configure-only,
+ *     --download-only.
  *   - All human-facing progress / prompts go to STDERR.
  *   - Exactly one machine-readable JSON line goes to STDOUT at the end, e.g.
  *       {"status":"downloaded","zipPath":"/.../takeout-....zip"}
@@ -174,6 +180,7 @@ async function main() {
   );
   const waitMinutes = Number(args["wait-minutes"] ?? 20);
   const configureOnly = Boolean(args["configure-only"]) || waitMinutes <= 0;
+  const downloadOnly = Boolean(args["download-only"]);
 
   await fs.mkdir(downloadDir, { recursive: true });
 
@@ -201,60 +208,72 @@ async function main() {
       });
     }
 
-    log("Opening Google Takeout …");
-    await page.goto("https://takeout.google.com/", {
+    // ASSUMED URL: takeout.google.com/manage lists past exports with a Download
+    // button. It is a guess at a stable path; if it moves, the email link still
+    // works, and waitForZip does not care how the download started.
+    const startUrl = downloadOnly
+      ? "https://takeout.google.com/manage"
+      : "https://takeout.google.com/";
+    log(`Opening ${startUrl} …`);
+    await page.goto(startUrl, {
       waitUntil: "domcontentloaded",
       timeout: 60_000,
     });
     await sleep(2_500);
 
-    // --- Phase 1: best-effort configuration -------------------------------
-    log("Pre-selecting a YouTube-only export …");
-    const deselected = await clickByText(page, "Deselect all").catch(
-      () => false,
-    );
-    log(
-      deselected
-        ? "  ✓ Deselected all products"
-        : "  ! Could not find 'Deselect all' — do it manually in Chrome",
-    );
-    await sleep(800);
-
-    const ytState = await ensureYouTubeSelected(page).catch(() => "error");
-    log(
-      ytState === "selected" || ytState === "already-selected"
-        ? "  ✓ YouTube and YouTube Music selected"
-        : `  ! Could not auto-select YouTube (${ytState}) — tick it manually`,
-    );
-
-    // The deeper choices (limit to history + playlists; set history format to
-    // JSON to preserve watched-at timestamps) live in nested Polymer dialogs
-    // that are too brittle to click blind. Guide the human instead.
-    log("");
-    log("In the Chrome window, finish configuring the export:");
-    log("  1. (optional) 'All YouTube data included' → keep only 'history'");
-    log("     and 'playlists' to keep the export small.");
-    log("  2. (recommended) 'Multiple formats' → set History to JSON so");
-    log("     watched-at timestamps survive (default HTML drops them).");
-    log("  3. Click 'Next step', then 'Create export'.");
-    log("");
-
-    await prompt(
-      "When you have clicked 'Create export' (or to abort, type 'q'), press Enter… ",
-    ).then((ans) => {
-      if (ans.toLowerCase() === "q") {
-        emit({ status: "aborted" });
-        process.exit(0);
-      }
-    });
-
-    if (configureOnly) {
-      log(
-        "Configure-only mode: not waiting for the download. Google will email a",
+    if (downloadOnly) {
+      log("Download-only mode: no new export is submitted.");
+      log("In the Chrome window, click 'Download' on the finished export, or");
+      log("click the 'Your Google data is ready' email link in THIS window.");
+    } else {
+      // --- Phase 1: best-effort configuration -------------------------------
+      log("Pre-selecting a YouTube-only export …");
+      const deselected = await clickByText(page, "Deselect all").catch(
+        () => false,
       );
-      log("link when ready; import it later with `yanger takeout <zip>`.");
-      emit({ status: "configured" });
-      return;
+      log(
+        deselected
+          ? "  ✓ Deselected all products"
+          : "  ! Could not find 'Deselect all' — do it manually in Chrome",
+      );
+      await sleep(800);
+
+      const ytState = await ensureYouTubeSelected(page).catch(() => "error");
+      log(
+        ytState === "selected" || ytState === "already-selected"
+          ? "  ✓ YouTube and YouTube Music selected"
+          : `  ! Could not auto-select YouTube (${ytState}) — tick it manually`,
+      );
+
+      // The deeper choices (limit to history + playlists; set history format to
+      // JSON to preserve watched-at timestamps) live in nested Polymer dialogs
+      // that are too brittle to click blind. Guide the human instead.
+      log("");
+      log("In the Chrome window, finish configuring the export:");
+      log("  1. (optional) 'All YouTube data included' → keep only 'history'");
+      log("     and 'playlists' to keep the export small.");
+      log("  2. (recommended) 'Multiple formats' → set History to JSON so");
+      log("     watched-at timestamps survive (default HTML drops them).");
+      log("  3. Click 'Next step', then 'Create export'.");
+      log("");
+
+      await prompt(
+        "When you have clicked 'Create export' (or to abort, type 'q'), press Enter… ",
+      ).then((ans) => {
+        if (ans.toLowerCase() === "q") {
+          emit({ status: "aborted" });
+          process.exit(0);
+        }
+      });
+
+      if (configureOnly) {
+        log(
+          "Configure-only mode: not waiting for the download. Google will email a",
+        );
+        log("link when ready; import it later with `yanger takeout <zip>`.");
+        emit({ status: "configured" });
+        return;
+      }
     }
 
     // --- Phase 2: wait for the export to materialize ----------------------

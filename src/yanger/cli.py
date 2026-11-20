@@ -4,6 +4,7 @@ Main entry point for the application.
 """
 # Created: 2025-08-03
 
+import re
 import sys
 import json
 import time
@@ -11,8 +12,9 @@ import shutil
 import logging
 import subprocess
 import urllib.request
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import click
 from rich.console import Console
@@ -538,9 +540,50 @@ def _print_finish_later(downloads: Path) -> None:
     console.print("  2. Finish the import by pointing yanger at that zip:")
     console.print("       [dim]yanger takeout ~/Downloads/takeout-XXXXXXXX.zip[/dim]")
     console.print(
-        f"\n[dim]Tip: if you save it into {downloads}, a later "
-        f"`yanger sync` will auto-detect it.[/dim]"
+        f"\n[dim]Tip: if you save it into {downloads} (or click the email link in the "
+        f"yanger Chrome window), `yanger sync --resume` imports it without "
+        f"re-submitting an export.[/dim]"
     )
+
+
+# Takeout's split-export naming, e.g. takeout-20240101T000000Z-001.zip, -002.zip.
+# A GUESS from observed filenames (Google documents no scheme): the parts of one
+# export share everything before the trailing -NNN. Any other name stands alone.
+_SPLIT_PART = re.compile(r'^(takeout-.+)-\d{3}\.zip$', re.IGNORECASE)
+
+
+def _partial_downloads(downloads: Path) -> List[Path]:
+    """Chrome's in-progress (or abandoned) download files in `downloads`."""
+    return sorted(p for p in downloads.iterdir() if p.suffix in ('.crdownload', '.tmp'))
+
+
+def _export_parts(zip_path: Path) -> List[Path]:
+    """Every finished part of `zip_path`'s export, sorted by name (itself if unsplit)."""
+    match = _SPLIT_PART.match(zip_path.name)
+    if not match:
+        return [zip_path]
+    stem = match.group(1).lower()
+    parts = []
+    for p in zip_path.parent.iterdir():
+        m = _SPLIT_PART.match(p.name)
+        if m and m.group(1).lower() == stem and p.is_file() and p.stat().st_size > 0:
+            parts.append(p)
+    return sorted(parts)
+
+
+def _latest_export_zips(downloads: Path) -> List[Path]:
+    """The newest finished export zip in `downloads` plus its split siblings.
+
+    Returns [] while any download is partial: fail closed rather than import half
+    an export.
+    """
+    if _partial_downloads(downloads):
+        return []
+    zips = [p for p in downloads.iterdir()
+            if p.suffix.lower() == '.zip' and p.is_file() and p.stat().st_size > 0]
+    if not zips:
+        return []
+    return _export_parts(max(zips, key=lambda p: p.stat().st_mtime))
 
 
 @cli.command()
@@ -556,10 +599,13 @@ def _print_finish_later(downloads: Path) -> None:
               help='How long to watch for the export download (0 = configure only).')
 @click.option('--merge/--replace', default=True,
               help='Merge with existing virtual playlists when importing.')
+@click.option('--resume', is_flag=True,
+              help='Do not submit a new export; import a zip already in --download-dir, '
+                   'or wait for one (download-only).')
 @click.option('-v', '--verbose', is_flag=True, help='Show detailed progress.')
 @click.pass_context
 def sync(ctx, debug_port, profile_dir, download_dir, start_chrome,
-         wait_minutes, merge, verbose):
+         wait_minutes, merge, resume, verbose):
     """Sync your YouTube data (history, playlists, Watch Later) from Google Takeout.
 
     Brings your local copy up to date by driving Google Takeout in your own
@@ -571,6 +617,7 @@ def sync(ctx, debug_port, profile_dir, download_dir, start_chrome,
     Examples:
         yanger sync
         yanger sync --wait-minutes 0     # configure now, import later
+        yanger sync --resume             # import the emailed export, no re-submit
     """
     if verbose:
         setup_logging(verbose=True)
@@ -580,6 +627,30 @@ def sync(ctx, debug_port, profile_dir, download_dir, start_chrome,
     downloads.mkdir(parents=True, exist_ok=True)
 
     console.print("[bold cyan]YouTube Data Sync[/bold cyan]")
+
+    # 0. --resume: import an export already downloaded, before touching Chrome.
+    if resume:
+        for partial in _partial_downloads(downloads):
+            console.print(
+                f"[yellow]In progress or abandoned:[/yellow] {partial.name} "
+                f"— delete it if stale (it blocks import)"
+            )
+        zips = _latest_export_zips(downloads)
+        if zips:
+            for z in zips:
+                saved = datetime.fromtimestamp(z.stat().st_mtime).strftime('%Y-%m-%d %H:%M')
+                console.print(f"  {z.name}  [dim](saved {saved})[/dim]")
+            # default=False: the newest zip here is often an earlier, already-imported
+            # export, and Enter should not silently import it instead of the new one.
+            if click.confirm(f"Import {', '.join(z.name for z in zips)}?", default=False):
+                ctx.invoke(takeout, paths=tuple(map(str, zips)), merge=merge, verbose=verbose)
+                return
+        if wait_minutes <= 0:
+            if not zips:
+                console.print(f"\nNo finished export in {downloads}.")
+            _print_finish_later(downloads)
+            return
+        console.print("Waiting for a new download instead of submitting an export.")
 
     # 1. Ensure a debuggable Chrome is reachable.
     if _devtools_up(debug_port):
@@ -608,6 +679,8 @@ def sync(ctx, debug_port, profile_dir, download_dir, start_chrome,
         "--download-dir", str(downloads),
         "--wait-minutes", str(wait_minutes),
     ]
+    if resume:
+        cmd.append("--download-only")
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
     result = _last_json_line(proc.stdout)
     status = result.get("status") if result else None
@@ -617,7 +690,9 @@ def sync(ctx, debug_port, profile_dir, download_dir, start_chrome,
         zip_path = result["zipPath"]
         console.print(f"\n[green]Downloaded:[/green] {zip_path}")
         console.print("[cyan]Importing into yanger…[/cyan]\n")
-        ctx.invoke(takeout, paths=(zip_path,), merge=merge, verbose=verbose)
+        # Import every finished part of a split export, not just the first to land.
+        parts = tuple(map(str, _export_parts(Path(zip_path))))
+        ctx.invoke(takeout, paths=parts, merge=merge, verbose=verbose)
     elif status == "configured":
         console.print("\n[green]Export request submitted.[/green]")
         _print_finish_later(downloads)

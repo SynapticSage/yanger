@@ -282,6 +282,7 @@ yanger fetch-metadata
 
 **Features**:
 - Auto-fetch metadata for video titles
+- History keeps watched-at times, titles and channels when exported as JSON (HTML recovers only ids)
 - Deduplication of imports
 - Pagination for large playlists (7000+ videos)
 - Works offline with cached content
@@ -299,11 +300,13 @@ yanger sync                        # attach to Chrome, configure, wait, download
 yanger sync --start-chrome         # launch a debuggable Chrome for you first
 yanger sync --wait-minutes 0       # configure the export now, import later
 yanger sync --merge                # merge into existing cache instead of replacing
+yanger sync --resume               # import the finished export; never re-submits
 ```
 
 Defaults: Chrome profile at `~/.yanger/chrome-profile`, downloads at
 `~/.yanger/takeout-downloads` (override with `--profile-dir` / `--download-dir`). If the
-export email/zip is slow, sync can resume on a later run rather than re-submitting.
+export email/zip is slow, finish later with `yanger sync --resume`: it imports a zip already
+in the download dir (after asking) or waits for one without re-submitting.
 
 ### Bulk Edit Mode
 

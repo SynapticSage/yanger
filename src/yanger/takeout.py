@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 
+from dateutil import parser as dateutil_parser
+
 from .models import is_valid_video_id
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,7 @@ class TakeoutParser:
     # Special file names
     WATCH_LATER_FILE = "Watch later-videos.csv"
     WATCH_HISTORY_FILE = "watch-history.html"
+    WATCH_HISTORY_JSON_FILE = "watch-history.json"
     SEARCH_HISTORY_FILE = "search-history.html"
     VIDEOS_METADATA_FILE = "videos.csv"
     
@@ -134,6 +137,9 @@ class TakeoutParser:
                 logger.error(f"Error processing {path}: {e}")
                 continue
         
+        # A split export (takeout-<stamp>-001.zip, -002.zip, ...) can put videos.csv in a
+        # different part than the playlists; re-enrich once every part's metadata is loaded.
+        self._enrich_with_metadata(all_playlists)
         return all_playlists
     
     def _process_zip(self, zip_path: Path) -> Dict[str, TakeoutPlaylist]:
@@ -176,12 +182,18 @@ class TakeoutParser:
                         )
                         logger.info(f"Found {len(videos)} videos in Watch Later")
             
-            # Process Watch History
-            history_path = f"{youtube_folder}/{self.HISTORY_FOLDER}/{self.WATCH_HISTORY_FILE}"
+            # Process Watch History: prefer JSON (keeps watched-at, title, channel) over HTML
+            history_dir = f"{youtube_folder}/{self.HISTORY_FOLDER}"
+            json_history_path = f"{history_dir}/{self.WATCH_HISTORY_JSON_FILE}"
+            history_path = f"{history_dir}/{self.WATCH_HISTORY_FILE}"
+            history_parse = self._parse_watch_history_content
+            if json_history_path in zf.namelist():
+                history_path = json_history_path
+                history_parse = self._parse_watch_history_json_content
             if history_path in zf.namelist():
                 with zf.open(history_path) as f:
                     content = f.read().decode('utf-8')
-                    videos = self._parse_watch_history_content(content)
+                    videos = history_parse(content)
                     if videos:
                         playlists['History (Imported)'] = TakeoutPlaylist(
                             name='History (Imported)',
@@ -206,6 +218,16 @@ class TakeoutParser:
                                     videos=videos
                                 )
                                 logger.info(f"Found {len(videos)} videos in playlist: {playlist_name}")
+            
+            # Load video metadata if available (parity with the directory flow)
+            metadata_path = f"{youtube_folder}/{self.METADATA_FOLDER}/{self.VIDEOS_METADATA_FILE}"
+            if metadata_path in zf.namelist():
+                try:
+                    with zf.open(metadata_path) as f:
+                        self._load_video_metadata_content(f.read().decode('utf-8'))
+                except UnicodeDecodeError as e:
+                    logger.error(f"Error loading video metadata: {e}")
+                self._enrich_with_metadata(playlists)
             
             return playlists
     
@@ -244,10 +266,15 @@ class TakeoutParser:
                 )
                 logger.info(f"Found {len(videos)} videos in Watch Later")
         
-        # Process Watch History
+        # Process Watch History: prefer JSON (keeps watched-at, title, channel) over HTML
         history_path = youtube_path / self.HISTORY_FOLDER / self.WATCH_HISTORY_FILE
+        history_parse = self._parse_watch_history
+        json_history_path = youtube_path / self.HISTORY_FOLDER / self.WATCH_HISTORY_JSON_FILE
+        if json_history_path.exists():
+            history_path = json_history_path
+            history_parse = self._parse_watch_history_json
         if history_path.exists():
-            videos = self._parse_watch_history(history_path)
+            videos = history_parse(history_path)
             if videos:
                 playlists['History (Imported)'] = TakeoutPlaylist(
                     name='History (Imported)',
@@ -369,6 +396,75 @@ class TakeoutParser:
         
         return videos
     
+    def _parse_watch_history_json(self, json_path: Path) -> List[TakeoutVideo]:
+        """Parse a watch-history.json file (see _parse_watch_history_json_content)."""
+        with open(json_path, 'r', encoding='utf-8') as f:
+            return self._parse_watch_history_json_content(f.read())
+    
+    def _parse_watch_history_json_content(self, content: str) -> List[TakeoutVideo]:
+        """Parse watch-history.json content: an array of activity records, newest first.
+        
+        Google publishes no schema; the observed record shape is
+        {"title": "Watched <title>", "titleUrl": ".../watch?v=<id>",
+         "subtitles": [{"name": <channel>}], "time": "2024-01-15T12:00:00.123Z", ...}.
+        Records without a watch URL (searches, posts) are skipped. A repeated video keeps
+        its first (most recent) record, matching the HTML parser's keep-first dedupe.
+        """
+        try:
+            records = json.loads(content)
+        except ValueError as e:
+            logger.error(f"Error parsing watch history JSON: {e}")
+            return []
+        if not isinstance(records, list):
+            logger.error("Watch history JSON is not an array of records")
+            return []
+        
+        videos = []
+        seen = set()
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            url = record.get('titleUrl')  # optional: absent on searches and some posts
+            match = re.search(r'watch\?v=([a-zA-Z0-9_-]{11})', url) if isinstance(url, str) else None
+            if not match or not self._is_valid_video_id(match.group(1)):
+                continue
+            video_id = match.group(1)
+            if video_id in seen:
+                continue
+            seen.add(video_id)
+            
+            added_at = None
+            try:
+                # isoparse, not fromisoformat: Py3.10's fromisoformat rejects 'Z' and
+                # fractions that are not 3 or 6 digits.
+                added_at = dateutil_parser.isoparse(record.get('time'))
+            except (ValueError, TypeError, OverflowError):
+                pass  # missing or unparseable time -> leave added_at None
+            
+            # The "Watched " prefix is English-only; other locales keep their prefix in
+            # the title. A removed video's title is its URL: leave None so
+            # `yanger fetch-metadata` (which selects empty titles) can still fill it.
+            title = record.get('title')
+            if isinstance(title, str):
+                title = title.removeprefix('Watched ').strip()
+            if not title or title == url:
+                title = None
+            
+            channel = None
+            subtitles = record.get('subtitles')
+            if isinstance(subtitles, list) and subtitles and isinstance(subtitles[0], dict):
+                channel = subtitles[0].get('name')
+            
+            videos.append(TakeoutVideo(
+                video_id=video_id,
+                added_at=added_at,
+                title=title,
+                channel=channel,
+                playlist_name="History"
+            ))
+        
+        return videos
+    
     def _load_video_metadata(self, metadata_path: Path) -> None:
         """Load video metadata from CSV.
         
@@ -377,17 +473,26 @@ class TakeoutParser:
         """
         try:
             with open(metadata_path, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    video_id = row.get('Video ID', '')
-                    if video_id:
-                        self.video_metadata[video_id] = {
-                            'title': row.get('Video Title (Original)', ''),
-                            'channel_id': row.get('Channel ID', ''),
-                            'duration_ms': row.get('Approx Duration (ms)', ''),
-                            'privacy': row.get('Privacy', ''),
-                            'created_at': row.get('Video Create Timestamp', '')
-                        }
+                content = f.read()
+        except (OSError, UnicodeDecodeError) as e:
+            logger.error(f"Error loading video metadata: {e}")
+            return
+        self._load_video_metadata_content(content)
+    
+    def _load_video_metadata_content(self, content: str) -> None:
+        """Load video metadata from videos.csv content (the person's own uploads)."""
+        try:
+            reader = csv.DictReader(content.splitlines())
+            for row in reader:
+                video_id = row.get('Video ID', '')
+                if video_id:
+                    self.video_metadata[video_id] = {
+                        'title': row.get('Video Title (Original)', ''),
+                        'channel_id': row.get('Channel ID', ''),
+                        'duration_ms': row.get('Approx Duration (ms)', ''),
+                        'privacy': row.get('Privacy', ''),
+                        'created_at': row.get('Video Create Timestamp', '')
+                    }
             logger.info(f"Loaded metadata for {len(self.video_metadata)} videos")
         except Exception as e:
             logger.error(f"Error loading video metadata: {e}")
@@ -405,7 +510,8 @@ class TakeoutParser:
             for video in playlist.videos:
                 if video.video_id in self.video_metadata:
                     metadata = self.video_metadata[video.video_id]
-                    video.title = metadata.get('title')
+                    if metadata.get('title'):  # never blank a title already known
+                        video.title = metadata['title']
                     if metadata.get('duration_ms'):
                         try:
                             video.duration_ms = int(metadata['duration_ms'])
