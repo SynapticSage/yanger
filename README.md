@@ -447,6 +447,13 @@ async def connect_yanger():
 | `fabric_analyze` | Analyze video with Fabric patterns (the client's model via MCP sampling, or local Fabric) |
 | `check_quota` | Check API quota usage |
 
+**Resources and prompts**: clients that browse MCP resources see `yanger://playlists`,
+`yanger://playlists/{id}`, `yanger://transcripts` and `yanger://transcripts/{video_id}`, and each
+Fabric pattern appears as a prompt (optional `video_id` appends its cached transcript). They read
+the local cache only: no quota, no sign-in, no network; what is not cached names the tool that
+fetches it. With `mcp.allow_custom_commands` on, `yanger://commands` also lists your command
+names (not their templates). See `docs/MCP_SERVER_PLAN.md`.
+
 **Confirmations (MCP elicitation)**: when the MCP client supports elicitation (it can show you a
 confirm form), `delete_playlist` and `remove_video` ask you to approve first, and custom commands
 marked `confirm: true` are offered to the model and run only after you approve the exact command

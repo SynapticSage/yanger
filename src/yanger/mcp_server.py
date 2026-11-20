@@ -20,9 +20,11 @@ import re
 import subprocess
 import shutil
 import sys
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, List
+from urllib.parse import unquote
 from dataclasses import asdict
 
 try:
@@ -32,6 +34,11 @@ try:
         Tool,
         TextContent,
         CallToolResult,
+        Resource,
+        Prompt,
+        PromptArgument,
+        PromptMessage,
+        GetPromptResult,
     )
     MCP_AVAILABLE = True
 except ImportError:
@@ -50,6 +57,17 @@ try:
     from mcp.types import SamplingCapability, SamplingMessage, ModelPreferences, ModelHint
 except ImportError:
     SamplingCapability = None
+
+# Resource templates (resources/templates/list) and the typed read_resource return arrived after
+# the first SDKs; without them templates are not advertised and a read returns bare text.
+try:
+    from mcp.types import ResourceTemplate
+except ImportError:
+    ResourceTemplate = None
+try:
+    from mcp.server.lowlevel.helper_types import ReadResourceContents
+except ImportError:
+    ReadResourceContents = None
 
 from .auth import YouTubeAuth, resolve_token_file, resolve_client_secrets_file
 from .api_client import YouTubeAPIClient, QuotaExceededError
@@ -74,6 +92,9 @@ logger = logging.getLogger(__name__)
 # Cap how many transcript characters a single get_transcript call returns so one
 # tool call can't flood the MCP client's context window. 0 disables the cap.
 DEFAULT_TRANSCRIPT_MAX_CHARS = 20000
+
+# Cap the yanger://transcripts index (one row per cached transcript) for the same reason.
+TRANSCRIPT_INDEX_MAX = 1000
 
 # Max Fabric subprocesses to run at once in fabric_analyze_batch. Each Fabric call
 # is a separate external process (up to 120s); bounding concurrency keeps the
@@ -159,8 +180,10 @@ class YangerMCPServer:
         self._settings = None
         self._proxy_settings = None
 
-        # Register tool handlers
+        # Register tool handlers, then the read-only resources and prompts (ROADMAP 2.3)
         self._register_tools()
+        self._register_resources()
+        self._register_prompts()
 
     def _load_proxy_settings(self) -> Optional[CoreProxySettings]:
         """Load proxy settings from configuration."""
@@ -769,6 +792,246 @@ class YangerMCPServer:
 
         return await handler(arguments)
 
+    # ----- Resources + prompts (ROADMAP 2.3): a read-only, CACHE-ONLY surface ------------
+    #
+    # Nothing here calls _ensure_auth, the YouTube API or the transcript fetcher: a resource read
+    # or prompt fetch never spends quota, needs a token or touches the network. What is not
+    # cached is reported as such, naming the tool that would fetch it.
+
+    def _register_resources(self) -> None:
+        """Register resources/list, resources/templates/list and resources/read."""
+
+        @self.server.list_resources()
+        async def list_resources() -> list[Resource]:
+            return await self._list_resources()
+
+        if ResourceTemplate is not None and hasattr(self.server, "list_resource_templates"):
+            @self.server.list_resource_templates()
+            async def list_resource_templates() -> list[ResourceTemplate]:
+                return self._list_resource_templates()
+
+        @self.server.read_resource()
+        async def read_resource(uri):
+            text, mime = await self._read_resource(str(uri))
+            if ReadResourceContents is None:  # old SDK: bare text only
+                return text
+            return [ReadResourceContents(content=text, mime_type=mime)]
+
+    def _register_prompts(self) -> None:
+        """Register prompts/list and prompts/get (Fabric patterns)."""
+
+        @self.server.list_prompts()
+        async def list_prompts() -> list[Prompt]:
+            return await self._list_prompts()
+
+        @self.server.get_prompt()
+        async def get_prompt(name: str, arguments: Optional[dict[str, str]]) -> GetPromptResult:
+            return await self._get_prompt(name, arguments)
+
+    def _resource_cache(self) -> PersistentCache:
+        """The cache, built lazily like get_transcript does but without the startup cleanup
+        DELETE, so a resource read stays read-only. Never authenticates."""
+        if not self.cache:
+            self.cache = PersistentCache(auto_cleanup=False)
+        return self.cache
+
+    def _commands_exposed(self) -> bool:
+        """The custom-command opt-in (MCPSettings.allow_custom_commands). Raises if the settings
+        cannot be loaded; callers fail closed."""
+        settings = self._settings or load_settings()
+        self._settings = settings
+        return bool(getattr(getattr(settings, "mcp", None), "allow_custom_commands", False))
+
+    async def _list_resources(self) -> list[Resource]:
+        cache = await asyncio.to_thread(self._resource_cache)
+        playlists = await asyncio.to_thread(cache.get_playlists) or []
+        virtual = await asyncio.to_thread(cache.get_virtual_playlists)
+        resources = [Resource(
+            uri="yanger://playlists", name="Playlists", mimeType="application/json",
+            description="All playlists as last cached (the list_playlists tool refreshes them)")]
+        for p in playlists:
+            resources.append(Resource(
+                uri=f"yanger://playlists/{p.id}", name=p.title, mimeType="application/json",
+                description=f"Videos of playlist '{p.title}' as last cached"))
+        for vp in virtual:
+            resources.append(Resource(
+                uri=f"yanger://playlists/virtual_{vp['id']}", name=vp["title"],
+                mimeType="application/json",
+                description=f"Videos of local virtual playlist '{vp['title']}'"))
+        resources.append(Resource(
+            uri="yanger://transcripts", name="Cached transcripts", mimeType="application/json",
+            description="Index of cached transcripts; read yanger://transcripts/{video_id}"))
+        # Strictly additive, as in list_tools: a broken config drops only this entry.
+        try:
+            commands = self._commands_exposed()
+        except Exception:
+            logger.warning("Failed to probe custom-command gate; omitting yanger://commands",
+                           exc_info=True)
+            commands = False
+        if commands:
+            resources.append(Resource(
+                uri="yanger://commands", name="Custom commands", mimeType="application/json",
+                description="Names, modes and confirm flags of the user's custom commands"))
+        return resources
+
+    @staticmethod
+    def _list_resource_templates() -> list:
+        return [
+            ResourceTemplate(
+                uriTemplate="yanger://playlists/{playlist_id}", name="Playlist videos",
+                mimeType="application/json",
+                description="Videos of one playlist as last cached (virtual playlists: virtual_<id>)"),
+            ResourceTemplate(
+                uriTemplate="yanger://transcripts/{video_id}", name="Cached transcript",
+                mimeType="text/plain",
+                description="One video's cached transcript text (the get_transcript tool fetches "
+                            "a missing one)"),
+        ]
+
+    async def _read_resource(self, uri: str) -> tuple[str, str]:
+        """``(text, mime type)`` for a yanger:// URI; ValueError for anything else."""
+        scheme, sep, rest = uri.partition("://")
+        kind, _, path = rest.partition("/")
+        parts = [unquote(seg) for seg in path.strip("/").split("/")] if path.strip("/") else []
+        if (scheme != "yanger" or not sep or kind not in ("playlists", "transcripts", "commands")
+                or len(parts) > 1 or (kind == "commands" and parts)):
+            raise ValueError(f"Unknown resource URI {uri!r}")
+        ident = parts[0] if parts else None
+        cache = await asyncio.to_thread(self._resource_cache)
+        if kind == "playlists":
+            if ident is None:
+                data = await asyncio.to_thread(self._read_playlists, cache)
+            else:
+                data = await asyncio.to_thread(self._read_playlist, cache, ident)
+            return json.dumps(data, indent=2, default=str), "application/json"
+        if kind == "transcripts":
+            if ident is None:
+                data = await asyncio.to_thread(self._read_transcript_index, cache)
+                return json.dumps(data, indent=2, default=str), "application/json"
+            text = await asyncio.to_thread(self._cached_transcript_text, cache, ident)
+            text, _ = self._truncate_transcript(
+                text, DEFAULT_TRANSCRIPT_MAX_CHARS,
+                more="the get_transcript tool's max_chars returns more")
+            return text, "text/plain"
+        # commands: the gate is re-checked on read (defense-in-depth); a load failure raises.
+        if not self._commands_exposed():
+            raise ValueError("Custom commands are not exposed over MCP "
+                             "(mcp.allow_custom_commands is off)")
+        registry = load_command_registry(self._settings)
+        # Templates are left out: the opt-in is consent to RUN commands, and templates (notably
+        # YANGER_CMD_* from the launch environment) may hold secrets.
+        data = {"commands": [{"name": spec.name, "mode": spec.mode, "confirm": spec.confirm}
+                             for spec in sorted(registry.values(), key=lambda c: c.name)]}
+        return json.dumps(data, indent=2), "application/json"
+
+    def _read_playlists(self, cache: PersistentCache) -> dict[str, Any]:
+        playlists = cache.get_playlists()
+        result = [self._playlist_dict(p) for p in playlists or []]
+        for vp in cache.get_virtual_playlists():
+            result.append({
+                "id": f"virtual_{vp['id']}",  # the TUI's convention (app.py)
+                "title": vp["title"],
+                "description": vp["description"] or "",
+                "video_count": vp["video_count"] or 0,
+                "privacy_status": "private",
+                "is_virtual": True,
+                "source": vp["source"],
+            })
+        out: dict[str, Any] = {"playlists": result, "count": len(result),
+                               "cached": playlists is not None}
+        if playlists is None:
+            out["note"] = ("Playlist list not in the local cache (or expired); the list_playlists "
+                           "tool refreshes it (spends YouTube API quota).")
+        return out
+
+    def _read_playlist(self, cache: PersistentCache, playlist_id: str) -> dict[str, Any]:
+        if playlist_id.startswith("virtual_"):
+            raw_id = playlist_id[len("virtual_"):]
+            if raw_id not in {vp["id"] for vp in cache.get_virtual_playlists()}:
+                raise ValueError(f"No virtual playlist {playlist_id!r} in the local cache")
+            videos = [{
+                "video_id": v["video_id"],
+                "title": v["title"],
+                "channel_title": v["channel_title"],
+                "added_at": v["added_at"],
+                "position": v["position"],
+            } for v in cache.get_virtual_videos(raw_id)]
+            return {"playlist_id": playlist_id, "is_virtual": True, "cached": True,
+                    "videos": videos, "count": len(videos)}
+        videos = cache.get_videos(playlist_id)
+        if videos is None:
+            return {"playlist_id": playlist_id, "cached": False, "videos": [], "count": 0,
+                    "note": ("Videos not in the local cache (or expired); the list_videos tool "
+                             "fetches them (spends YouTube API quota).")}
+        result = [self._video_dict(v) for v in videos]
+        return {"playlist_id": playlist_id, "cached": True, "videos": result,
+                "count": len(result)}
+
+    @staticmethod
+    def _read_transcript_index(cache: PersistentCache) -> dict[str, Any]:
+        with closing(cache.db_connection()) as conn:
+            rows = conn.execute(
+                "SELECT video_id, language, fetched_at FROM video_transcripts "
+                "WHERE fetch_status = 'SUCCESS' ORDER BY fetched_at DESC LIMIT ?",
+                (TRANSCRIPT_INDEX_MAX + 1,)).fetchall()
+        truncated = len(rows) > TRANSCRIPT_INDEX_MAX
+        entries = [{"video_id": vid, "language": lang, "fetched_at": at,
+                    "uri": f"yanger://transcripts/{vid}"}
+                   for vid, lang, at in rows[:TRANSCRIPT_INDEX_MAX]]
+        return {"transcripts": entries, "count": len(entries), "truncated": truncated}
+
+    @staticmethod
+    def _cached_transcript_text(cache: PersistentCache, video_id: str) -> str:
+        """The full cached transcript text, or ValueError. Never fetches."""
+        if not is_valid_video_id(video_id):
+            raise ValueError(f"Invalid video id {video_id!r}")
+        row = cache.get_transcript(video_id)
+        if row is None or row["fetch_status"] != "SUCCESS":
+            raise ValueError(f"No cached transcript for {video_id}; the get_transcript tool "
+                             "fetches it (no YouTube API quota)")
+        return TranscriptFetcher.decompress_transcript(row["transcript_text"])
+
+    @staticmethod
+    def _scan_patterns() -> list[str]:
+        """Fabric patterns usable as prompts: a well-named dir with a non-empty system.md."""
+        root = _fabric_patterns_dir()
+        if not root.is_dir():
+            return []
+        names = []
+        for d in sorted(root.iterdir()):
+            md = d / "system.md"
+            if (re.fullmatch(r"[A-Za-z0-9_-]+", d.name) and md.is_file()
+                    and md.stat().st_size > 0):
+                names.append(d.name)
+        return names
+
+    async def _list_prompts(self) -> list[Prompt]:
+        names = await asyncio.to_thread(self._scan_patterns)
+        return [Prompt(
+            name=name,
+            description=f"Fabric pattern '{name}' (from ~/.config/fabric/patterns)",
+            arguments=[PromptArgument(
+                name="video_id", required=False,
+                description="Optional: append this video's CACHED transcript as the input")],
+        ) for name in names]
+
+    async def _get_prompt(self, name: str,
+                          arguments: Optional[dict[str, str]]) -> GetPromptResult:
+        prompt, err = await self._load_pattern_prompt(name)
+        if err:
+            raise ValueError(err["message"])
+        # Optional argument: clients often send an unfilled one as "".
+        video_id = ((arguments or {}).get("video_id") or "").strip()
+        text = prompt
+        if video_id:
+            cache = await asyncio.to_thread(self._resource_cache)
+            # The whole transcript, as fabric_analyze sends it (max_chars 0).
+            transcript = await asyncio.to_thread(self._cached_transcript_text, cache, video_id)
+            text = prompt + "\n\n" + transcript
+        return GetPromptResult(
+            description=f"Fabric pattern '{name}'" + (f" on {video_id}" if video_id else ""),
+            messages=[PromptMessage(role="user", content=TextContent(type="text", text=text))])
+
     # ----- Confirmation via MCP elicitation ----------------------------------------------
 
     @staticmethod
@@ -1111,6 +1374,31 @@ class YangerMCPServer:
 
     # --- Playlist Management ---
 
+    @staticmethod
+    def _playlist_dict(p: Playlist) -> dict[str, Any]:
+        """One playlist as list_playlists and the yanger://playlists resource report it."""
+        return {
+            "id": p.id,
+            "title": p.title,
+            "description": p.description,
+            "video_count": p.item_count,
+            "privacy_status": p.privacy_status.value,
+            "is_virtual": p.is_virtual,
+        }
+
+    @staticmethod
+    def _video_dict(v: Video) -> dict[str, Any]:
+        """One video as list_videos and the yanger://playlists/{id} resource report it."""
+        return {
+            "video_id": v.id,
+            "playlist_item_id": v.playlist_item_id,
+            "title": v.title,
+            "channel_title": v.channel_title,
+            "position": v.position,
+            "duration": v.duration,
+            "added_at": str(v.added_at) if v.added_at else None,
+        }
+
     async def _list_playlists(self, args: dict[str, Any]) -> dict[str, Any]:
         """List all playlists."""
         include_virtual = args.get("include_virtual", False)
@@ -1124,16 +1412,7 @@ class YangerMCPServer:
             playlists = await asyncio.to_thread(self.api_client.get_playlists)
             await asyncio.to_thread(self.cache.set_playlists, playlists)
 
-        result = []
-        for p in playlists:
-            result.append({
-                "id": p.id,
-                "title": p.title,
-                "description": p.description,
-                "video_count": p.item_count,
-                "privacy_status": p.privacy_status.value,
-                "is_virtual": p.is_virtual,
-            })
+        result = [self._playlist_dict(p) for p in playlists]
 
         # Add virtual playlists if requested
         if include_virtual:
@@ -1288,18 +1567,7 @@ class YangerMCPServer:
             videos = await asyncio.to_thread(self.api_client.get_playlist_items, playlist_id)
             await asyncio.to_thread(self.cache.set_videos, playlist_id, videos)
 
-        result = []
-        for v in videos[:limit]:
-            result.append({
-                "video_id": v.id,
-                "playlist_item_id": v.playlist_item_id,
-                "title": v.title,
-                "channel_title": v.channel_title,
-                "position": v.position,
-                "duration": v.duration,
-                "added_at": str(v.added_at) if v.added_at else None,
-            })
-
+        result = [self._video_dict(v) for v in videos[:limit]]
         return {"videos": result, "count": len(result), "playlist_id": playlist_id}
 
     async def _add_video(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -1445,15 +1713,16 @@ class YangerMCPServer:
     # --- Transcripts ---
 
     @staticmethod
-    def _truncate_transcript(text: str, max_chars: Optional[int]) -> tuple[str, bool]:
+    def _truncate_transcript(text: str, max_chars: Optional[int],
+                             more: str = "pass a higher max_chars to get more") -> tuple[str, bool]:
         """Cap transcript length so one tool call can't flood client context.
 
         Returns the (possibly truncated) text and whether truncation occurred.
-        A falsy ``max_chars`` (None/0) means no limit.
+        A falsy ``max_chars`` (None/0) means no limit. ``more`` tells the reader how to get the rest.
         """
         if max_chars and len(text) > max_chars:
             omitted = len(text) - max_chars
-            note = f"\n\n[... truncated {omitted} chars; pass a higher max_chars to get more]"
+            note = f"\n\n[... truncated {omitted} chars; {more}]"
             return text[:max_chars] + note, True
         return text, False
 
