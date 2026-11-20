@@ -470,15 +470,29 @@ async def test_run_tab_completes_registry_command_name(run_pilot):
     assert field.cursor_position == len(":run dl")
 
 
-async def test_run_completion_sees_commands_added_at_runtime(run_pilot, monkeypatch):
+async def test_run_completion_sees_commands_added_at_runtime(run_pilot):
     """`:set commands.<name>` adds a command mid-session: a cached 'no match' must not hide it."""
     app, pilot = run_pilot
     field = await _type_command(app, pilot, "r", "u", "n", "space", "x")
-    assert field._suggestion == ""          # nothing named x* yet
+    # Ask the widget's suggester directly: `_suggestion == ""` would also hold before the
+    # worker finished (Input resets it synchronously on every value change).
+    assert await field.suggester.get_suggestion(":run x") is None  # nothing named x* yet
     app.command_input.hide()
-    monkeypatch.setenv("YANGER_CMD_XFER", "echo {url}")
+    app.handle_set_command(["commands.xfer", "echo {url}"])  # the real `:set` path (HOME=tmp)
+    assert app.settings.commands["xfer"] == "echo {url}"
     field = await _type_command(app, pilot, "r", "u", "n", "space", "x")
     assert field._suggestion == ":run xfer"
+
+
+async def test_run_completion_survives_a_broken_registry(run_pilot):
+    """A registry that cannot be built (here: a non-string YAML transcript_command) must give
+    no completion, not raise in the suggester worker and exit the app on a keystroke."""
+    app, pilot = run_pilot
+    app.settings.transcripts.transcript_command = 5  # e.g. `transcript_command: 5` in YAML
+    field = await _type_command(app, pilot, "r", "u", "n", "space", "d")
+    assert app.is_running
+    assert field.value == ":run d"
+    assert await field.suggester.get_suggestion(":run d") is None
 
 
 async def test_reopened_command_mode_types_after_the_colon(run_pilot):

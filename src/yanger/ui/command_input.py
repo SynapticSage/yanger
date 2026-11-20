@@ -55,7 +55,14 @@ class CommandSuggester(Suggester):
             prefix = parts[1]
             if not self.run_names or " " in prefix or value.endswith(" "):
                 return None
-            for name in sorted(self.run_names()):
+            try:
+                names = sorted(self.run_names())
+            except Exception as e:
+                # This runs in an Input worker: a raise would exit the app on a keystroke.
+                # Offer nothing; `:run` on Enter reports the broken config.
+                logger.warning(f":run completion unavailable: {e}")
+                return None
+            for name in names:
                 if name.startswith(prefix) and name != prefix:
                     return value[:len(value) - len(prefix)] + name
             return None
