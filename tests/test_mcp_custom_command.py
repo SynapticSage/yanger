@@ -3,7 +3,8 @@
 Security-sensitive (LLM-driven shell execution), so these pin the load-bearing guarantees two
 rounds of adversarial review flagged: the opt-in gate is actually wired through settings *merge*
 (else it is silently dead — B1); the tool is hidden until enabled and can never break tool
-discovery (B2); ``confirm: true`` commands are excluded from the enum AND refused (S1); the
+discovery (B2); ``confirm: true`` commands are excluded from the enum AND refused unless the
+client supports elicitation (S1; the elicitation path is in test_mcp_elicitation.py); the
 fan-out is capped and errors rather than truncates; command output is captured with a timeout;
 and — the CRITICAL one — every LLM-supplied video_id is validated to the YouTube charset BEFORE a
 command is built, because ``shlex.quote`` is bypassable when a template embeds the placeholder in

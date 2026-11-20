@@ -36,6 +36,13 @@ try:
 except ImportError:
     MCP_AVAILABLE = False
 
+# Elicitation (a server-to-client "ask the user" request) arrived in later SDKs. On older ones
+# (mcp 0.9.1 is a real install of this package) the type is absent and no client can be asked.
+try:
+    from mcp.types import ElicitationCapability
+except ImportError:
+    ElicitationCapability = None
+
 from .auth import YouTubeAuth, resolve_token_file, resolve_client_secrets_file
 from .api_client import YouTubeAPIClient, QuotaExceededError
 from .cache import PersistentCache
@@ -66,11 +73,33 @@ DEFAULT_TRANSCRIPT_MAX_CHARS = 20000
 FABRIC_BATCH_CONCURRENCY = 4
 
 # run_custom_command fan-out cap. The TUI *confirms* before running on more than this many videos
-# (app.py RUN_CONFIRM_THRESHOLD=5); MCP has no human confirm, so we REJECT beyond the cap rather
-# than run a large batch unconfirmed (and it bounds worst-case wall time: per-video mode is N
-# sequential subprocesses x the capture timeout).
+# (app.py RUN_CONFIRM_THRESHOLD=5); over MCP we REJECT beyond the cap rather than run a large batch
+# unconfirmed. Kept even for clients that support elicitation: it also bounds worst-case wall time
+# (per-video mode is N sequential subprocesses x the capture timeout).
 CUSTOM_COMMAND_MAX_VIDEOS = 5
 CUSTOM_COMMAND_MAX_OUTPUT_CHARS = 20000  # default per-stream (stdout/stderr) truncation
+
+# The one-field form an elicitation-capable client shows before a gated action. Requiring the box
+# to be ticked (on top of the client's "accept") makes an empty or partial answer a refusal.
+CONFIRM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "confirm": {
+            "type": "boolean",
+            "title": "Confirm",
+            "description": "Tick to approve this action",
+            "default": False,
+        },
+    },
+    "required": ["confirm"],
+}
+
+
+def _one_line(text: Any, limit: int = 120) -> str:
+    """Flatten untrusted text (video titles, LLM-supplied ids) for a confirmation prompt: collapse
+    all whitespace so it cannot fake extra server-written lines, then truncate."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 3] + "..."
 
 # Transcript fetch+cache and its terminal-vs-transient policy now live in one place:
 # core.transcript_fetcher.fetch_and_cache_transcript (Tier 1 #1). Callers here just invoke it.
@@ -695,19 +724,76 @@ class YangerMCPServer:
 
         return await handler(arguments)
 
+    # ----- Confirmation via MCP elicitation ----------------------------------------------
+
+    @staticmethod
+    def _supports_form_elicitation(caps: Any) -> bool:
+        """True only when the client's declared capabilities say it can render a form.
+
+        Fails closed on anything unrecognised: an SDK without the elicitation type, capabilities
+        without the field (pre-elicitation SDKs), or a raw dict (an old SDK's ``extra=allow``).
+        A bare ``{}`` means form mode (spec 2025-06-18 clients); a url-only client cannot do forms.
+        """
+        if ElicitationCapability is None or caps is None:
+            return False
+        # Absent is a legitimate answer here (older SDKs/clients), and means "cannot elicit".
+        el = getattr(caps, "elicitation", None)
+        if not isinstance(el, ElicitationCapability):
+            return False
+        return el.form is not None or el.url is None
+
+    def _elicitation_context(self):
+        """The current MCP request context if its client can be asked to confirm, else None.
+
+        None also covers callers outside an MCP request (in-process/direct calls) and server
+        sessions without ``elicit_form`` (older SDKs) — all of which keep pre-elicitation behaviour.
+        """
+        try:
+            ctx = self.server.request_context
+        except LookupError:
+            return None
+        if not callable(getattr(ctx.session, "elicit_form", None)):
+            return None
+        params = ctx.session.client_params
+        if params is None or not self._supports_form_elicitation(params.capabilities):
+            return None
+        return ctx
+
+    async def _ask_to_confirm(self, ctx, message: str) -> Optional[dict[str, Any]]:
+        """Ask the client's user to approve. Returns None ONLY on an explicit accept with the
+        ``confirm`` box ticked; otherwise a structured refusal. "Could not ask" is never consent."""
+        try:
+            r = await ctx.session.elicit_form(
+                message, CONFIRM_SCHEMA, related_request_id=ctx.request_id
+            )
+        except Exception as e:  # any failure to get an answer refuses (fail closed)
+            logger.warning("Elicitation failed; refusing the gated action", exc_info=True)
+            return {"error": "confirmation_failed", "message": (
+                f"Could not get the user's confirmation ({type(e).__name__}: {e}); "
+                "the action was NOT performed."
+            )}
+        # Content comes from the client: a missing key must mean "not confirmed".
+        if r.action == "accept" and (r.content or {}).get("confirm") is True:
+            return None
+        return {"error": "not_confirmed", "action": r.action, "message": (
+            "The user did not approve this action; it was NOT performed."
+        )}
+
     # ----- Custom commands (opt-in; MCPSettings.allow_custom_commands) -------------------
 
     def _custom_command_tools(self) -> list[Tool]:
         """The gated ``run_custom_command`` tool, or ``[]`` when the opt-in is off / no eligible
-        commands. Excludes ``confirm: true`` commands from the enum: that flag encodes "always
-        ask me", which the coarse global opt-in can't honor without a human, so those are not
-        advertised (and are refused in the handler too, as defense-in-depth)."""
+        commands. ``confirm: true`` commands ("always ask me") are advertised only when the
+        current client supports form elicitation, so the user can be asked; otherwise they are
+        left out (and refused in the handler too, as defense-in-depth). This runs inside the
+        list_tools request, so the session's capabilities are available here."""
         settings = self._settings or load_settings()
         self._settings = settings
         if not getattr(getattr(settings, "mcp", None), "allow_custom_commands", False):
             return []
         registry = load_command_registry(settings)
-        names = sorted(name for name, spec in registry.items() if not spec.confirm)
+        can_elicit = self._elicitation_context() is not None
+        names = sorted(name for name, spec in registry.items() if not spec.confirm or can_elicit)
         if not names:
             return []
         return [
@@ -718,6 +804,8 @@ class YangerMCPServer:
                     "registry) against one or more videos and return its captured output. You may "
                     "only select a command by name from the enum — you cannot supply an arbitrary "
                     "command. Opt-in feature (LLM-driven shell execution)."
+                    + (" Commands the user marked confirm will prompt them to approve first."
+                       if can_elicit else "")
                 ),
                 inputSchema={
                     "type": "object",
@@ -755,7 +843,8 @@ class YangerMCPServer:
         registered command by name; every id must be a well-formed YouTube id (11-char charset,
         no shell metacharacters) BEFORE any command is built — ``shlex.quote`` alone is bypassable
         when a user's template embeds the placeholder inside quotes (``echo "got {id}"`` +
-        ``$(...)``); ``confirm: true`` commands are refused.
+        ``$(...)``); ``confirm: true`` commands run only after the client's user explicitly approves
+        via elicitation, and are refused when the client cannot be asked.
 
         Expected refusals return a structured ``{"error": <code>, ...}`` (like the fabric tools),
         so the LLM gets an actionable code rather than a generic exception.
@@ -774,11 +863,6 @@ class YangerMCPServer:
         if spec is None:
             return {"error": "unknown_command", "message": f"No custom command named '{name}'.",
                     "available": sorted(registry)}
-        if spec.confirm:
-            return {"error": "requires_confirmation", "message": (
-                f"Custom command '{name}' is marked confirm:true; run it from the TUI (:run). "
-                "MCP has no interactive confirmation (elicitation not yet supported)."
-            )}
 
         video_ids = args.get("video_ids") or []
         if not isinstance(video_ids, list) or not video_ids:
@@ -808,8 +892,28 @@ class YangerMCPServer:
         targets = [SimpleNamespace(id=v) for v in video_ids]
 
         # resolve_commands is the single owner of the batch/per-video dispatch (shared with the TUI).
+        runs = resolve_commands(spec, targets)
+
+        # confirm:true ("always ask me") is checked only after every validation above, so the user
+        # is never asked to approve a request that would be rejected, and approves the EXACT
+        # shell strings that will run.
+        if spec.confirm:
+            ctx = self._elicitation_context()
+            if ctx is None:
+                return {"error": "requires_confirmation", "message": (
+                    f"Custom command '{name}' is marked confirm:true; it needs an MCP client that "
+                    "supports elicitation, or run it from the TUI (:run)."
+                )}
+            lines = "\n".join(f"  {cmd}" for _, cmd in runs)
+            refusal = await self._ask_to_confirm(ctx, (
+                f"Run custom command '{name}' on {len(video_ids)} video(s): "
+                f"{', '.join(video_ids)}?\nIt will execute:\n{lines}"
+            ))
+            if refusal is not None:
+                return refusal
+
         results: list[dict[str, Any]] = []
-        for ids_for_run, cmd in resolve_commands(spec, targets):
+        for ids_for_run, cmd in runs:
             cr = await asyncio.to_thread(run_command_capture, cmd)
             results.append(self._custom_command_result(ids_for_run, cr, max_chars))
 
@@ -958,8 +1062,22 @@ class YangerMCPServer:
         }
 
     async def _delete_playlist(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Delete a playlist."""
+        """Delete a playlist (asks the client's user first when it supports elicitation)."""
         playlist_id = args["playlist_id"]
+
+        ctx = self._elicitation_context()
+        if ctx is not None:
+            # Title is best effort, from the cache only (no API quota); fall back to the id.
+            playlists = await asyncio.to_thread(self.cache.get_playlists)
+            title = next((p.title for p in playlists or [] if p.id == playlist_id), None)
+            label = _one_line(playlist_id)
+            if title:
+                label = f"'{_one_line(title)}' ({label})"
+            refusal = await self._ask_to_confirm(
+                ctx, f"Delete playlist {label}? This cannot be undone."
+            )
+            if refusal is not None:
+                return refusal
 
         await asyncio.to_thread(self.api_client.delete_playlist, playlist_id)
 
@@ -1052,9 +1170,27 @@ class YangerMCPServer:
         }
 
     async def _remove_video(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Remove a video from a playlist."""
+        """Remove a video from a playlist (asks the client's user first when it supports
+        elicitation)."""
         playlist_item_id = args["playlist_item_id"]
         playlist_id = args.get("playlist_id")
+
+        ctx = self._elicitation_context()
+        if ctx is not None:
+            # Title is best effort, from the cache only; it is uploader-controlled, so it is
+            # flattened, quoted after fixed server text, and the item id is always shown.
+            title = None
+            if playlist_id:
+                videos = await asyncio.to_thread(self.cache.get_videos, playlist_id)
+                title = next((v.title for v in videos or []
+                              if v.playlist_item_id == playlist_item_id), None)
+            where = f" from playlist {_one_line(playlist_id)}" if playlist_id else ""
+            what = f"video titled \"{_one_line(title)}\"" if title else "video"
+            refusal = await self._ask_to_confirm(ctx, (
+                f"Remove {what} (playlist item {_one_line(playlist_item_id)}){where}?"
+            ))
+            if refusal is not None:
+                return refusal
 
         await asyncio.to_thread(self.api_client.remove_video_from_playlist, playlist_item_id)
 

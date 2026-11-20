@@ -447,6 +447,12 @@ async def connect_yanger():
 | `fabric_analyze` | Analyze video with Fabric AI patterns |
 | `check_quota` | Check API quota usage |
 
+**Confirmations (MCP elicitation)**: when the MCP client supports elicitation (it can show you a
+confirm form), `delete_playlist` and `remove_video` ask you to approve first, and custom commands
+marked `confirm: true` are offered to the model and run only after you approve the exact command
+lines. Only an explicit approval with the box ticked proceeds. Clients without elicitation behave
+as before: no prompt for delete/remove, and `confirm: true` commands stay hidden and refused.
+
 **Example Prompts**:
 ```
 "Show me my playlists"
