@@ -93,6 +93,9 @@ CONFIRM_SCHEMA = {
     },
     "required": ["confirm"],
 }
+# How long to wait for the human's answer. The SDK sets no read timeout on elicit_form, so a client
+# that declares elicitation but never answers would hang the tool call forever; past this, refuse.
+CONFIRM_TIMEOUT_SECONDS = 300
 
 
 def _one_line(text: Any, limit: int = 120) -> str:
@@ -763,9 +766,16 @@ class YangerMCPServer:
         """Ask the client's user to approve. Returns None ONLY on an explicit accept with the
         ``confirm`` box ticked; otherwise a structured refusal. "Could not ask" is never consent."""
         try:
-            r = await ctx.session.elicit_form(
-                message, CONFIRM_SCHEMA, related_request_id=ctx.request_id
+            r = await asyncio.wait_for(
+                ctx.session.elicit_form(message, CONFIRM_SCHEMA, related_request_id=ctx.request_id),
+                timeout=CONFIRM_TIMEOUT_SECONDS,
             )
+        except asyncio.TimeoutError:  # distinct from builtin TimeoutError on Python 3.10
+            logger.warning("Elicitation timed out; refusing the gated action")
+            return {"error": "confirmation_failed", "message": (
+                f"No answer from the user within {CONFIRM_TIMEOUT_SECONDS}s; "
+                "the action was NOT performed."
+            )}
         except Exception as e:  # any failure to get an answer refuses (fail closed)
             logger.warning("Elicitation failed; refusing the gated action", exc_info=True)
             return {"error": "confirmation_failed", "message": (
@@ -1069,12 +1079,16 @@ class YangerMCPServer:
         if ctx is not None:
             # Title is best effort, from the cache only (no API quota); fall back to the id.
             playlists = await asyncio.to_thread(self.cache.get_playlists)
-            title = next((p.title for p in playlists or [] if p.id == playlist_id), None)
+            cached = next((p for p in playlists or [] if p.id == playlist_id), None)
             label = _one_line(playlist_id)
-            if title:
-                label = f"'{_one_line(title)}' ({label})"
+            warning = "This cannot be undone."
+            if cached:
+                label = f"'{_one_line(cached.title)}' ({label})"
+                # Same warning as the TUI's gd confirm; 0 can mean "unknown" (API limits), so omit.
+                if cached.item_count > 0:
+                    warning = f"It contains {cached.item_count} videos. {warning}"
             refusal = await self._ask_to_confirm(
-                ctx, f"Delete playlist {label}? This cannot be undone."
+                ctx, f"Delete playlist {label}? {warning}"
             )
             if refusal is not None:
                 return refusal
@@ -1179,12 +1193,15 @@ class YangerMCPServer:
         if ctx is not None:
             # Title is best effort, from the cache only; it is uploader-controlled, so it is
             # flattened, quoted after fixed server text, and the item id is always shown.
+            # The removal acts on playlist_item_id alone, so the LLM-supplied playlist_id is shown
+            # only when the cache ties this item to it; otherwise it never reaches the human.
             title = None
             if playlist_id:
                 videos = await asyncio.to_thread(self.cache.get_videos, playlist_id)
                 title = next((v.title for v in videos or []
                               if v.playlist_item_id == playlist_item_id), None)
-            where = f" from playlist {_one_line(playlist_id)}" if playlist_id else ""
+            where = (f" from playlist {_one_line(playlist_id)}" if title is not None
+                     else " (playlist not verified)")
             what = f"video titled \"{_one_line(title)}\"" if title else "video"
             refusal = await self._ask_to_confirm(ctx, (
                 f"Remove {what} (playlist item {_one_line(playlist_item_id)}){where}?"

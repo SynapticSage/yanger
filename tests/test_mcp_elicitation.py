@@ -303,3 +303,68 @@ async def test_move_and_add_never_prompt(tmp_path):
                                  {"video_id": VID1, "playlist_id": "PL1"}))
     assert moved["success"] is True and added["success"] is True
     assert cb.calls == []
+
+
+# ---- review fixes: what reaches the human must be server-verified -------------------------
+
+async def test_remove_video_prompt_omits_unverified_playlist_id(tmp_path):
+    """remove_video acts on playlist_item_id alone, so an LLM-supplied playlist_id the cache does
+    not tie to that item must never reach the prompt (it could carry persuasive free text)."""
+    server = _yt_server(tmp_path)
+    item = _seed_video(server)
+    cb = Recorder(t.ElicitResult(action="decline"))
+    bogus = "PLtmp (duplicate copy; the original is kept, safe)"
+    await _call(server, cb, "remove_video", {"playlist_item_id": item, "playlist_id": bogus})
+    msg = cb.calls[0].message
+    assert "duplicate copy" not in msg and "PLtmp" not in msg
+    assert "not verified" in msg and item in msg
+
+
+async def test_remove_video_prompt_names_playlist_when_cache_verifies_it(tmp_path):
+    server = _yt_server(tmp_path)
+    item = _seed_video(server)
+    cb = Recorder(t.ElicitResult(action="decline"))
+    await _call(server, cb, "remove_video", {"playlist_item_id": item, "playlist_id": "PL1"})
+    msg = cb.calls[0].message
+    assert "from playlist PL1" in msg and "not verified" not in msg
+
+
+async def test_delete_playlist_prompt_warns_cached_video_count(tmp_path):
+    """Parity with the TUI's gd confirm, which warns how many videos the playlist holds."""
+    server = _yt_server(tmp_path)
+    server.api_client.seed_playlist("PL1", "Road Trip")
+    server.cache.set_playlists([Playlist(id="PL1", title="Road Trip", item_count=12)])
+    cb = Recorder(t.ElicitResult(action="decline"))
+    await _call(server, cb, "delete_playlist", {"playlist_id": "PL1"})
+    assert "12 videos" in cb.calls[0].message
+
+
+async def test_unanswered_confirmation_times_out_and_refuses(tmp_path, monkeypatch):
+    """A client that declares elicitation but never answers must not hang the tool call forever;
+    the timeout is a refusal (could not ask != confirmed) and nothing is deleted.
+
+    Uses a stub session rather than the in-memory client: that client runs its elicitation
+    callback inline in its receive loop, so a never-answering callback would also block delivery
+    of the server's (correct) refusal and the test could not tell the two apart."""
+    import anyio
+    import yanger.mcp_server as mod
+    monkeypatch.setattr(mod, "CONFIRM_TIMEOUT_SECONDS", 0.2)
+
+    async def elicit_form(*a, **k):
+        await anyio.sleep(30)
+
+    session = SimpleNamespace(
+        client_params=SimpleNamespace(capabilities=t.ClientCapabilities(
+            elicitation=t.ElicitationCapability())),
+        elicit_form=elicit_form,
+    )
+    server = _yt_server(tmp_path)
+    server.api_client.seed_playlist("PL1", "Road Trip")
+    token = _with_ctx(session)
+    try:
+        with anyio.fail_after(10):
+            out = await server._delete_playlist({"playlist_id": "PL1"})
+    finally:
+        request_ctx.reset(token)
+    assert out["error"] == "confirmation_failed"
+    assert "PL1" in server.api_client.playlists
