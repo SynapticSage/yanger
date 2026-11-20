@@ -850,8 +850,12 @@ class YangerMCPServer:
             return None
         if not callable(getattr(ctx.session, "create_message", None)):
             return None
-        params = ctx.session.client_params
-        if params is None or not self._supports_sampling(params.capabilities):
+        # mcp 2.x: capabilities can be declared without client_params; older SDKs lack the field.
+        caps = getattr(ctx.session, "client_capabilities", None)
+        if caps is None:
+            params = ctx.session.client_params
+            caps = None if params is None else params.capabilities
+        if not self._supports_sampling(caps):
             return None
         return ctx
 
@@ -884,14 +888,19 @@ class YangerMCPServer:
             return None, {"error": "invalid_arguments", "message": (
                 f"Invalid pattern name {pattern!r}: use letters, digits, '_' or '-'")}
         path = _fabric_patterns_dir() / pattern / "system.md"
+        reason = ""
         try:
             text = await asyncio.to_thread(path.read_text, encoding="utf-8")
         except FileNotFoundError:
             text = ""
+        except (OSError, UnicodeDecodeError) as e:  # a directory, unreadable, or not UTF-8
+            text, reason = "", f" (unreadable: {type(e).__name__})"
         if not text.strip():
+            hint = (" Or pass backend='fabric' to let local Fabric resolve it."
+                    if shutil.which("fabric") else "")
             return None, {"error": "pattern_not_found", "pattern": pattern, "message": (
-                f"No pattern prompt at {path}. Patterns come from Fabric's repo "
-                "(https://github.com/danielmiessler/fabric) or `fabric --setup`.")}
+                f"No usable pattern prompt at {path}{reason}. Patterns come from Fabric's repo "
+                f"(https://github.com/danielmiessler/fabric) or `fabric --setup`.{hint}")}
         return text, None
 
     async def _sample_pattern(self, ctx, prompt: str, transcript_text: str,
@@ -906,6 +915,7 @@ class YangerMCPServer:
                     system_prompt=prompt,
                     model_preferences=(ModelPreferences(hints=[ModelHint(name=model)])
                                        if model else None),
+                    related_request_id=ctx.request_id,  # route on the tool call's stream
                 ),
                 timeout=SAMPLING_TIMEOUT_SECONDS,
             )
@@ -2196,8 +2206,9 @@ class YangerMCPServer:
             return False
 
         if skip_errors:
-            # Fan out under a semaphore; gather preserves input ordering.
-            semaphore = asyncio.Semaphore(FABRIC_BATCH_CONCURRENCY)
+            # Fan out under a semaphore; gather preserves input ordering. Sampling runs one at a
+            # time: the client may ask its user to approve each request.
+            semaphore = asyncio.Semaphore(1 if backend == "sampling" else FABRIC_BATCH_CONCURRENCY)
 
             async def analyze_one(video_id: str) -> dict[str, Any]:
                 async with semaphore:

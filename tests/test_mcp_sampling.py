@@ -362,3 +362,104 @@ async def test_tools_advertise_backend_param(tmp_path):
         prop = tools[name].inputSchema["properties"]["backend"]
         assert prop["enum"] == ["auto", "fabric", "sampling"]
         assert "sampling" in tools[name].description
+
+
+# ---- (m) review fixes: unreadable prompts, mcp 2.x capabilities, serial batch, request id --
+
+def _stub_session(create_message, *, via_client_capabilities=False):
+    """A server-session stand-in that declares sampling (as mcp 1.x does, or as mcp 2.x does
+    when capabilities arrive without client_params)."""
+    caps = t.ClientCapabilities(sampling=t.SamplingCapability())
+    if via_client_capabilities:
+        return SimpleNamespace(client_capabilities=caps, client_params=None,
+                               create_message=create_message)
+    return SimpleNamespace(client_params=SimpleNamespace(capabilities=caps),
+                           create_message=create_message)
+
+
+def _answer():
+    return t.CreateMessageResult(role="assistant", content=t.TextContent(type="text", text="ok"),
+                                 model="m", stopReason="endTurn")
+
+
+async def _call_direct(server, method, args):
+    with anyio.fail_after(10):
+        return await getattr(server, method)(args)
+
+
+@pytest.mark.parametrize("make_bad", [
+    lambda p: p.mkdir(),                          # system.md is a directory: IsADirectoryError
+    lambda p: p.write_bytes(b"\xff\xfe\x00bad"),  # not UTF-8: UnicodeDecodeError
+])
+async def test_unreadable_pattern_prompt_is_pattern_not_found(tmp_path, patterns, make_bad):
+    path = patterns / "broken" / "system.md"
+    path.parent.mkdir()
+    make_bad(path)
+    cb = Recorder()
+    with _fabric(False):
+        out = await _call(_server(tmp_path), cb, "fabric_analyze",
+                          {"video_id": VID1, "pattern": "broken"})
+    assert out["error"] == "pattern_not_found"
+    assert str(path) in out["message"]
+    assert cb.calls == []
+
+
+async def test_pattern_not_found_with_fabric_installed_suggests_backend_fabric(tmp_path, patterns):
+    with _fabric(True):
+        out = await _call(_server(tmp_path), Recorder(), "fabric_analyze",
+                          {"video_id": VID1, "pattern": "missing_pattern"})
+    assert out["error"] == "pattern_not_found"
+    assert "backend='fabric'" in out["message"]
+
+
+def test_sampling_context_reads_client_capabilities_without_client_params():
+    """mcp 2.x: capabilities can be declared with no client_params; they must still count."""
+    async def create_message(*a, **k):
+        return _answer()
+
+    token = _with_ctx(_stub_session(create_message, via_client_capabilities=True))
+    try:
+        assert YangerMCPServer()._sampling_context() is not None
+    finally:
+        request_ctx.reset(token)
+
+
+async def test_sampling_request_is_tied_to_the_tool_call(tmp_path, patterns):
+    seen = {}
+
+    async def create_message(*a, **k):
+        seen.update(k)
+        return _answer()
+
+    token = _with_ctx(_stub_session(create_message))
+    try:
+        with _fabric(False):
+            out = await _call_direct(_server(tmp_path), "_fabric_analyze",
+                                     {"video_id": VID1, "pattern": "extract_wisdom"})
+    finally:
+        request_ctx.reset(token)
+    assert out["result"] == "ok"
+    assert seen["related_request_id"] == 1
+
+
+async def test_batch_sends_sampling_requests_one_at_a_time(tmp_path, patterns):
+    """A client may ask a human to approve each sampling request: never several at once."""
+    state = {"in_flight": 0, "peak": 0}
+
+    async def create_message(*a, **k):
+        state["in_flight"] += 1
+        state["peak"] = max(state["peak"], state["in_flight"])
+        await anyio.sleep(0.02)
+        state["in_flight"] -= 1
+        return _answer()
+
+    vids = (VID1, VID2, "abcdefghijk")
+    token = _with_ctx(_stub_session(create_message))
+    try:
+        with _fabric(False):
+            out = await _call_direct(_server(tmp_path, vids), "_fabric_analyze_batch", {
+                "pattern": "extract_wisdom", "video_ids": list(vids), "skip_errors": True})
+    finally:
+        request_ctx.reset(token)
+    assert out["successful_count"] == 3
+    assert state["peak"] == 1
