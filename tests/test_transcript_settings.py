@@ -11,7 +11,8 @@ from pathlib import Path
 from yanger.config.settings import (
     Settings,
     TranscriptSettings,
-    load_settings
+    load_settings,
+    save_user_setting,
 )
 
 
@@ -268,3 +269,58 @@ class TestSettingsSerialization:
         assert transcripts_dict['languages'] == ["es", "en"]
         assert 'enabled' in transcripts_dict
         assert 'store_in_db' in transcripts_dict
+
+
+class TestSaveUserSettingCommands:
+    """H.9: `:set commands.<name>` persists into the user config's `commands:` map."""
+
+    def _write(self, tmp_path, text):
+        (tmp_path / "config.yaml").write_text(text)
+
+    def _read(self, tmp_path):
+        return yaml.safe_load((tmp_path / "config.yaml").read_text())
+
+    def test_roundtrip_through_load_settings(self, tmp_path):
+        save_user_setting("commands.DL", "yt-dlp {url}", tmp_path)
+        assert load_settings(tmp_path).commands["dl"] == "yt-dlp {url}"
+
+    def test_keeps_other_commands_and_sections(self, tmp_path):
+        self._write(tmp_path, "ui:\n  colorscheme: nord\ncommands:\n  sum: yeet {url}\n")
+        save_user_setting("commands.dl", "yt-dlp {url}", tmp_path)
+        save_user_setting("transcript_command", "t {url}", tmp_path)
+        data = self._read(tmp_path)
+        assert data["ui"] == {"colorscheme": "nord"}
+        assert data["commands"] == {"sum": "yeet {url}", "dl": "yt-dlp {url}"}
+        assert data["transcripts"] == {"transcript_command": "t {url}"}
+
+    def test_null_commands_section(self, tmp_path):
+        self._write(tmp_path, "commands:\n")
+        save_user_setting("commands.dl", "yt-dlp {url}", tmp_path)
+        assert self._read(tmp_path)["commands"] == {"dl": "yt-dlp {url}"}
+
+    def test_replaces_case_variant_keys(self, tmp_path):
+        self._write(tmp_path, "commands:\n  DL: old {url}\n  Dl: older {url}\n")
+        save_user_setting("commands.dl", "new {url}", tmp_path)
+        assert self._read(tmp_path)["commands"] == {"dl": "new {url}"}
+
+    @pytest.mark.parametrize("text", [
+        "commands:\n  - dl\n",                                       # commands: not a mapping
+        "commands:\n  DL:\n    run: yt-dlp {url}\n    confirm: true\n",  # long-form entry
+    ])
+    def test_refuses_and_leaves_file_unchanged(self, tmp_path, text):
+        self._write(tmp_path, text)
+        with pytest.raises(ValueError):
+            save_user_setting("commands.dl", "x {url}", tmp_path)
+        assert (tmp_path / "config.yaml").read_text() == text
+
+    def test_empty_name_refused(self, tmp_path):
+        with pytest.raises(ValueError):
+            save_user_setting("commands.", "x {url}", tmp_path)
+        assert not (tmp_path / "config.yaml").exists()
+
+    def test_unparseable_config_is_never_clobbered(self, tmp_path):
+        text = "ui: [unclosed\ncommands:\n  sum: yeet {url}\n"
+        self._write(tmp_path, text)
+        with pytest.raises(yaml.YAMLError):
+            save_user_setting("commands.dl", "x {url}", tmp_path)
+        assert (tmp_path / "config.yaml").read_text() == text

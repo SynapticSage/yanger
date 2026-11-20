@@ -6,6 +6,7 @@ the fact that core/transcript_command now delegates to this module (single imple
 The TUI `:run` wiring is a separate slice.
 """
 
+import os
 import shlex
 from types import SimpleNamespace
 
@@ -26,6 +27,8 @@ from yanger.core.custom_command import (
     CommandSpec,
     MODE_PER_VIDEO,
     MODE_BATCH,
+    TRANSCRIPT_COMMAND_NAME,
+    shadowing_env_var,
 )
 from yanger.config.settings import Settings, MCPSettings, save_settings
 
@@ -97,6 +100,68 @@ def test_registry_env_overrides_and_adds(monkeypatch):
 
 def test_registry_missing_commands_attr_is_empty():
     assert load_command_registry(SimpleNamespace()) == {}
+
+
+# ----- H.6: transcript_command as the registry's reserved `transcript` command ------
+
+def test_registry_default_call_never_injects_transcript(monkeypatch):
+    """MCP's call (no transcript_template) is unchanged even with the env hook set."""
+    monkeypatch.setenv("YANGER_TRANSCRIPT_COMMAND", "summarize {url}")
+    monkeypatch.delenv("YANGER_CMD_TRANSCRIPT", raising=False)
+    assert load_command_registry(SimpleNamespace(commands={})) == {}
+
+
+def test_registry_injects_transcript_template(monkeypatch):
+    monkeypatch.delenv("YANGER_CMD_TRANSCRIPT", raising=False)
+    reg = load_command_registry(SimpleNamespace(commands={"dl": "yt-dlp {url}"}),
+                                transcript_template="t {url}")
+    assert TRANSCRIPT_COMMAND_NAME == "transcript"
+    assert reg["transcript"] == CommandSpec(name="transcript", template="t {url}")
+    assert reg["transcript"].mode == MODE_PER_VIDEO and reg["transcript"].confirm is False
+    assert reg["dl"].template == "yt-dlp {url}"
+
+
+def test_registry_explicit_transcript_entry_wins_and_keeps_confirm(monkeypatch, caplog):
+    """Back-compat: a user's own `commands.transcript` (with its confirm gate) is never replaced."""
+    monkeypatch.delenv("YANGER_CMD_TRANSCRIPT", raising=False)
+    settings = SimpleNamespace(commands={"transcript": {"run": "mine {url}", "confirm": True}})
+    with caplog.at_level("WARNING"):
+        reg = load_command_registry(settings, transcript_template="t {url}")
+    assert reg["transcript"].template == "mine {url}" and reg["transcript"].confirm is True
+    assert "mine {url}" in caplog.text and "t {url}" in caplog.text
+
+
+def test_registry_env_transcript_entry_wins(monkeypatch, caplog):
+    monkeypatch.setenv("YANGER_CMD_TRANSCRIPT", "envt {url}")
+    with caplog.at_level("WARNING"):
+        reg = load_command_registry(SimpleNamespace(commands={}), transcript_template="t {url}")
+    assert reg["transcript"].template == "envt {url}"
+    assert "envt {url}" in caplog.text
+
+
+def test_registry_same_template_no_warning(monkeypatch, caplog):
+    monkeypatch.delenv("YANGER_CMD_TRANSCRIPT", raising=False)
+    with caplog.at_level("WARNING"):
+        load_command_registry(SimpleNamespace(commands={"transcript": "t {url}"}),
+                              transcript_template="t {url}")
+    assert caplog.text == ""
+
+
+def test_registry_no_transcript_template_keeps_user_entry(monkeypatch):
+    monkeypatch.delenv("YANGER_CMD_TRANSCRIPT", raising=False)
+    reg = load_command_registry(SimpleNamespace(commands={"transcript": "mine {url}"}),
+                                transcript_template=None)
+    assert reg["transcript"].template == "mine {url}"
+
+
+def test_shadowing_env_var_matches_case_insensitively(monkeypatch):
+    for k in [k for k in os.environ if k.startswith("YANGER_CMD_")]:
+        monkeypatch.delenv(k)
+    assert shadowing_env_var("dl") is None
+    monkeypatch.setenv("YANGER_CMD_Dl", "x {url}")
+    assert shadowing_env_var("dl") == "YANGER_CMD_Dl"
+    monkeypatch.setenv("YANGER_CMD_Dl", "   ")   # a blank value is ignored by the registry too
+    assert shadowing_env_var("dl") is None
 
 
 # ----- slice 2: long-form specs + batch --------------------------------------------

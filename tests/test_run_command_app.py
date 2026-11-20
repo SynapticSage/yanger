@@ -8,12 +8,15 @@ reporting.
 """
 
 import contextlib
+import os
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import yanger.app as appmod
 from yanger.app import YouTubeRangerApp, RUN_CONFIRM_THRESHOLD
+from yanger.ui.command_input import parse_command
 from yanger.core.custom_command import CommandSpec, MODE_BATCH
 
 
@@ -21,10 +24,21 @@ def _video(vid):
     return SimpleNamespace(id=vid)
 
 
-def _fake_app(commands=None, selection=None):
+@pytest.fixture(autouse=True)
+def _no_transcript_env(monkeypatch):
+    """An exported transcript hook would add a `transcript` command to every registry (H.6)."""
+    monkeypatch.delenv("YANGER_TRANSCRIPT_COMMAND", raising=False)
+    monkeypatch.delenv("YANGER_CMD_TRANSCRIPT", raising=False)
+
+
+def _fake_app(commands=None, selection=None, transcript_command="", override=None):
     """Fake `self` exposing only what handle_run_command / run_custom_command read."""
     app = SimpleNamespace()
-    app.settings = SimpleNamespace(commands=commands or {})
+    app.settings = SimpleNamespace(
+        commands=commands or {},
+        transcripts=SimpleNamespace(transcript_command=transcript_command),
+    )
+    app._transcript_command_override = override
     app.notes = []                                   # (msg, error)
     app._notify_status = lambda msg, error=False: app.notes.append((msg, error))
     app._marked_or_current_videos = lambda: list(selection or [])
@@ -195,6 +209,107 @@ async def test_title_refusal_surfaces_before_confirm_modal():
     await YouTubeRangerApp.handle_run_command(app, ["t"])
     assert app.pushed == [] and app.ran == []
     assert "empty123" in app.notes[-1][0] and app.notes[-1][1] is True
+
+
+# ----- H.6: `:run transcript` runs the template `:transcript` resolves ----------
+
+async def test_run_transcript_uses_yaml_transcript_command():
+    app = _fake_app(transcript_command="t {url}", selection=[_video("a")])
+    await YouTubeRangerApp.handle_run_command(app, ["transcript"])
+    assert len(app.ran) == 1
+    spec, _ = app.ran[0]
+    assert spec.name == "transcript" and spec.template == "t {url}"
+
+
+async def test_run_transcript_runtime_override_beats_yaml_and_is_listed():
+    app = _fake_app(transcript_command="yaml {url}", override="set {url}",
+                    commands={"dl": "yt-dlp {url}"}, selection=[_video("a")])
+    await YouTubeRangerApp.handle_run_command(app, [])
+    assert "dl, transcript" in app.notes[-1][0]
+    await YouTubeRangerApp.handle_run_command(app, ["transcript"])
+    assert app.ran[0][0].template == "set {url}"
+
+
+async def test_run_transcript_explicit_command_keeps_its_confirm_gate():
+    app = _fake_app(transcript_command="t {url}", selection=[_video("a")],
+                    commands={"transcript": {"run": "mine {url}", "confirm": True}})
+    await YouTubeRangerApp.handle_run_command(app, ["transcript"])
+    assert app.ran == [] and len(app.pushed) == 1
+    assert app._pending_run_spec.template == "mine {url}"
+
+
+# ----- H.9: `:set commands.<name> <template>` -----------------------------------
+
+def _set_app(tmp_path, commands=None):
+    app = SimpleNamespace(config_dir=tmp_path, _transcript_command_override=None)
+    app.settings = SimpleNamespace(commands=dict(commands or {}),
+                                   transcripts=SimpleNamespace(transcript_command=""))
+    app.notes = []
+    app._notify_status = lambda msg, error=False: app.notes.append((msg, error))
+    return app
+
+
+def _no_cmd_env(monkeypatch):
+    for k in [k for k in os.environ if k.startswith("YANGER_CMD_")]:
+        monkeypatch.delenv(k)
+
+
+def test_set_command_persists_and_is_usable_now(tmp_path, monkeypatch):
+    _no_cmd_env(monkeypatch)
+    app = _set_app(tmp_path)
+    YouTubeRangerApp.handle_set_command(app, ["commands.DL", "yt-dlp {url}"])
+    assert app.settings.commands["dl"] == "yt-dlp {url}"
+    assert yaml.safe_load((tmp_path / "config.yaml").read_text())["commands"] == {"dl": "yt-dlp {url}"}
+    msg, err = app.notes[-1]
+    assert err is False and "commands.dl" in msg and "yt-dlp {url}" in msg and "persisted" in msg
+    assert "shadowed" not in msg
+
+
+def test_set_command_quoted_template_round_trips_exactly(tmp_path, monkeypatch):
+    """Wrapping the whole template in double quotes keeps its inner single quotes."""
+    _no_cmd_env(monkeypatch)
+    template = "yt-dlp -o {title}'.%(ext)s' {url}"
+    _, args = parse_command(f':set commands.dl "{template}"')
+    app = _set_app(tmp_path)
+    YouTubeRangerApp.handle_set_command(app, args)
+    assert app.settings.commands["dl"] == template
+    assert yaml.safe_load((tmp_path / "config.yaml").read_text())["commands"]["dl"] == template
+
+
+def test_set_command_notes_env_shadow(tmp_path, monkeypatch):
+    _no_cmd_env(monkeypatch)
+    monkeypatch.setenv("YANGER_CMD_Dl", "env {url}")
+    app = _set_app(tmp_path)
+    YouTubeRangerApp.handle_set_command(app, ["commands.dl", "yt-dlp {url}"])
+    assert "shadowed this session by YANGER_CMD_Dl" in app.notes[-1][0]
+
+
+@pytest.mark.parametrize("args", [["commands.", "x {url}"], ["commands.dl", "   "]])
+def test_set_command_refuses_empty_name_or_template(tmp_path, args):
+    app = _set_app(tmp_path)
+    YouTubeRangerApp.handle_set_command(app, args)
+    assert app.notes[-1][1] is True
+    assert app.settings.commands == {} and not (tmp_path / "config.yaml").exists()
+
+
+def test_set_command_refuses_long_form_entry(tmp_path):
+    long_form = {"run": "rm {url}", "confirm": True}
+    app = _set_app(tmp_path, commands={"wipe": long_form})
+    YouTubeRangerApp.handle_set_command(app, ["commands.wipe", "echo {url}"])
+    msg, err = app.notes[-1]
+    assert err is True and "config.yaml" in msg
+    assert app.settings.commands["wipe"] == long_form and not (tmp_path / "config.yaml").exists()
+
+
+def test_set_command_persist_failure_reports(tmp_path, monkeypatch):
+    def _boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(appmod, "save_user_setting", _boom)
+    app = _set_app(tmp_path)
+    YouTubeRangerApp.handle_set_command(app, ["commands.dl", "yt-dlp {url}"])
+    msg, err = app.notes[-1]
+    assert err is True and "Set in memory, but failed to persist" in msg and "disk full" in msg
+    assert app.settings.commands["dl"] == "yt-dlp {url}"
 
 
 # ----- on_confirmation_result routing (confirm -> run) --------------------------

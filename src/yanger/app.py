@@ -36,7 +36,9 @@ from .core.transcript_command import (
     resolve_transcript_command,
     run_transcript_command,
 )
-from .core.custom_command import load_command_registry, run_command, resolve_commands, build_stdin
+from .core.custom_command import (
+    load_command_registry, run_command, resolve_commands, build_stdin, shadowing_env_var,
+)
 from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation, BulkEditOperation
 from .command_logger import CommandLogger
 from .export import PlaylistExporter
@@ -2186,11 +2188,17 @@ class YouTubeRangerApp(App):
     async def handle_run_command(self, args: List[str]) -> None:
         """`:run <name>` — run a configured custom command on the current/marked videos.
 
-        Resolves the registry (YAML ``commands:`` + ``YANGER_CMD_*``), operates on the marked
-        selection if any else the current video, and confirms before running on a large
-        selection. `:run` with no/unknown name surfaces the available command names.
+        Resolves the registry (YAML ``commands:`` + ``YANGER_CMD_*``, plus ``transcript`` from the
+        same resolver ``:transcript`` uses), operates on the marked selection if any else the
+        current video, and confirms before running on a large selection. `:run` with no/unknown
+        name surfaces the available command names.
         """
-        registry = load_command_registry(self.settings)
+        registry = load_command_registry(
+            self.settings,
+            transcript_template=resolve_transcript_command(
+                self.settings, runtime_override=self._transcript_command_override
+            ),
+        )
         if not registry:
             self._notify_status(
                 "No custom commands configured. Add a 'commands:' map to config.yaml "
@@ -2284,11 +2292,12 @@ class YouTubeRangerApp(App):
     def handle_set_command(self, args: List[str]) -> None:
         """Handle `:set <key> <value>` - update in-memory settings and persist.
 
-        Extensible by design; only transcript_command is wired today.
+        Wired keys: transcript_command, and commands.<name> (a bare-string custom command).
         """
         if len(args) < 2:
             self._notify_status(
-                'Usage: :set <key> <value>  e.g. :set transcript_command "summarize {url}"',
+                'Usage: :set <key> <value>  e.g. :set transcript_command "summarize {url}"'
+                '  or  :set commands.<name> "<template>"',
                 error=True,
             )
             return
@@ -2308,6 +2317,29 @@ class YouTubeRangerApp(App):
                 self._notify_status(f"Set in memory, but failed to persist: {e}", error=True)
                 return
             self._notify_status("Set transcript_command (persisted to user config)")
+        elif key.lower().startswith("commands."):
+            name = key[len("commands."):].strip().lower()
+            if not name or not value.strip():
+                self._notify_status('Usage: :set commands.<name> "<template>"', error=True)
+                return
+            if isinstance(self.settings.commands.get(name), dict):
+                # Overwriting would silently drop its mode/confirm/stdin keys.
+                self._notify_status(
+                    f"commands.{name} is a long-form entry; edit it in config.yaml", error=True
+                )
+                return
+            self.settings.commands[name] = value  # usable by :run at once
+            try:
+                save_user_setting(f"commands.{name}", value, self.config_dir)
+            except Exception as e:
+                logger.error(f"Failed to persist commands.{name}: {e}")
+                self._notify_status(f"Set in memory, but failed to persist: {e}", error=True)
+                return
+            # Echo the stored template: parse_command's shlex drops unprotected inner quotes.
+            msg = f"Set commands.{name} = {value} (persisted to user config)"
+            if env_key := shadowing_env_var(name):
+                msg += f" (shadowed this session by {env_key})"
+            self._notify_status(msg)
         else:
             self._notify_status(f"Unknown setting: {key}", error=True)
 

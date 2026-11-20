@@ -133,6 +133,7 @@ Press `:` for tab-completed commands:
 :transcript              # Run your transcript command on the current video
 :run <name>              # Run a configured custom command on current/marked videos
 :set <key> <value>       # Set & persist a config value (e.g. transcript_command)
+:set commands.<name> "<template>"   # Add/replace a per-video custom command, persisted
 ```
 
 ## ⚙️ Configuration
@@ -212,6 +213,14 @@ marks would end up in the filename. A video with no title refuses the whole run.
 with `{title}` but neither `{url}` nor `{id}` gets no URL appended, so add `{url}` yourself.
 `stdin: true` (unquoted; or `urls`, or `ids`) works with `mode: batch` only and pipes one URL/id
 per line; the command then reads a pipe, not the terminal. Both are TUI-only; the MCP tool refuses them.
+
+`:set commands.dl "yt-dlp -o {title}'.%(ext)s' {url}"` saves a bare-string command to your user
+config and makes it usable at once. Wrap the whole template in double quotes, or its inner quotes are
+lost (the status line echoes what was stored). Long-form entries are edited in `config.yaml` only.
+
+`:run transcript` runs your `transcript_command` (same precedence as `:transcript`) unless you define
+a `transcript` command yourself, which then wins for `:run`. Unlike `:transcript`, it acts on the
+marked videos, asks before a large selection, and fills in `{title}`. The MCP tool does not see it.
 
 ### Cache Behavior
 

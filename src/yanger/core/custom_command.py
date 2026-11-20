@@ -42,6 +42,10 @@ YOUTUBE_WATCH_URL = "https://www.youtube.com/watch?v={id}"
 # Env override convention, mirroring YANGER_TRANSCRIPT_COMMAND: YANGER_CMD_DL -> command "dl".
 ENV_PREFIX = "YANGER_CMD_"
 
+# H.6: the registry name under which the TUI offers `transcripts.transcript_command`
+# (`:run transcript`). An explicit `commands.transcript` / YANGER_CMD_TRANSCRIPT keeps it.
+TRANSCRIPT_COMMAND_NAME = "transcript"
+
 # Batch stdin payloads (CommandSpec.stdin).
 STDIN_URLS = "urls"
 STDIN_IDS = "ids"
@@ -245,13 +249,26 @@ def _parse_stdin(value) -> Optional[str]:
     return str(value).strip().lower()
 
 
-def load_command_registry(settings) -> Dict[str, CommandSpec]:
+def shadowing_env_var(name: str) -> Optional[str]:
+    """Return the ``YANGER_CMD_*`` env var that overrides registry command ``name``, if any."""
+    for env_key, value in os.environ.items():
+        if (env_key.startswith(ENV_PREFIX) and value.strip()
+                and env_key[len(ENV_PREFIX):].strip().lower() == name):
+            return env_key
+    return None
+
+
+def load_command_registry(
+    settings, *, transcript_template: Optional[str] = None
+) -> Dict[str, CommandSpec]:
     """Build the ``{name: CommandSpec}`` registry from settings + environment.
 
-    Sources, lowest→highest precedence: ``settings.commands`` (a ``{name: template}`` map
-    loaded from ``config.yaml``) then ``YANGER_CMD_<NAME>`` env vars. Names are normalized
-    to lowercase so ``:run DL``, YAML ``dl:``, and ``YANGER_CMD_DL`` all address the same
-    command. Blank/non-string templates are ignored.
+    Sources, lowest→highest precedence: ``transcript_template`` (H.6: the resolved
+    ``transcript_command``, offered as ``transcript`` only if no other source defines that
+    name), then ``settings.commands`` (a ``{name: template}`` map loaded from ``config.yaml``),
+    then ``YANGER_CMD_<NAME>`` env vars. Names are normalized to lowercase so ``:run DL``,
+    YAML ``dl:``, and ``YANGER_CMD_DL`` all address the same command. Blank/non-string
+    templates are ignored. The default (no ``transcript_template``) is what MCP uses.
     """
     registry: Dict[str, CommandSpec] = {}
 
@@ -287,5 +304,17 @@ def load_command_registry(settings) -> Dict[str, CommandSpec]:
             key = env_key[len(ENV_PREFIX):].strip().lower()
             if key:
                 registry[key] = CommandSpec(name=key, template=value)
+
+    if transcript_template:
+        # An explicit `transcript` entry wins (back-compat: its confirm gate is never dropped).
+        existing = registry.setdefault(
+            TRANSCRIPT_COMMAND_NAME,
+            CommandSpec(name=TRANSCRIPT_COMMAND_NAME, template=transcript_template),
+        )
+        if existing.template != transcript_template:
+            logger.warning(
+                f"custom command '{TRANSCRIPT_COMMAND_NAME}' ({existing.template!r}) overrides "
+                f"transcript_command ({transcript_template!r}) for :run; :transcript still runs the latter"
+            )
 
     return registry
