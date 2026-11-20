@@ -288,3 +288,63 @@ def test_sync_downloaded_part_imports_its_split_siblings(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Total videos processed: 2" in result.output
+
+
+def test_videos_csv_quoted_newline_survives():
+    # A quoted field may hold a newline; splitting the content into lines first broke it.
+    p = TakeoutParser()
+    p._load_video_metadata_content(
+        f'Video ID,Video Title (Original)\n{VALID},"line1\nline2"\n')
+    assert p.video_metadata[VALID]["title"] == "line1\nline2"
+
+
+def test_sync_downloaded_with_partial_sibling_refuses_import(monkeypatch, tmp_path):
+    # Fail closed: a part still downloading means the export is incomplete.
+    _sandbox_home(monkeypatch, tmp_path)
+    downloads = tmp_path / "dl"
+    downloads.mkdir()
+    p1 = _watch_later_zip(downloads / "takeout-20240101T000000Z-001.zip")
+    _fake_node(monkeypatch, {"status": "downloaded", "zipPath": str(p1)})
+
+    def node_then_part2_starts(cmd, **_kw):
+        (downloads / "takeout-20240101T000000Z-002.zip.crdownload").write_bytes(b"x")
+        return _Proc(json.dumps({"status": "downloaded", "zipPath": str(p1)}) + "\n")
+    monkeypatch.setattr(cli_mod.subprocess, "run", node_then_part2_starts)
+
+    result = CliRunner().invoke(cli, ["sync", "--download-dir", str(downloads)])
+
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "takeout-20240101T000000Z-002.zip.crdownload" in out
+    assert "yanger sync --resume" in out
+    assert "Import Complete" not in out
+
+
+def test_sync_downloaded_reports_part_count_and_resume_hint(monkeypatch, tmp_path):
+    _sandbox_home(monkeypatch, tmp_path)
+    downloads = tmp_path / "dl"
+    downloads.mkdir()
+    p1 = _watch_later_zip(downloads / "takeout-20240101T000000Z-001.zip")
+    _fake_node(monkeypatch, {"status": "downloaded", "zipPath": str(p1)})
+
+    result = CliRunner().invoke(cli, ["sync", "--download-dir", str(downloads)])
+
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "Importing 1 part(s)" in out
+    assert "yanger sync --resume" in out
+    assert "Import Complete" in out
+
+
+def test_sync_resume_partial_warns_it_blocks_the_wait(monkeypatch, tmp_path):
+    _sandbox_home(monkeypatch, tmp_path)
+    downloads = tmp_path / "dl"
+    downloads.mkdir()
+    (downloads / "old.zip.crdownload").write_bytes(b"stale")
+    _fake_node(monkeypatch, {"status": "timeout"})
+
+    result = CliRunner().invoke(cli, ["sync", "--resume", "--download-dir", str(downloads)])
+
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "blocks import and the download wait" in out

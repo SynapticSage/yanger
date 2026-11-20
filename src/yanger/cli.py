@@ -633,7 +633,7 @@ def sync(ctx, debug_port, profile_dir, download_dir, start_chrome,
         for partial in _partial_downloads(downloads):
             console.print(
                 f"[yellow]In progress or abandoned:[/yellow] {partial.name} "
-                f"— delete it if stale (it blocks import)"
+                f"— delete it if stale (it blocks import and the download wait)"
             )
         zips = _latest_export_zips(downloads)
         if zips:
@@ -689,9 +689,21 @@ def sync(ctx, debug_port, profile_dir, download_dir, start_chrome,
     if status == "downloaded":
         zip_path = result["zipPath"]
         console.print(f"\n[green]Downloaded:[/green] {zip_path}")
-        console.print("[cyan]Importing into yanger…[/cyan]\n")
-        # Import every finished part of a split export, not just the first to land.
+        # Fail closed: another part still downloading means the export is incomplete.
+        partials = _partial_downloads(downloads)
+        if partials:
+            console.print(
+                f"[yellow]Not importing: still downloading "
+                f"{', '.join(p.name for p in partials)}.[/yellow] When it finishes, run "
+                f"`yanger sync --resume`."
+            )
+            return
+        # Imports the parts already on disk; a part not yet started cannot be seen.
         parts = tuple(map(str, _export_parts(Path(zip_path))))
+        console.print(
+            f"[cyan]Importing {len(parts)} part(s) into yanger…[/cyan] If more parts "
+            f"download later, run `yanger sync --resume`.\n"
+        )
         ctx.invoke(takeout, paths=parts, merge=merge, verbose=verbose)
     elif status == "configured":
         console.print("\n[green]Export request submitted.[/green]")

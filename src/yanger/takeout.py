@@ -5,6 +5,7 @@ Extracts Watch Later and History data from Google Takeout exports.
 # Modified: 2025-08-14
 
 import csv
+import io
 import json
 import logging
 import re
@@ -192,8 +193,11 @@ class TakeoutParser:
                 history_parse = self._parse_watch_history_json_content
             if history_path in zf.namelist():
                 with zf.open(history_path) as f:
-                    content = f.read().decode('utf-8')
-                    videos = history_parse(content)
+                    try:
+                        videos = history_parse(f.read().decode('utf-8'))
+                    except UnicodeDecodeError as e:  # skip history, keep the playlists
+                        logger.error(f"Error reading watch history {history_path}: {e}")
+                        videos = []
                     if videos:
                         playlists['History (Imported)'] = TakeoutPlaylist(
                             name='History (Imported)',
@@ -425,7 +429,9 @@ class TakeoutParser:
             if not isinstance(record, dict):
                 continue
             url = record.get('titleUrl')  # optional: absent on searches and some posts
-            match = re.search(r'watch\?v=([a-zA-Z0-9_-]{11})', url) if isinstance(url, str) else None
+            # Right boundary: a malformed 12-char id is skipped, not truncated to 11.
+            match = (re.search(r'watch\?v=([a-zA-Z0-9_-]{11})(?![a-zA-Z0-9_-])', url)
+                     if isinstance(url, str) else None)
             if not match or not self._is_valid_video_id(match.group(1)):
                 continue
             video_id = match.group(1)
@@ -443,7 +449,7 @@ class TakeoutParser:
             
             # The "Watched " prefix is English-only; other locales keep their prefix in
             # the title. A removed video's title is its URL: leave None so
-            # `yanger fetch-metadata` (which selects empty titles) can still fill it.
+            # `yanger fetch-metadata` (which selects empty-title or never-fetched rows) can still fill it.
             title = record.get('title')
             if isinstance(title, str):
                 title = title.removeprefix('Watched ').strip()
@@ -482,7 +488,8 @@ class TakeoutParser:
     def _load_video_metadata_content(self, content: str) -> None:
         """Load video metadata from videos.csv content (the person's own uploads)."""
         try:
-            reader = csv.DictReader(content.splitlines())
+            # newline='' keeps a newline inside a quoted field; splitlines() would not.
+            reader = csv.DictReader(io.StringIO(content, newline=''))
             for row in reader:
                 video_id = row.get('Video ID', '')
                 if video_id:

@@ -156,3 +156,51 @@ def test_zip_flow_reads_json_history(tmp_path):
     vids = playlists["History (Imported)"].videos
     assert [v.video_id for v in vids] == [VID_A]
     assert _is_utc(vids[0].added_at)
+
+
+def test_twelve_char_watch_id_is_skipped_not_truncated():
+    # A malformed 12-char id must not become a different, valid-looking 11-char id.
+    assert _parse([_record(VID_B + "l", "2024-01-15T12:00:00Z")]) == []
+
+
+def test_undecodable_history_json_keeps_zip_playlists(tmp_path):
+    zpath = tmp_path / "t.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("Takeout/YouTube and YouTube Music/history/watch-history.json",
+                    b"[\xff\xfe]")
+        zf.writestr("Takeout/YouTube and YouTube Music/playlists/Foo-videos.csv",
+                    f"Video ID,Playlist Video Creation Timestamp\n{VID_A},\n")
+
+    playlists = TakeoutParser().process_path(zpath)
+
+    assert "History (Imported)" not in playlists
+    assert [v.video_id for v in playlists["Foo"].videos] == [VID_A]
+
+
+def test_cli_import_stores_watched_at_and_still_needs_metadata(monkeypatch, tmp_path):
+    # End to end: `yanger takeout` on a JSON-history zip keeps the watched-at time in the
+    # cache, and a titled-but-never-fetched row is still offered to fetch-metadata (which
+    # fills description / thumbnail / duration and replaces a locale-prefixed title).
+    from click.testing import CliRunner
+    from yanger.cache import PersistentCache
+    from yanger.cli import cli
+
+    monkeypatch.setenv("YANGER_CACHE_DIR", str(tmp_path / "cache"))
+    zpath = tmp_path / "takeout-20240101T000000Z-001.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("Takeout/YouTube and YouTube Music/history/watch-history.json",
+                    json.dumps([_record(VID_A, "2024-01-15T12:00:00.123Z",
+                                        title="Watched Real Title", channel="Ch")]))
+
+    result = CliRunner().invoke(cli, ["takeout", str(zpath)])
+    assert result.exit_code == 0, result.output
+
+    cache = PersistentCache()
+    [hist] = [p for p in cache.get_virtual_playlists() if p["title"] == "History (Imported)"]
+    [row] = cache.get_virtual_videos(hist["id"])
+    assert row["added_at"] == "2024-01-15T12:00:00.123000+00:00"
+    assert row["title"] == "Real Title"
+    assert VID_A in cache.get_virtual_videos_without_metadata()
+
+    cache.update_virtual_video_metadata(VID_A, {"title": "Real Title"})
+    assert VID_A not in cache.get_virtual_videos_without_metadata()
