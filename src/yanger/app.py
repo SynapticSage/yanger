@@ -36,7 +36,7 @@ from .core.transcript_command import (
     resolve_transcript_command,
     run_transcript_command,
 )
-from .core.custom_command import load_command_registry, run_command, resolve_commands
+from .core.custom_command import load_command_registry, run_command, resolve_commands, build_stdin
 from .operation_history import OperationStack, PasteOperation, CreatePlaylistOperation, RenameOperation, DeleteVideosOperation, BulkEditOperation
 from .command_logger import CommandLogger
 from .export import PlaylistExporter
@@ -2215,6 +2215,13 @@ class YouTubeRangerApp(App):
             self._notify_status("No video selected", error=True)
             return
 
+        # Refuse a doomed run (e.g. a video with no {title}) before asking the user to confirm it.
+        try:
+            resolve_commands(spec, videos, interactive=True)
+        except ValueError as e:
+            self._notify_status(f"Command '{name}': {e}", error=True)
+            return
+
         if spec.confirm or len(videos) > RUN_CONFIRM_THRESHOLD:
             # Confirm before running the user's shell: a `confirm: true` command always, or any
             # selection larger than the threshold (also guards a big batch against ARG_MAX).
@@ -2242,14 +2249,21 @@ class YouTubeRangerApp(App):
         suspend() wraps the WHOLE run (not each command) to avoid screen flicker. All injected
         url/id are shlex-quoted by build_command/build_batch_command.
         """
-        # resolve_commands owns the batch/per-video dispatch (shared with the MCP tool); the TUI
-        # ignores the per-run video_ids and just needs the flat command list to run + count.
-        cmds = [cmd for _ids, cmd in resolve_commands(spec, videos)]
+        # resolve_commands owns the batch/per-video dispatch (shared with the MCP tool).
+        # interactive=True enables the TUI-only {title} and stdin; a refusal (e.g. a video with
+        # no title) is reported here, before suspend(), so nothing runs.
+        try:
+            runs = resolve_commands(spec, videos, interactive=True)
+        except ValueError as e:
+            self._notify_status(f"Command '{spec.name}': {e}", error=True)
+            return
         exit_codes: List[int] = []
         try:
             with self.suspend():
-                for cmd in cmds:
-                    exit_codes.append(await asyncio.to_thread(run_command, cmd))
+                for ids, cmd in runs:
+                    exit_codes.append(
+                        await asyncio.to_thread(run_command, cmd, build_stdin(spec, ids))
+                    )
         except Exception as e:
             logger.error(f"Custom command '{spec.name}' failed: {e}")
             self._notify_status(f"Command '{spec.name}' error: {e}", error=True)
@@ -2264,7 +2278,7 @@ class YouTubeRangerApp(App):
         else:
             # Denominator is invocation count (batch = 1 run over N videos).
             self._notify_status(
-                f"'{spec.name}': {len(failures)} of {len(cmds)} run(s) exited non-zero", error=True
+                f"'{spec.name}': {len(failures)} of {len(runs)} run(s) exited non-zero", error=True
             )
 
     def handle_set_command(self, args: List[str]) -> None:

@@ -6,8 +6,12 @@ the fact that core/transcript_command now delegates to this module (single imple
 The TUI `:run` wiring is a separate slice.
 """
 
+import json
+import re
+import shlex
 from types import SimpleNamespace
 
+import mcp.types as t
 import pytest
 import yaml
 
@@ -18,11 +22,14 @@ from yanger.core.custom_command import (
     run_command,
     resolve_commands,
     load_command_registry,
+    build_stdin,
+    run_command_capture,
+    safe_title,
     CommandSpec,
     MODE_PER_VIDEO,
     MODE_BATCH,
 )
-from yanger.config.settings import Settings, save_settings
+from yanger.config.settings import Settings, MCPSettings, save_settings
 
 
 def _video(vid="dQw4w9WgXcQ"):
@@ -183,3 +190,204 @@ def test_resolve_commands_batch_single_pair_over_all():
     ids, cmd = runs[0]
     assert ids == ["aaa", "bbb"]
     assert "aaa" in cmd and "bbb" in cmd
+
+
+# ===== H.7 (batch stdin) + H.8 ({title}) ===========================================
+# {title} is uploader-controlled, so it is SANITIZED (letters/marks/digits + `_ .,-` and space,
+# no word-leading `-`) and then shlex-quoted. Both features are TUI-only: resolve_commands
+# refuses them unless the caller passes interactive=True (the MCP tool never does).
+
+VID = "dQw4w9WgXcQ"
+
+
+def _tvideo(title, vid=VID):
+    return SimpleNamespace(id=vid, title=title)
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("Rick Astley - Never Gonna (Official) [4K]", "Rick Astley _ Never Gonna _Official_ _4K_"),
+    ("東京の夜 ナイト", "東京の夜 ナイト"),
+    ("हिन्दी गाना", "हिन्दी गाना"),          # Devanagari incl. combining marks (category M)
+    ("-rf", "_rf"),
+    ("a --exec=x", "a _-exec_x"),
+    ("$(x)", "__x_"),
+    ("`x`", "_x_"),
+    ("a'b\"c", "a_b_c"),
+    ("a\nb\tc", "a_b_c"),
+    ("v1.2, final", "v1.2, final"),
+])
+def test_safe_title_table(raw, expected):
+    assert safe_title(raw) == expected
+
+
+def test_safe_title_ascii_output_is_only_the_allowlist():
+    out = safe_title("".join(chr(c) for c in range(128)))
+    assert set(out) <= set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ .,-")
+    assert not re.search(r"(^|\s)-", out)
+
+
+HOSTILE_TITLES = [
+    "$(touch PWNED)",
+    "`touch PWNED`",
+    '"; touch PWNED; "',
+    "'; touch PWNED; '",
+    "a\ntouch PWNED",
+    "x --exec=touch PWNED",
+    "${IFS}touch${IFS}PWNED",
+    "a|touch PWNED",
+    "a&&touch PWNED",
+]
+TITLE_TEMPLATES = [
+    "printf %s {title}",
+    'printf %s "{title}"',
+    "printf %s '{title}'",
+    'printf %s "x{title}y"',
+    'sh -c "printf %s {title}"',
+    "sh -c 'printf %s {title}'",
+    "eval printf %s {title}",
+    "printf '%s\\n' {title} | xargs printf %s",
+]
+
+
+@pytest.mark.parametrize("template", TITLE_TEMPLATES)
+@pytest.mark.parametrize("title", HOSTILE_TITLES)
+def test_title_injection_proof_real_shell(tmp_path, monkeypatch, template, title):
+    """H.8 acceptance: no hostile title executes, in ANY quote context, under a real /bin/sh."""
+    monkeypatch.chdir(tmp_path)
+    spec = CommandSpec(name="t", template=template)
+    [(_ids, cmd)] = resolve_commands(spec, [_tvideo(title)], interactive=True)
+    assert not re.search(r"(^|\s)-", safe_title(title))   # no option injection either
+    run_command_capture(cmd, timeout=10)
+    assert not (tmp_path / "PWNED").exists(), cmd
+
+
+def test_title_injection_control_shlex_quote_alone_is_bypassable(tmp_path, monkeypatch):
+    """CONTROL: proves the harness detects injection, and why shlex.quote alone is not enough."""
+    monkeypatch.chdir(tmp_path)
+    run_command_capture('printf %s "' + shlex.quote("$(touch PWNED)") + '"', timeout=10)
+    assert (tmp_path / "PWNED").exists()
+
+
+def test_title_only_template_does_not_append_url():
+    [(_ids, cmd)] = resolve_commands(
+        CommandSpec(name="t", template="echo {title}"), [_tvideo("My Video")], interactive=True)
+    assert cmd == "echo 'My Video'"
+
+
+def test_build_command_without_allow_title_leaves_title_literal():
+    # :transcript back-compat: byte-for-byte the old behaviour.
+    cmd = build_command("echo {title}", _tvideo("My Video", vid="abc123"))
+    assert cmd == "echo {title} 'https://www.youtube.com/watch?v=abc123'"
+
+
+@pytest.mark.parametrize("spec", [
+    CommandSpec(name="t", template="echo {title}"),
+    CommandSpec(name="s", template="cat", mode=MODE_BATCH, stdin="urls"),
+])
+def test_non_interactive_resolve_refuses_title_and_stdin(spec):
+    """The MCP call shape: default interactive=False, SimpleNamespace(id=...) stand-ins."""
+    with pytest.raises(ValueError, match="TUI-only"):
+        resolve_commands(spec, [SimpleNamespace(id=VID)])
+
+
+@pytest.mark.parametrize("video", [_tvideo(""), _tvideo("   "), SimpleNamespace(id=VID)])
+def test_interactive_title_refuses_missing_or_empty_title(video):
+    with pytest.raises(ValueError, match=VID):
+        resolve_commands(CommandSpec(name="t", template="echo {title}"), [video], interactive=True)
+
+
+def test_interactive_empty_title_refuses_whole_run():
+    spec = CommandSpec(name="t", template="echo {title}")
+    with pytest.raises(ValueError, match="bbbbbbbbbbb"):
+        resolve_commands(spec, [_tvideo("ok"), _tvideo("", vid="bbbbbbbbbbb")], interactive=True)
+
+
+def test_interactive_batch_with_title_refused():
+    spec = CommandSpec(name="t", template="echo {title}", mode=MODE_BATCH)
+    with pytest.raises(ValueError, match="batch"):
+        resolve_commands(spec, [_tvideo("x")], interactive=True)
+
+
+def test_interactive_per_video_stdin_refused():
+    spec = CommandSpec(name="t", template="cat", stdin="urls")
+    with pytest.raises(ValueError, match="batch"):
+        resolve_commands(spec, [_tvideo("x")], interactive=True)
+
+
+def test_interactive_unknown_stdin_value_refused():
+    spec = CommandSpec(name="t", template="cat", mode=MODE_BATCH, stdin="bogus")
+    with pytest.raises(ValueError, match="bogus"):
+        resolve_commands(spec, [_tvideo("x")], interactive=True)
+
+
+@pytest.mark.parametrize("value, expected", [
+    (True, "urls"), ("urls", "urls"), ("URLs", "urls"), ("ids", "ids"),
+    (False, None), (None, None), ("bogus", "bogus"),
+])
+def test_registry_parses_stdin(value, expected):
+    reg = load_command_registry(SimpleNamespace(commands={
+        "x": {"run": "cat", "mode": "batch", "stdin": value}}))
+    assert reg["x"].stdin == expected   # an unknown value is KEPT and refused at :run time
+
+
+def test_registry_stdin_missing_bare_and_env_are_none(monkeypatch):
+    monkeypatch.setenv("YANGER_CMD_ENVX", "cat")
+    reg = load_command_registry(SimpleNamespace(commands={
+        "bare": "cat", "long": {"run": "cat", "mode": "batch"}}))
+    assert reg["bare"].stdin is None and reg["long"].stdin is None and reg["envx"].stdin is None
+
+
+def test_batch_stdin_does_not_append_urls():
+    spec = CommandSpec(name="s", template="xargs -n1 echo", mode=MODE_BATCH, stdin="urls")
+    [(ids, cmd)] = resolve_commands(spec, [_tvideo("x", "a"), _tvideo("y", "b")], interactive=True)
+    assert cmd == "xargs -n1 echo" and ids == ["a", "b"]
+
+
+def test_build_stdin_payloads():
+    urls = CommandSpec(name="s", template="cat", mode=MODE_BATCH, stdin="urls")
+    ids = CommandSpec(name="s", template="cat", mode=MODE_BATCH, stdin="ids")
+    assert build_stdin(urls, ["a", "b"]) == (
+        "https://www.youtube.com/watch?v=a\nhttps://www.youtube.com/watch?v=b\n")
+    assert build_stdin(ids, ["a", "b"]) == "a\nb\n"
+    assert build_stdin(CommandSpec(name="n", template="cat"), ["a"]) is None
+
+
+def test_run_command_with_stdin_passes_input_text(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(custom_command.subprocess, "run",
+                        lambda cmd, **k: seen.update(k) or SimpleNamespace(returncode=0))
+    run_command("cat", stdin="a\n")
+    assert seen == {"shell": True, "input": "a\n", "text": True}
+
+
+def test_run_command_stdin_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert run_command("cat > out", stdin="a\nb\n") == 0
+    assert (tmp_path / "out").read_text() == "a\nb\n"
+
+
+def test_settings_roundtrips_stdin_key(tmp_path):
+    s = Settings.from_dict({"commands": {"s": {"run": "cat", "mode": "batch", "stdin": True}}})
+    save_settings(s, config_dir=tmp_path)
+    written = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert written["commands"]["s"]["stdin"] is True
+    assert load_command_registry(Settings.from_dict(written))["s"].stdin == "urls"
+
+
+@pytest.mark.parametrize("command", ["t", "s"])
+async def test_mcp_tool_refuses_title_and_stdin_commands(tmp_path, monkeypatch, command):
+    """MCP non-exposure guard, driven only through the public call_tool handler: a {title} or
+    stdin command is refused and NOTHING runs (each template would `touch RAN` first)."""
+    from yanger.mcp_server import YangerMCPServer
+    monkeypatch.chdir(tmp_path)
+    s = YangerMCPServer()
+    s._settings = Settings(mcp=MCPSettings(allow_custom_commands=True), commands={
+        "t": "touch RAN; echo {title}",
+        "s": {"run": "touch RAN; cat", "mode": "batch", "stdin": True},
+    })
+    handler = s.server.request_handlers[t.CallToolRequest]
+    res = await handler(t.CallToolRequest(method="tools/call", params=t.CallToolRequestParams(
+        name="run_custom_command", arguments={"command": command, "video_ids": [VID]})))
+    payload = json.loads(res.root.content[0].text)
+    assert payload["error"] == "ValueError" and "TUI-only" in payload["message"]
+    assert not (tmp_path / "RAN").exists()

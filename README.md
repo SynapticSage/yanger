@@ -131,6 +131,7 @@ Press `:` for tab-completed commands:
 :stats                   # Playlist statistics
 :bulkedit [--dry-run]    # Bulk edit in external editor
 :transcript              # Run your transcript command on the current video
+:run <name>              # Run a configured custom command on current/marked videos
 :set <key> <value>       # Set & persist a config value (e.g. transcript_command)
 ```
 
@@ -193,6 +194,22 @@ yeet {url}
 yt-dlp --write-auto-subs --skip-download --sub-langs en {url}
 yeet {url} | fabric -sp summarize      # transcript -> LLM with any prompt
 ```
+
+### Custom commands
+
+`:run <name>` runs a named command from `commands:` on the marked videos (else the current one):
+
+```yaml
+commands:
+  dl: "yt-dlp -o {title}'.%(ext)s' {url}"                    # per-video; {title} goes UNQUOTED
+  dlall: { run: "xargs -n1 yt-dlp", mode: batch, stdin: true }  # one run, URLs on stdin
+```
+
+`{title}` is sanitized (letters, digits, space and `_ . , -` are kept, everything else becomes
+`_`, and no word starts with `-`), then shell-quoted, so write it unquoted: inside `"..."` the
+quote marks would end up in the filename. A video with no title refuses the whole run.
+`stdin: true` (or `urls`, or `ids`) works with `mode: batch` only and pipes one URL/id per line;
+the command then reads a pipe, not the terminal. Both are TUI-only; the MCP tool refuses them.
 
 ### Cache Behavior
 

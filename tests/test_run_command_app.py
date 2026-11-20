@@ -116,7 +116,7 @@ def _runner_app(exit_codes):
 
 
 async def test_run_custom_command_all_success(monkeypatch):
-    monkeypatch.setattr(appmod, "run_command", lambda cmd: 0)
+    monkeypatch.setattr(appmod, "run_command", lambda cmd, stdin=None: 0)
     app = _runner_app([0, 0])
     spec = CommandSpec(name="dl", template="yt-dlp {url}")
     await YouTubeRangerApp.run_custom_command(app, spec, [_video("a"), _video("b")])
@@ -124,7 +124,7 @@ async def test_run_custom_command_all_success(monkeypatch):
 
 
 async def test_run_custom_command_reports_failures(monkeypatch):
-    monkeypatch.setattr(appmod, "run_command", lambda cmd: 1)
+    monkeypatch.setattr(appmod, "run_command", lambda cmd, stdin=None: 1)
     app = _runner_app([1])
     spec = CommandSpec(name="dl", template="yt-dlp {url}")
     await YouTubeRangerApp.run_custom_command(app, spec, [_video("a")])
@@ -134,7 +134,7 @@ async def test_run_custom_command_reports_failures(monkeypatch):
 async def test_run_custom_command_batch_is_single_invocation(monkeypatch):
     """slice 2: a batch command runs ONCE over the whole selection (not per-video)."""
     seen = []
-    monkeypatch.setattr(appmod, "run_command", lambda cmd: seen.append(cmd) or 0)
+    monkeypatch.setattr(appmod, "run_command", lambda cmd, stdin=None: seen.append(cmd) or 0)
     app = _runner_app([0])
     spec = CommandSpec(name="dlall", template="yt-dlp {urls}", mode=MODE_BATCH)
     await YouTubeRangerApp.run_custom_command(app, spec, [_video("a"), _video("b")])
@@ -144,11 +144,57 @@ async def test_run_custom_command_batch_is_single_invocation(monkeypatch):
 
 async def test_run_custom_command_builds_quoted_command(monkeypatch):
     seen = []
-    monkeypatch.setattr(appmod, "run_command", lambda cmd: seen.append(cmd) or 0)
+    monkeypatch.setattr(appmod, "run_command", lambda cmd, stdin=None: seen.append(cmd) or 0)
     app = _runner_app([0])
     spec = CommandSpec(name="dl", template="yt-dlp {url}")
     await YouTubeRangerApp.run_custom_command(app, spec, [_video("abc123")])
     assert "https://www.youtube.com/watch?v=abc123" in seen[0]
+
+
+# ----- H.7 batch stdin + H.8 {title} -------------------------------------------
+
+def _titled(vid, title):
+    return SimpleNamespace(id=vid, title=title)
+
+
+async def test_batch_stdin_run_receives_newline_joined_urls(monkeypatch):
+    seen = []
+    monkeypatch.setattr(appmod, "run_command", lambda cmd, stdin=None: seen.append((cmd, stdin)) or 0)
+    app = _runner_app([0])
+    spec = CommandSpec(name="s", template="cat", mode=MODE_BATCH, stdin="urls")
+    await YouTubeRangerApp.run_custom_command(app, spec, [_video("a"), _video("b")])
+    assert seen == [("cat", "https://www.youtube.com/watch?v=a\nhttps://www.youtube.com/watch?v=b\n")]
+
+
+async def test_per_video_title_run_quotes_sanitized_title(monkeypatch):
+    seen = []
+    monkeypatch.setattr(appmod, "run_command", lambda cmd, stdin=None: seen.append((cmd, stdin)) or 0)
+    app = _runner_app([0])
+    spec = CommandSpec(name="t", template="echo {title}")
+    await YouTubeRangerApp.run_custom_command(app, spec, [_titled("a", "My Video")])
+    assert seen == [("echo 'My Video'", None)]
+
+
+async def test_empty_title_refuses_before_suspend(monkeypatch):
+    seen = []
+    monkeypatch.setattr(appmod, "run_command", lambda cmd, stdin=None: seen.append(cmd) or 0)
+    app = _runner_app([0])
+    entered = []
+    app.suspend = lambda: entered.append(True) or contextlib.nullcontext()
+    spec = CommandSpec(name="t", template="echo {title}")
+    await YouTubeRangerApp.run_custom_command(app, spec, [_titled("ok", "x"), _titled("empty123", "")])
+    assert seen == [] and entered == []
+    msg, err = app.notes[-1]
+    assert err is True and "empty123" in msg and "'t'" in msg
+
+
+async def test_title_refusal_surfaces_before_confirm_modal():
+    """Plan finding 2: a doomed run is refused BEFORE the user is asked to confirm it."""
+    app = _fake_app(commands={"t": {"run": "echo {title}", "confirm": True}},
+                    selection=[_titled("empty123", "")])
+    await YouTubeRangerApp.handle_run_command(app, ["t"])
+    assert app.pushed == [] and app.ran == []
+    assert "empty123" in app.notes[-1][0] and app.notes[-1][1] is True
 
 
 # ----- on_confirmation_result routing (confirm -> run) --------------------------
