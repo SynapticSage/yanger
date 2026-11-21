@@ -346,7 +346,10 @@ def save_user_setting(key: str, value: Any, config_dir: Optional[Path] = None) -
 
     Used by the runtime `:set` command so a one-off tweak doesn't rewrite every
     default. Known keys (e.g. transcript_command) are stored under their section
-    so they load back correctly.
+    so they load back correctly. ``commands.<name>`` stores a bare-string template in
+    the ``commands:`` map; a long-form (mapping) entry is refused, never overwritten.
+
+    Raises (and leaves the file untouched) when the existing config cannot be parsed.
     """
     if config_dir is None:
         config_dir = Path.home() / ".config" / "yanger"
@@ -355,15 +358,28 @@ def save_user_setting(key: str, value: Any, config_dir: Optional[Path] = None) -
 
     data: Dict[str, Any] = {}
     if config_path.exists():
-        try:
-            with open(config_path) as f:
-                data = yaml.safe_load(f) or {}
-        except Exception as e:
-            logger.warning(f"Could not read user config for update: {e}")
-            data = {}
+        # A parse error propagates: rewriting a config we could not read would drop every key.
+        with open(config_path) as f:
+            data = yaml.safe_load(f) or {}
 
     section = _USER_SETTING_SECTIONS.get(key)
-    if section:
+    if key.startswith("commands."):
+        name = key[len("commands."):].strip().lower()
+        if not name:
+            raise ValueError("commands.<name>: the command name is empty")
+        commands = data.get("commands")  # optional section; YAML `commands:` alone is None
+        if commands is None:
+            commands = data["commands"] = {}
+        elif not isinstance(commands, dict):
+            raise ValueError("config.yaml 'commands:' is not a mapping; fix it by hand")
+        # from_dict lowercases names, so drop case variants (`DL:`) rather than leave duplicates.
+        variants = [k for k in commands if str(k).strip().lower() == name]
+        if any(isinstance(commands[k], dict) for k in variants):
+            raise ValueError(f"commands.{name} is a long-form entry; edit it in config.yaml")
+        for k in variants:
+            del commands[k]
+        commands[name] = value
+    elif section:
         data.setdefault(section, {})[key] = value
     else:
         data[key] = value

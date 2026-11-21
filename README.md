@@ -117,6 +117,21 @@ yanger  # Will authenticate on first run
 | `Ctrl+R` | Refresh current view |
 | `gR` | Refresh all (clear cache) |
 
+### Customizing keys
+
+Put overrides in `~/.config/yanger/keybindings.yaml`. [`config/keybindings.yaml`](config/keybindings.yaml) lists every action id and its default keys. Each entry is `action_id: "keys"` or a list of alternatives. Separate the keys of a sequence with spaces:
+
+```yaml
+new_playlist: "x"            # was g n
+move_down: ["j", "ctrl+n"]   # was j / down
+quit: "Q"                    # a single-key Textual binding (also help, command_mode, search, ...)
+```
+
+- A listed action's keys **replace** its defaults. You cannot unbind an action.
+- Startup never fails on a bad entry. yanger shows a warning and that action keeps its defaults. Bad entries include an unknown action or key (such as `"dd"` for `"d d"`), a reserved key (`tab`, `ctrl+c`, `ctrl+p`, `ctrl+q`), a key most terminals send as another key (`ctrl+i` is tab, `ctrl+m` is enter, `ctrl+h` is backspace), or two actions on the same keys.
+- You cannot change the sort-menu keys after `o`, the keys inside dialogs, or the help screen's keys. If you move navigation off the arrow keys, the arrows still scroll the column without moving the selection.
+- yanger does not read the `keybindings:` section of `config.yaml`.
+
 ## 💬 Command Mode
 
 Press `:` for tab-completed commands:
@@ -131,7 +146,9 @@ Press `:` for tab-completed commands:
 :stats                   # Playlist statistics
 :bulkedit [--dry-run]    # Bulk edit in external editor
 :transcript              # Run your transcript command on the current video
+:run <name>              # Run a configured custom command on current/marked videos
 :set <key> <value>       # Set & persist a config value (e.g. transcript_command)
+:set commands.<name> "<template>"   # Add/replace a per-video custom command, persisted
 ```
 
 ## ⚙️ Configuration
@@ -193,6 +210,32 @@ yeet {url}
 yt-dlp --write-auto-subs --skip-download --sub-langs en {url}
 yeet {url} | fabric -sp summarize      # transcript -> LLM with any prompt
 ```
+
+### Custom commands
+
+`:run <name>` runs a named command from `commands:` on the marked videos (else the current one):
+
+```yaml
+commands:
+  dl: "yt-dlp -o {title}'.%(ext)s' {url}"                    # per-video; {title} goes UNQUOTED
+  dlall: { run: "xargs -n1 yt-dlp", mode: batch, stdin: true }  # one run, URLs on stdin
+```
+
+`{title}` is sanitized to one word (letters, digits and `_ . , -` are kept, everything else,
+spaces included, becomes `_`; it never starts with `-` and is never `.`/`..`), then shell-quoted,
+so write it unquoted, as an argument and never as the command itself: inside `"..."` the quote
+marks would end up in the filename. A video with no title refuses the whole run. A template
+with `{title}` but neither `{url}` nor `{id}` gets no URL appended, so add `{url}` yourself.
+`stdin: true` (unquoted; or `urls`, or `ids`) works with `mode: batch` only and pipes one URL/id
+per line; the command then reads a pipe, not the terminal. Both are TUI-only; the MCP tool refuses them.
+
+`:set commands.dl "yt-dlp -o {title}'.%(ext)s' {url}"` saves a bare-string command to your user
+config and makes it usable at once. Wrap the whole template in double quotes, or its inner quotes are
+lost (the status line echoes what was stored). Long-form entries are edited in `config.yaml` only.
+
+`:run transcript` runs your `transcript_command` (same precedence as `:transcript`) unless you define
+a `transcript` command yourself, which then wins for `:run`. Unlike `:transcript`, it acts on the
+marked videos, asks before a large selection, and fills in `{title}`. The MCP tool does not see it.
 
 ### Cache Behavior
 

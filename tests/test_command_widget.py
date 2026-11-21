@@ -419,6 +419,111 @@ def test_execute_bulkedit_collects_via_real_cache_methods(monkeypatch):
     assert seen["videos_by_playlist"] == {"p1": [cached_video]}
 
 
+# ---------------------------------------------------------------------------
+# H.10: Tab-completion of custom command NAMES after `:run ` (verb completion predates it).
+# Drives the real app's command input headless; asserts the Input's computed suggestion
+# (the private `_suggestion` reactive the Tab handler reads), not only the final value.
+# ---------------------------------------------------------------------------
+import os
+
+import pytest_asyncio
+
+from yanger.ui.command_input import CommandSuggester
+
+
+@pytest_asyncio.fixture
+async def run_pilot(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))  # no real config.yaml -> registry is env-only
+    for key in list(os.environ):
+        if key.startswith("YANGER_CMD_") or key == "YANGER_TRANSCRIPT_COMMAND":
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("YANGER_CMD_DL", "echo {url}")
+    monkeypatch.setenv("YANGER_CMD_ARCHIVE", "echo {id}")
+
+    async def _offline(self):
+        self.offline_mode = True
+        self.api_client = None
+
+    monkeypatch.setattr(YouTubeRangerApp, "setup_authentication", _offline)
+    app = YouTubeRangerApp()
+    async with app.run_test() as pilot:
+        yield app, pilot
+
+
+async def _type_command(app, pilot, *keys):
+    app.action_command_mode()
+    await pilot.pause()
+    await pilot.press(*keys)
+    await pilot.pause()
+    await pilot.pause()  # the suggester runs in a worker; let SuggestionReady land
+    return app.query_one("#command-input").input_widget
+
+
+async def test_run_tab_completes_registry_command_name(run_pilot):
+    app, pilot = run_pilot
+    field = await _type_command(app, pilot, "r", "u", "n", "space", "d")
+    assert field.value == ":run d"
+    assert field._suggestion == ":run dl"
+    await pilot.press("tab")
+    await pilot.pause()
+    assert field.value == ":run dl"
+    assert field.cursor_position == len(":run dl")
+
+
+async def test_run_completion_sees_commands_added_at_runtime(run_pilot):
+    """`:set commands.<name>` adds a command mid-session: a cached 'no match' must not hide it."""
+    app, pilot = run_pilot
+    field = await _type_command(app, pilot, "r", "u", "n", "space", "x")
+    # Ask the widget's suggester directly: `_suggestion == ""` would also hold before the
+    # worker finished (Input resets it synchronously on every value change).
+    assert await field.suggester.get_suggestion(":run x") is None  # nothing named x* yet
+    app.command_input.hide()
+    app.handle_set_command(["commands.xfer", "echo {url}"])  # the real `:set` path (HOME=tmp)
+    assert app.settings.commands["xfer"] == "echo {url}"
+    field = await _type_command(app, pilot, "r", "u", "n", "space", "x")
+    assert field._suggestion == ":run xfer"
+
+
+async def test_run_completion_survives_a_broken_registry(run_pilot):
+    """A registry that cannot be built (here: a non-string YAML transcript_command) must give
+    no completion, not raise in the suggester worker and exit the app on a keystroke."""
+    app, pilot = run_pilot
+    app.settings.transcripts.transcript_command = 5  # e.g. `transcript_command: 5` in YAML
+    field = await _type_command(app, pilot, "r", "u", "n", "space", "d")
+    assert app.is_running
+    assert field.value == ":run d"
+    assert await field.suggester.get_suggestion(":run d") is None
+
+
+async def test_reopened_command_mode_types_after_the_colon(run_pilot):
+    """Regression: hide() cleared the value leaving the cursor at 0, so on the NEXT `:` the
+    typed text landed before the pre-filled ':' ('dl:') and the submission was dropped."""
+    app, pilot = run_pilot
+    for _ in range(2):
+        await pilot.press("colon")
+        await pilot.pause()
+        await pilot.press("d", "l")
+        await pilot.pause()
+        field = app.query_one("#command-input").input_widget
+        assert field.value == ":dl"
+        await pilot.press("escape")
+        await pilot.pause()
+
+
+async def test_run_name_suggestions_only_for_the_name_token():
+    names = lambda: ["dl", "dlx", "archive"]
+    s = CommandSuggester(run_names=names)
+    assert await s.get_suggestion(":run d") == ":run dl"     # sorted: first prefix match
+    assert await s.get_suggestion(":run dlx") is None        # exact name: nothing to add
+    assert await s.get_suggestion(":run dl ") is None        # past the name: no completion
+    assert await s.get_suggestion(":run d x") is None
+    assert await s.get_suggestion(":run ") is None           # empty prefix: no arbitrary pick
+    assert await s.get_suggestion(":run q") is None
+    # verb completion is unchanged, with or without a names provider
+    assert await s.get_suggestion(":tran") == ":transcript"
+    assert await CommandSuggester().get_suggestion(":run d") is None
+
+
 if __name__ == "__main__":
     app = CommandTestApp()
     app.run()
