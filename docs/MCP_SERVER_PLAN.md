@@ -47,10 +47,17 @@ The MCP server has been implemented and is ready for use.
 - [x] `check_quota` - Check remaining API quota
 - [x] `get_statistics` - Get playlist/video statistics
 
-### Phase 4: Resources (Future Enhancement)
+### Phase 4: Resources + Prompts - COMPLETE
 
-- [ ] Expose playlists as MCP resources
-- [ ] Expose cached transcripts as resources
+A *resource* is data the client can browse or attach (`resources/list`, `resources/read`); a
+*prompt* is a template the client's user picks (`prompts/list`, `prompts/get`). Both are
+**cache-only**: no resource read or prompt fetch authenticates, spends YouTube API quota, or
+fetches a transcript. What is not cached says so and names the tool that fetches it.
+
+- [x] Expose playlists as MCP resources
+- [x] Expose cached transcripts as resources
+- [x] Expose saved custom commands as a resource (only with `mcp.allow_custom_commands`)
+- [x] Expose Fabric patterns as MCP prompts
 
 ## Architecture
 
@@ -180,6 +187,25 @@ This will open a browser for OAuth2 authentication.
 | `fabric_analyze` | Apply Fabric pattern to video transcript | `video_id`, `pattern` (required), `model` |
 | `list_fabric_patterns` | List available Fabric patterns | none |
 
+## Resources
+
+| URI | Type | Content |
+|-----|------|---------|
+| `yanger://playlists` | JSON | All playlists as last cached, plus virtual ones (`id: virtual_<id>`). `cached: false` with a note naming `list_playlists` when the list is not cached or expired |
+| `yanger://playlists/{playlist_id}` | JSON | Every cached video of one playlist (no limit). `cached: false` with a note naming `list_videos` when not cached |
+| `yanger://transcripts` | JSON | Index of cached transcripts (`video_id`, `language`, `fetched_at`, `uri`), newest first, capped at 1000 (`truncated`) |
+| `yanger://transcripts/{video_id}` | text | One cached transcript, capped at 20000 chars (the `get_transcript` tool's `max_chars` returns more). Not cached: an error naming `get_transcript` |
+| `yanger://commands` | JSON | Only when `mcp.allow_custom_commands` is on: each custom command's `name`, `mode`, `confirm`. Templates are not shown (they may hold secrets) |
+
+The two `{...}` URIs are also advertised as resource templates.
+
+## Prompts
+
+Every Fabric pattern in `~/.config/fabric/patterns/<name>/` with a non-empty `system.md` is a
+prompt named `<name>`. `prompts/get` returns one user message holding the pattern prompt. The
+optional `video_id` argument appends that video's **cached** transcript in full (as
+`fabric_analyze` sends it); an uncached video is an error naming `get_transcript`.
+
 ## Example Usage with Claude
 
 ```
@@ -220,7 +246,7 @@ pytest tests/
 
 ## Future Enhancements
 
-1. **MCP Resources**: Expose playlists/transcripts as browsable resources
+1. ~~**MCP Resources**: Expose playlists/transcripts as browsable resources~~ (done: Phase 4)
 2. **Batch Operations**: Add bulk add/remove tools
 3. **Playlist Sync**: Tool to sync between playlists
 4. **Smart Search**: Search within transcript content

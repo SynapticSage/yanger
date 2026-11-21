@@ -442,13 +442,29 @@ async def connect_yanger():
 | `add_video` / `remove_video` | Add or remove videos |
 | `move_video` | Move video between playlists |
 | `copy_videos` | Copy videos to another playlist |
+| `undo` / `redo` | Undo or redo this MCP session's create/rename playlist and add/remove/move/copy changes (asks you first) |
 | `search_videos` | Search across all playlists |
 | `get_transcript` | Fetch video transcript |
 | `search_transcripts` | Search within transcripts |
 | `find_duplicates` | Find duplicate videos |
 | `analyze_playlist` | Get playlist statistics |
-| `fabric_analyze` | Analyze video with Fabric AI patterns |
+| `fabric_analyze` | Analyze video with Fabric patterns (the client's model via MCP sampling, or local Fabric) |
 | `check_quota` | Check API quota usage |
+
+**Resources and prompts**: clients that browse MCP resources see `yanger://playlists`,
+`yanger://playlists/{id}`, `yanger://transcripts` and `yanger://transcripts/{video_id}`, and each
+Fabric pattern appears as a prompt (optional `video_id` appends its cached transcript). They read
+the local cache only: no quota, no sign-in, no network; what is not cached names the tool that
+fetches it. With `mcp.allow_custom_commands` on, `yanger://commands` also lists your command
+names (not their templates). See `docs/MCP_SERVER_PLAN.md`.
+
+**Confirmations (MCP elicitation)**: when the MCP client supports elicitation (it can show you a
+confirm form), `delete_playlist` and `remove_video` ask you to approve first, and custom commands
+marked `confirm: true` are offered to the model and run only after you approve the exact command
+lines. Only an explicit approval with the box ticked proceeds; no answer within 5 minutes refuses. Clients without elicitation behave
+as before: no prompt for delete/remove, and `confirm: true` commands stay hidden and refused. `undo`/`redo` always
+need an elicitation confirm and are refused without one; their history lives in the MCP server's
+memory for that session only and is not shared with the TUI's `u`/`U`.
 
 **Example Prompts**:
 ```
@@ -461,7 +477,13 @@ async def connect_yanger():
 
 **Fabric Integration**:
 
-If [Fabric](https://github.com/danielmiessler/fabric) is installed, yanger can analyze video transcripts with AI patterns:
+`fabric_analyze` and `fabric_analyze_batch` run a [Fabric](https://github.com/danielmiessler/fabric)
+pattern over video transcripts. When the MCP client supports sampling (it lets the server use the
+client's own model), the client's model runs the pattern prompt from
+`~/.config/fabric/patterns/<name>/system.md`: no Fabric binary or API key is needed, and the client
+may ask you to approve each request. Otherwise, with Fabric installed, it runs locally as before.
+Pass `backend: "fabric"` or `backend: "sampling"` to force one. With neither available, the tool
+returns an error naming both options; a chosen backend that fails reports its own error.
 ```
 "Analyze this video with the extract_wisdom pattern"
 "Summarize all videos in my 'To Review' playlist"

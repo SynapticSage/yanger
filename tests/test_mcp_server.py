@@ -837,8 +837,9 @@ class TestFabricIntegration:
         assert "Summary" in result["result"]
 
     @pytest.mark.asyncio
-    async def test_list_fabric_patterns_not_installed(self, mcp_server):
-        """Should handle case when Fabric is not installed."""
+    async def test_list_fabric_patterns_not_installed(self, mcp_server, tmp_path, monkeypatch):
+        """Should handle case when Fabric is not installed (and no pattern prompts on disk)."""
+        monkeypatch.setattr("yanger.mcp_server._fabric_patterns_dir", lambda: tmp_path / "none")
         with patch("shutil.which", return_value=None):
             result = await mcp_server._list_fabric_patterns({})
 
