@@ -928,8 +928,10 @@ class PersistentCache:
             query = """
                 SELECT DISTINCT video_id 
                 FROM virtual_videos 
-                WHERE (title IS NULL OR title = '')
+                WHERE (title IS NULL OR title = '' OR metadata_fetched_at IS NULL)
             """
+            # metadata_fetched_at too: a JSON-history import arrives titled but without
+            # description / thumbnail / duration (and maybe a locale-prefixed title).
             params = []
             
             if playlist_id:
